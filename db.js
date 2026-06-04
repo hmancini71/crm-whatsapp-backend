@@ -91,12 +91,12 @@ db.serialize(() => {
   db.get("SELECT COUNT(*) as count FROM stages", (err, row) => {
     if (row && row.count === 0) {
       const initialStages = [
-        ["novo", "Novo Lead", "#64748b"],
-        ["contato", "Em Contato", "#0ea5e9"],
-        ["qualificado", "Qualificado", "#8b5cf6"],
-        ["proposta", "Proposta Enviada", "#f59e0b"],
-        ["negociacao", "Negociação", "#ec4899"],
-        ["fechado", "Fechado / Ganho", "#16a34a"]
+        ["novo",           "Novo Lead",                "#64748b"],
+        ["tratamento",     "Tratamento Inicial",       "#0ea5e9"],
+        ["qualificado",    "Qualificado",              "#8b5cf6"],
+        ["proposta",       "Proposta Enviada",         "#f59e0b"],
+        ["followup",       "Follow Up de Pagamento",   "#ec4899"],
+        ["fechado",        "Contrato Fechado",         "#16a34a"]
       ];
       const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");
       initialStages.forEach(s => stmt.run(s));
@@ -121,18 +121,18 @@ db.serialize(() => {
   db.get("SELECT COUNT(*) as count FROM leads", (err, row) => {
     if (row && row.count === 0) {
       const initialLeads = [
-        ["l7", "Beatriz Rocha", "BR Moda", "+55 47 99988-7766", "bia@brmoda.com", 2800, "novo", "Facebook Ads", "wa2", "Rafael Andrade", JSON.stringify(["Frio"]), "2026-06-02"],
-        ["l1", "Mariana Costa", "Boutique Bella", "+55 12 98765-4321", "mariana@bella.com", 4500, "contato", "Venda", "wa1", "Rafael Andrade", JSON.stringify(["Quente"]), "2026-06-01"],
-        ["l8", "Gustavo Nunes", "GN Tech", "+55 11 98877-2211", "gustavo@gntech.com", 21000, "contato", "LinkedIn", "wa3", "Rafael Andrade", JSON.stringify(["Morno"]), "2026-05-30"],
-        ["l2", "João Pereira", "JP Construções", "+55 11 91234-5678", "joao@jpconstrucoes.com", 12000, "novo", "Instagram", "wa3", "Rafael Andrade", JSON.stringify(["Morno"]), "2026-05-28"],
-        ["l9", "Larissa Dias", "LD Beauty", "+55 21 91122-3344", "larissa@ldbeauty.com", 5400, "qualificado", "Venda", "wa1", "Rafael Andrade", JSON.stringify(["Quente"]), "2026-05-27"],
-        ["l3", "Fernanda Lima", "Studio FL", "+55 21 99876-1122", "fe@studiofl.com", 3200, "qualificado", "Google Ads", "wa1", "Rafael Andrade", JSON.stringify(["Quente"]), "2026-05-25"],
-        ["l10", "Eduardo Ramos", "ER Logística", "+55 19 99777-8899", "edu@erlog.com", 9900, "proposta", "Indicação", "wa2", "Rafael Andrade", JSON.stringify(["Morno"]), "2026-05-22"],
-        ["l4", "Carlos Mendes", "Mendes Auto", "+55 31 98123-9988", "carlos@mendesauto.com", 8800, "proposta", "Indicação", "wa3", "Rafael Andrade", JSON.stringify(["Quente"]), "2026-05-20"],
-        ["l12", "Felipe Barros", "FB Fitness", "+55 85 99654-1230", "felipe@fbfitness.com", 7300, "negociacao", "Google Ads", "wa1", "Rafael Andrade", JSON.stringify(["Quente"]), "2026-05-19"],
-        ["l5", "Patrício Souza", "PS Eventos", "+55 12 99012-3344", "patricia@pseventos.com", 15500, "negociacao", "Venda", "wa3", "Rafael Andrade", JSON.stringify(["Quente"]), "2026-05-18"],
-        ["l6", "Ricardo Alves", "Alves & Cia", "+55 12 98456-7788", "ricardo@alves.com", 6200, "fechado", "Site", "wa1", "Rafael Andrade", JSON.stringify(["Ganho"]), "2026-05-10"],
-        ["l11", "Aline Martins", "AM Doces", "+55 12 98321-4567", "aline@amdoces.com", 1800, "fechado", "Venda", "wa3", "Rafael Andrade", JSON.stringify(["Ganho"]), "2026-05-05"]
+        ["l7", "Beatriz Rocha",  "BR Moda",        "+55 47 99988-7766", "bia@brmoda.com",      2800,  "novo",       "Facebook Ads", "wa2", "Rafael Andrade", JSON.stringify(["A01 - 1 vista americana B1B2"]), "2026-06-02"],
+        ["l1", "Mariana Costa",  "Boutique Bella",  "+55 12 98765-4321", "mariana@bella.com",  4500,  "tratamento", "Venda",        "wa1", "Rafael Andrade", JSON.stringify(["A02 - renov vista amer B1B2 -reprov"]), "2026-06-01"],
+        ["l8", "Gustavo Nunes",  "GN Tech",         "+55 11 98877-2211", "gustavo@gntech.com", 21000, "tratamento", "LinkedIn",     "wa3", "Rafael Andrade", JSON.stringify(["A18 - vista EB2"]), "2026-05-30"],
+        ["l2", "João Pereira",   "JP Construções",  "+55 11 91234-5678", "joao@jpconstrucoes.com", 12000, "novo", "Instagram", "wa3", "Rafael Andrade", JSON.stringify(["A03 - renov vista amer B1B2 +reprov"]), "2026-05-28"],
+        ["l9", "Larissa Dias",   "LD Beauty",       "+55 21 91122-3344", "larissa@ldbeauty.com", 5400, "qualificado", "Venda",      "wa1", "Rafael Andrade", JSON.stringify(["P05 - vista português D7"]), "2026-05-27"],
+        ["l3", "Fernanda Lima",  "Studio FL",       "+55 21 99876-1122", "fe@studiofl.com",    3200,  "qualificado", "Google Ads", "wa1", "Rafael Andrade", JSON.stringify(["C02 - vista canadense Tur"]), "2026-05-25"],
+        ["l10","Eduardo Ramos",  "ER Logística",    "+55 19 99777-8899", "edu@erlog.com",      9900,  "proposta",   "Indicação",    "wa2", "Rafael Andrade", JSON.stringify(["A20 - green card"]), "2026-05-22"],
+        ["l4", "Carlos Mendes",  "Mendes Auto",     "+55 31 98123-9988", "carlos@mendesauto.com", 8800, "proposta", "Indicação",   "wa3", "Rafael Andrade", JSON.stringify(["A07 - vista americana F1 e/ou F2"]), "2026-05-20"],
+        ["l12","Felipe Barros",  "FB Fitness",      "+55 85 99654-1230", "felipe@fbfitness.com", 7300, "followup",  "Google Ads",   "wa1", "Rafael Andrade", JSON.stringify(["PA - passaporte"]), "2026-05-19"],
+        ["l5", "Patrício Souza", "PS Eventos",      "+55 12 99012-3344", "patricia@pseventos.com", 15500, "followup", "Venda",     "wa3", "Rafael Andrade", JSON.stringify(["A14 - Vista L1/L2"]), "2026-05-18"],
+        ["l6", "Ricardo Alves",  "Alves & Cia",     "+55 12 98456-7788", "ricardo@alves.com",  6200,  "fechado",    "Site",         "wa1", "Rafael Andrade", JSON.stringify(["A28 - EB2NIW"]), "2026-05-10"],
+        ["l11","Aline Martins",  "AM Doces",        "+55 12 98321-4567", "aline@amdoces.com",  1800,  "fechado",    "Venda",        "wa3", "Rafael Andrade", JSON.stringify(["A22 - ESTA"]), "2026-05-05"]
       ];
       const stmt = db.prepare("INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       initialLeads.forEach(l => stmt.run(l));
@@ -179,6 +179,54 @@ db.serialize(() => {
           console.log("Migration: added 'comments' column to leads table.");
         }
       });
+    }
+  });
+
+  // Safe migration: add 'priority' column to leads if it doesn't exist yet
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'priority')) {
+      db.run("ALTER TABLE leads ADD COLUMN priority TEXT DEFAULT ''", (alterErr) => {
+        if (alterErr) {
+          console.error("Failed to add priority column to leads:", alterErr);
+        } else {
+          console.log("Migration: added 'priority' column to leads table.");
+        }
+      });
+    }
+  });
+
+  // Safe migration: add 'lastClientReply' column to leads if it doesn't exist yet
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'lastClientReply')) {
+      db.run("ALTER TABLE leads ADD COLUMN lastClientReply TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) {
+          console.error("Failed to add lastClientReply column to leads:", alterErr);
+        } else {
+          console.log("Migration: added 'lastClientReply' column to leads table.");
+        }
+      });
+    }
+  });
+
+  // Safe migration: update stages to new pipeline if old stages exist
+  db.get("SELECT id FROM stages WHERE id = 'contato'", (err, row) => {
+    if (row) {
+      console.log("Migration: updating stages to new pipeline phases...");
+      db.run("DELETE FROM stages");
+      const newStages = [
+        ["novo",       "Novo Lead",              "#64748b"],
+        ["tratamento", "Tratamento Inicial",     "#0ea5e9"],
+        ["qualificado","Qualificado",            "#8b5cf6"],
+        ["proposta",   "Proposta Enviada",       "#f59e0b"],
+        ["followup",   "Follow Up de Pagamento", "#ec4899"],
+        ["fechado",    "Contrato Fechado",       "#16a34a"]
+      ];
+      const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");
+      newStages.forEach(s => stmt.run(s));
+      stmt.finalize();
+      // Migrate existing leads: contato -> tratamento, negociacao -> followup
+      db.run("UPDATE leads SET stage = 'tratamento' WHERE stage = 'contato'");
+      db.run("UPDATE leads SET stage = 'followup' WHERE stage = 'negociacao'");
     }
   });
 

@@ -239,6 +239,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           }
         } else {
           console.log(`[WhatsApp ${id}] Received message from existing lead: ${lead.name}`);
+          // Stamp lastClientReply to track when client last responded
+          await runQuery("UPDATE leads SET lastClientReply = ? WHERE id = ?", [new Date().toISOString(), lead.id]);
         }
       }
     } catch (err) {
