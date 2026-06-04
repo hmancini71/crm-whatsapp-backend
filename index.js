@@ -3,14 +3,18 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const fs = require('fs');
+const path = require('path');
 const { runQuery, getRow, allRows } = require('./db');
-const { 
-  connectWhatsApp, 
-  disconnectWhatsApp, 
-  sendWhatsAppMessage, 
+const {
+  connectWhatsApp,
+  disconnectWhatsApp,
+  sendWhatsAppMessage,
+  sendWhatsAppAudio,
   initSessions,
   sessionQrs,
-  sessions
+  sessions,
+  MEDIA_DIR
 } = require('./whatsapp');
 
 // Redirect console logs to an in-memory buffer
@@ -48,7 +52,7 @@ const PORT = process.env.PORT || 5000;
 const JWT_SECRET = 'leadsdpi_secret_key_123!';
 
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '30mb' }));
 
 // Health check routes
 app.get('/', (req, res) => {
@@ -388,7 +392,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     const detailedConvs = [];
     for (const c of convs) {
       const lastMsg = await getRow(
-        "SELECT id, \`from\`, text, time FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1",
+        "SELECT id, \`from\`, text, time, type FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1",
         [c.id]
       );
       detailedConvs.push({
@@ -414,7 +418,7 @@ app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
     }
 
     const messages = await allRows(
-      "SELECT id, \`from\`, text, time FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
+      "SELECT id, \`from\`, text, time, type FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
       [id]
     );
 
@@ -476,6 +480,107 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     res.json(messageObj);
   } catch (err) {
     console.error("Error sending message:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9b. Conversations Routes: Send Voice Note (audio, base64 in body)
+app.post('/api/conversations/:id/audio', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { audio, mimetype } = req.body;
+  if (!audio) return res.status(400).json({ error: "Áudio é obrigatório" });
+
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
+
+    const buffer = Buffer.from(audio, 'base64');
+    const accountId = convo.account;
+    const isConnected = sessions[accountId] && sessions[accountId].ws.isOpen;
+
+    let messageObj;
+    if (isConnected) {
+      messageObj = await sendWhatsAppAudio(accountId, id, buffer);
+    } else {
+      // Offline fallback: store locally so it still appears in the CRM
+      const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
+      const ext = (mimetype && mimetype.includes('ogg')) ? '.ogg' : ((mimetype && mimetype.includes('mp4')) ? '.mp4' : '.webm');
+      const mediaPath = path.join(MEDIA_DIR, msgId + ext);
+      try { fs.writeFileSync(mediaPath, buffer); } catch (e) {}
+      await runQuery(
+        "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [msgId, id, 'me', '[Mensagem de voz]', timeStr, Date.now(), 'audio', mediaPath]
+      );
+      await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
+      messageObj = { id: msgId, from: 'me', text: '[Mensagem de voz]', time: timeStr, type: 'audio' };
+    }
+    res.json(messageObj);
+  } catch (err) {
+    console.error("Error sending audio:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9c. Media Routes: Serve a message's audio/media file.
+// Auth via Authorization header OR ?token= (needed so <audio src> can load it).
+app.get('/api/media/:msgId', async (req, res) => {
+  const token = (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]) || req.query.token;
+  if (!token) return res.status(401).json({ detail: "Não autenticado" });
+  try { jwt.verify(token, JWT_SECRET); }
+  catch (e) { return res.status(403).json({ detail: "Token inválido" }); }
+
+  try {
+    const msg = await getRow("SELECT mediaPath FROM messages WHERE id = ?", [req.params.msgId]);
+    if (!msg || !msg.mediaPath || !fs.existsSync(msg.mediaPath)) {
+      return res.status(404).json({ error: "Mídia não encontrada" });
+    }
+    const ext = path.extname(msg.mediaPath).toLowerCase();
+    const ctype = ext === '.ogg' ? 'audio/ogg'
+      : ext === '.webm' ? 'audio/webm'
+      : (ext === '.mp4' || ext === '.m4a') ? 'audio/mp4'
+      : 'application/octet-stream';
+    res.setHeader('Content-Type', ctype);
+    fs.createReadStream(msg.mediaPath).pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9d. Leads Routes: Find or create a conversation for a lead (open chat from lead modal)
+app.post('/api/leads/:id/open-conversation', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
+    if (!lead.phone) return res.status(400).json({ error: "Lead sem telefone" });
+
+    const digits = lead.phone.replace(/\D/g, '');
+    const tail = digits.slice(-8);
+    let convo = null;
+    if (tail.length >= 8) {
+      convo = await getRow(
+        "SELECT * FROM conversations WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?",
+        [`%${tail}%`]
+      );
+    }
+
+    if (!convo) {
+      const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
+      const avatar = (lead.name || '?').slice(0, 2).toUpperCase();
+      const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      await runQuery(
+        "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [convoId, lead.account || 'wa1', lead.name || tail, lead.phone, avatar, timeStr, 0, 0, 0]
+      );
+      convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
+    } else if (convo.archived === 1) {
+      await runQuery("UPDATE conversations SET archived = 0 WHERE id = ?", [convo.id]);
+    }
+
+    res.json({ ...convo, online: Boolean(convo.online) });
+  } catch (err) {
+    console.error("Error opening conversation:", err);
     res.status(500).json({ error: err.message });
   }
 });

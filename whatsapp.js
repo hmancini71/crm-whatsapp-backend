@@ -1,17 +1,60 @@
-const { 
-  default: makeWASocket, 
-  useMultiFileAuthState, 
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  downloadMediaMessage
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
 const QRCode = require('qrcode');
+const ffmpegPath = require('ffmpeg-static');
+const ffmpeg = require('fluent-ffmpeg');
 const { runQuery, getRow, allRows } = require('./db');
+
+if (ffmpegPath) {
+  try { ffmpeg.setFfmpegPath(ffmpegPath); } catch (e) { console.error('ffmpeg path set failed', e); }
+}
 
 const sessions = {};
 const sessionQrs = {};
+
+// Directory where voice notes / media are stored (ephemeral on Render)
+const MEDIA_DIR = path.join(__dirname, 'media');
+try { fs.mkdirSync(MEDIA_DIR, { recursive: true }); } catch (e) { /* ignore */ }
+
+// Transcode any browser-recorded audio (webm/ogg/mp4) into Opus/OGG for WhatsApp PTT
+function transcodeToOpusOgg(inputBuffer) {
+  return new Promise((resolve, reject) => {
+    const stamp = Date.now() + '_' + Math.random().toString(36).slice(2);
+    const tmpIn = path.join(MEDIA_DIR, 'in_' + stamp);
+    const tmpOut = path.join(MEDIA_DIR, 'out_' + stamp + '.ogg');
+    try { fs.writeFileSync(tmpIn, inputBuffer); } catch (e) { return reject(e); }
+    ffmpeg(tmpIn)
+      .audioCodec('libopus')
+      .audioBitrate('32k')
+      .audioChannels(1)
+      .audioFrequency(48000)
+      .format('ogg')
+      .on('end', () => {
+        try {
+          const buf = fs.readFileSync(tmpOut);
+          resolve(buf);
+        } catch (e) { reject(e); }
+        finally {
+          try { fs.unlinkSync(tmpIn); } catch (e) {}
+          try { fs.unlinkSync(tmpOut); } catch (e) {}
+        }
+      })
+      .on('error', (err) => {
+        try { fs.unlinkSync(tmpIn); } catch (e) {}
+        try { fs.unlinkSync(tmpOut); } catch (e) {}
+        reject(err);
+      })
+      .save(tmpOut);
+  });
+}
 
 const customLogger = {
   level: 'debug',
@@ -173,7 +216,23 @@ async function connectWhatsApp(id, isReconnect = false) {
         }
 
         const phone = fromJid.endsWith('@lid') ? fromJid : '+' + fromJid.split('@')[0];
-        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "[Mídia/Outro]";
+        const incomingMsgId = msg.key.id || ('m_' + Math.random().toString(36).substr(2, 9));
+        let text, incomingType = 'text', incomingMediaPath = null;
+        if (msg.message?.conversation || msg.message?.extendedTextMessage?.text) {
+          text = msg.message.conversation || msg.message.extendedTextMessage.text;
+        } else if (msg.message?.audioMessage) {
+          incomingType = 'audio';
+          text = '[Mensagem de voz]';
+          try {
+            const audioBuf = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+            incomingMediaPath = path.join(MEDIA_DIR, incomingMsgId + '.ogg');
+            fs.writeFileSync(incomingMediaPath, audioBuf);
+          } catch (e) {
+            console.error(`[WhatsApp ${id}] Falha ao baixar áudio recebido:`, e);
+          }
+        } else {
+          text = '[Mídia/Outro]';
+        }
         const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const name = msg.pushName || (fromJid.endsWith('@lid') ? 'Usuário WhatsApp' : phone);
 
@@ -203,11 +262,11 @@ async function connectWhatsApp(id, isReconnect = false) {
         }
 
         // Add message
-        const msgId = msg.key.id || 'm_' + Math.random().toString(36).substr(2, 9);
-        console.log(`[WhatsApp ${id}] Saving message to DB: msgId=${msgId}, convoId=${convoId}`);
+        const msgId = incomingMsgId;
+        console.log(`[WhatsApp ${id}] Saving message to DB: msgId=${msgId}, convoId=${convoId}, type=${incomingType}`);
         await runQuery(
-          "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-          [msgId, convoId, 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now()]
+          "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [msgId, convoId, 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath]
         );
 
         // Check if phone matches any lead (active OR archived); if archived, restore it
@@ -324,6 +383,44 @@ async function sendWhatsAppMessage(accountId, convoId, text) {
   };
 }
 
+// Send a voice note (PTT). inputBuffer = raw audio bytes from the browser recorder.
+async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
+  const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
+  if (!convo) throw new Error("Conversation not found");
+
+  const jid = convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`;
+
+  const sock = sessions[accountId];
+  if (!sock) {
+    throw new Error("WhatsApp account not connected");
+  }
+
+  // Convert the browser audio to Opus/OGG that WhatsApp accepts as a voice note
+  const oggBuffer = await transcodeToOpusOgg(inputBuffer);
+
+  const sent = await sock.sendMessage(jid, {
+    audio: oggBuffer,
+    ptt: true,
+    mimetype: 'audio/ogg; codecs=opus'
+  });
+
+  const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const msgId = (sent && sent.key && sent.key.id) || ('m_' + Math.random().toString(36).substr(2, 9));
+
+  // Persist the audio file so it can be replayed in the CRM
+  const mediaPath = path.join(MEDIA_DIR, msgId + '.ogg');
+  try { fs.writeFileSync(mediaPath, oggBuffer); } catch (e) { console.error('Falha ao salvar áudio enviado:', e); }
+
+  await runQuery(
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', '[Mensagem de voz]', timeStr, Date.now(), 'audio', mediaPath]
+  );
+
+  await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
+
+  return { id: msgId, from: 'me', text: '[Mensagem de voz]', time: timeStr, type: 'audio' };
+}
+
 // Auto reconnect active sessions on startup
 async function initSessions() {
   const connectedAccounts = await allRows("SELECT id FROM whatsapp_accounts WHERE status = 'connected'");
@@ -337,7 +434,9 @@ module.exports = {
   connectWhatsApp,
   disconnectWhatsApp,
   sendWhatsAppMessage,
+  sendWhatsAppAudio,
   initSessions,
   sessions,
-  sessionQrs
+  sessionQrs,
+  MEDIA_DIR
 };

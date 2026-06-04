@@ -230,6 +230,26 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: add 'type' column to messages (text | audio | image | other)
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'type')) {
+      db.run("ALTER TABLE messages ADD COLUMN type TEXT DEFAULT 'text'", (alterErr) => {
+        if (alterErr) console.error("Failed to add type column to messages:", alterErr);
+        else console.log("Migration: added 'type' column to messages table.");
+      });
+    }
+  });
+
+  // Safe migration: add 'mediaPath' column to messages (filesystem path for audio/media)
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'mediaPath')) {
+      db.run("ALTER TABLE messages ADD COLUMN mediaPath TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) console.error("Failed to add mediaPath column to messages:", alterErr);
+        else console.log("Migration: added 'mediaPath' column to messages table.");
+      });
+    }
+  });
+
   // Safe migration: add 'archived' column to conversations if it doesn't exist yet
   db.all("PRAGMA table_info(conversations)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'archived')) {
