@@ -197,7 +197,7 @@ async function connectWhatsApp(id, isReconnect = false) {
           console.log(`[WhatsApp ${id}] No conversation found. Creating new one with convoId=${convoId}`);
           const avatar = name.slice(0, 2).toUpperCase();
           await runQuery(
-            "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [convoId, id, name, phone, avatar, timeStr, 1, 0]
           );
         }
@@ -206,7 +206,7 @@ async function connectWhatsApp(id, isReconnect = false) {
         const msgId = msg.key.id || 'm_' + Math.random().toString(36).substr(2, 9);
         console.log(`[WhatsApp ${id}] Saving message to DB: msgId=${msgId}, convoId=${convoId}`);
         await runQuery(
-          "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
           [msgId, convoId, 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now()]
         );
 
@@ -222,7 +222,7 @@ async function connectWhatsApp(id, isReconnect = false) {
           }
           console.log(`[WhatsApp ${id}] No lead found for ${phone}. Creating new lead: leadId=${leadId}`);
           await runQuery(
-            "INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [leadId, name, "", formattedPhone, "", 0, "novo", "Venda", id, "Rafael Andrade", JSON.stringify([]), createdAt, 0]
           );
         } else if (lead.archived === 1) {
@@ -304,7 +304,7 @@ async function sendWhatsAppMessage(accountId, convoId, text) {
   
   // Insert into DB
   await runQuery(
-    "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
     [msgId, convoId, 'me', text, timeStr, Date.now()]
   );
 

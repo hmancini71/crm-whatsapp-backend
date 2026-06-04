@@ -134,7 +134,7 @@ db.serialize(() => {
         ["l6", "Ricardo Alves", "Alves & Cia", "+55 12 98456-7788", "ricardo@alves.com", 6200, "fechado", "Site", "wa1", "Rafael Andrade", JSON.stringify(["Ganho"]), "2026-05-10"],
         ["l11", "Aline Martins", "AM Doces", "+55 12 98321-4567", "aline@amdoces.com", 1800, "fechado", "Venda", "wa3", "Rafael Andrade", JSON.stringify(["Ganho"]), "2026-05-05"]
       ];
-      const stmt = db.prepare("INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      const stmt = db.prepare("INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       initialLeads.forEach(l => stmt.run(l));
       stmt.finalize();
     }
@@ -150,7 +150,7 @@ db.serialize(() => {
         ["c5", "wa3", "Gustavo Nunes", "+55 11 98877-2211", "GN", "Seg", 0, 0],
         ["c6", "wa3", "Carlos Mendes", "+55 31 98123-9988", "CM", "Seg", 2, 0]
       ];
-      const stmt = db.prepare("INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+      const stmt = db.prepare("INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       initialConvs.forEach(c => stmt.run(c));
       stmt.finalize();
     }

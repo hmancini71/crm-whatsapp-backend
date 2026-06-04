@@ -451,7 +451,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
       
       await runQuery(
-        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
         [msgId, id, 'me', text, timeStr, Date.now()]
       );
 
