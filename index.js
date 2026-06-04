@@ -1,0 +1,540 @@
+const express = require('express');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const { runQuery, getRow, allRows } = require('./db');
+const { 
+  connectWhatsApp, 
+  disconnectWhatsApp, 
+  sendWhatsAppMessage, 
+  initSessions,
+  sessionQrs,
+  sessions
+} = require('./whatsapp');
+
+// Redirect console logs to an in-memory buffer
+const logBuffer = [];
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+
+function addLog(level, args) {
+  const msg = args.map(a => {
+    if (a instanceof Error) return a.stack || a.message;
+    return typeof a === 'object' ? JSON.stringify(a) : String(a);
+  }).join(' ');
+  logBuffer.push(`[${level}] ${new Date().toISOString()} - ${msg}`);
+  if (logBuffer.length > 1000) logBuffer.shift();
+}
+
+console.log = (...args) => {
+  addLog('LOG', args);
+  originalLog.apply(console, args);
+};
+
+console.error = (...args) => {
+  addLog('ERROR', args);
+  originalError.apply(console, args);
+};
+
+console.warn = (...args) => {
+  addLog('WARN', args);
+  originalWarn.apply(console, args);
+};
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+const JWT_SECRET = 'leadsdpi_secret_key_123!';
+
+app.use(cors());
+app.use(bodyParser.json());
+
+// Health check routes
+app.get('/', (req, res) => {
+  res.json({ status: "ok", service: "leads-whatsapp-crm-backend" });
+});
+app.get('/api', (req, res) => {
+  res.json({ status: "ok", api: "v1" });
+});
+
+// Debug endpoints
+app.get('/api/debug/logs', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.send(logBuffer.join('\n'));
+});
+
+app.get('/api/debug/db-dump', async (req, res) => {
+  try {
+    const users = await allRows("SELECT id, email, name, role FROM users");
+    const accounts = await allRows("SELECT * FROM whatsapp_accounts");
+    const convs = await allRows("SELECT * FROM conversations");
+    const messages = await allRows("SELECT * FROM messages ORDER BY timestamp DESC LIMIT 50");
+    const leads = await allRows("SELECT * FROM leads LIMIT 10");
+    res.json({
+      users,
+      accounts,
+      convs,
+      messages,
+      leads
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Log requests
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  next();
+});
+
+// Authentication middleware
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ detail: "Não autenticado" });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ detail: "Token inválido ou expirado" });
+    }
+    req.user = user;
+    next();
+  });
+}
+
+// 1. Auth Route: Login
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email e senha são obrigatórios" });
+  }
+
+  try {
+    const user = await getRow("SELECT * FROM users WHERE email = ?", [email]);
+    if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+      return res.status(400).json({ error: "Credenciais inválidas" });
+    }
+
+    const tokenPayload = {
+      sub: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      avatar: user.avatar
+    };
+
+    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
+
+    res.json({
+      access_token: token,
+      token_type: "bearer",
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        avatar: user.avatar
+      }
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Erro interno no servidor" });
+  }
+});
+
+// 2. Auth Route: Me
+app.get('/api/auth/me', authenticateToken, (req, res) => {
+  res.json({
+    id: req.user.sub,
+    name: req.user.name,
+    email: req.user.email,
+    role: req.user.role,
+    avatar: req.user.avatar
+  });
+});
+
+// 3. Leads Routes: Get All (active only)
+app.get('/api/leads', authenticateToken, async (req, res) => {
+  try {
+    const leads = await allRows("SELECT * FROM leads WHERE archived = 0 ORDER BY createdAt DESC");
+    const parsedLeads = leads.map(l => ({
+      ...l,
+      tags: l.tags ? JSON.parse(l.tags) : []
+    }));
+    res.json(parsedLeads);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3b. Leads Routes: Get Archived
+app.get('/api/leads/archived', authenticateToken, async (req, res) => {
+  try {
+    const leads = await allRows("SELECT * FROM leads WHERE archived = 1 ORDER BY createdAt DESC");
+    const parsedLeads = leads.map(l => ({
+      ...l,
+      tags: l.tags ? JSON.parse(l.tags) : []
+    }));
+    res.json(parsedLeads);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3c. Leads Routes: Archive Lead (soft delete)
+app.patch('/api/leads/:id/archive', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
+
+    await runQuery("UPDATE leads SET archived = 1 WHERE id = ?", [id]);
+
+    // Also archive the associated conversation so it disappears from WhatsApp tab
+    const phone = lead.phone ? lead.phone.replace(/\D/g, '') : null;
+    if (phone) {
+      await runQuery("UPDATE conversations SET archived = 1 WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone, '+',''), ' ',''), '-',''), '(','') LIKE ?", [`%${phone.slice(-8)}%`]);
+    }
+
+    res.json({ success: true, id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3d. Leads Routes: Restore Lead
+app.patch('/api/leads/:id/restore', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
+
+    await runQuery("UPDATE leads SET archived = 0 WHERE id = ?", [id]);
+
+    // Restore the associated conversation
+    const phone = lead.phone ? lead.phone.replace(/\D/g, '') : null;
+    if (phone) {
+      await runQuery("UPDATE conversations SET archived = 0 WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone, '+',''), ' ',''), '-',''), '(','') LIKE ?", [`%${phone.slice(-8)}%`]);
+    }
+
+    const restored = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({
+      ...restored,
+      tags: restored.tags ? JSON.parse(restored.tags) : []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Leads Routes: Patch Stage
+app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { stage } = req.body;
+  
+  if (!stage) {
+    return res.status(400).json({ error: "Estágio é obrigatório" });
+  }
+
+  try {
+    const result = await runQuery("UPDATE leads SET stage = ? WHERE id = ?", [stage, id]);
+    if (result.changes === 0) {
+      return res.status(404).json({ error: "Lead não encontrado" });
+    }
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({
+      ...lead,
+      tags: lead.tags ? JSON.parse(lead.tags) : []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4b. Leads Routes: Patch Lead Details
+app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { value, tags, comments } = req.body;
+  
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
+
+    let updates = [];
+    let params = [];
+
+    if (value !== undefined) {
+      updates.push("value = ?");
+      params.push(value);
+    }
+    if (tags !== undefined) {
+      updates.push("tags = ?");
+      params.push(JSON.stringify(tags));
+    }
+    if (comments !== undefined) {
+      updates.push("comments = ?");
+      params.push(comments);
+    }
+
+    if (updates.length > 0) {
+      params.push(id);
+      await runQuery(`UPDATE leads SET ${updates.join(", ")} WHERE id = ?`, params);
+    }
+
+    const updatedLead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({
+      ...updatedLead,
+      tags: updatedLead.tags ? JSON.parse(updatedLead.tags) : []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Stages Routes: Get All
+app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
+  try {
+    const stages = await allRows("SELECT * FROM stages");
+    res.json(stages);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. Dashboard Route (counts only active/non-archived leads)
+app.get('/api/dashboard', authenticateToken, async (req, res) => {
+  try {
+    const totalLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE archived = 0");
+    const totalConvs = await getRow("SELECT COUNT(*) as count FROM conversations WHERE (archived IS NULL OR archived = 0)");
+    
+    // Revenue sum of 'fechado' leads (non-archived)
+    const revenueRow = await getRow("SELECT SUM(value) as total FROM leads WHERE stage = 'fechado' AND archived = 0");
+    const totalRevenue = revenueRow.total || 0;
+
+    // Conversion rate: closed leads / total leads (non-archived)
+    const closedLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE stage = 'fechado' AND archived = 0");
+    const conversionRate = totalLeads.count > 0 ? ((closedLeads.count / totalLeads.count) * 100).toFixed(1) : 0;
+
+    // Source distribution (non-archived)
+    const sourceRows = await allRows("SELECT source, COUNT(*) as count FROM leads WHERE archived = 0 GROUP BY source");
+    const colors = ["#0d9488", "#7c3aed", "#2563eb", "#ec4899", "#f59e0b", "#16a34a"];
+    const leadsBySource = sourceRows.map((s, index) => ({
+      source: s.source,
+      count: s.count,
+      color: colors[index % colors.length]
+    }));
+
+    // WhatsApp accounts status
+    const whatsappAccounts = await allRows("SELECT id, label, number, color, status, unread FROM whatsapp_accounts");
+
+    res.json({
+      metrics: {
+        totalLeads: totalLeads.count,
+        leadsGrowth: 12.5,
+        conversations: totalConvs.count,
+        conversationsGrowth: 8.2,
+        conversionRate: parseFloat(conversionRate),
+        conversionGrowth: 3.1,
+        revenue: totalRevenue,
+        revenueGrowth: 18.7
+      },
+      leadsBySource,
+      weeklyLeads: [
+        {"day": "Seg", "value": 12},
+        {"day": "Ter", "value": 19},
+        {"day": "Qua", "value": 9},
+        {"day": "Qui", "value": 22},
+        {"day": "Sex", "value": 28},
+        {"day": "Sáb", "value": 14},
+        {"day": "Dom", "value": 7}
+      ],
+      recentActivity: [
+        {"id": "a1", "type": "lead", "text": "Novo lead Mariana Costa entrou via WhatsApp Comercial", "time": "há 5 min"},
+        {"id": "a2", "type": "deal", "text": "Patrício Souza avançou para Negociação", "time": "há 27 min"},
+        {"id": "a3", "type": "won", "text": "Negócio fechado com Ricardo Alves – R$ 6.200", "time": "há 2 h"}
+      ],
+      whatsappAccounts
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. Conversations Routes: Get List (exclude archived leads' conversations)
+app.get('/api/conversations', authenticateToken, async (req, res) => {
+  const { account } = req.query;
+  try {
+    let convs;
+    if (account && account !== 'all') {
+      convs = await allRows("SELECT * FROM conversations WHERE account = ? AND (archived IS NULL OR archived = 0)", [account]);
+    } else {
+      convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)");
+    }
+
+    // Attach last message for each conversation
+    const detailedConvs = [];
+    for (const c of convs) {
+      const lastMsg = await getRow(
+        "SELECT id, \`from\`, text, time FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1",
+        [c.id]
+      );
+      detailedConvs.push({
+        ...c,
+        online: Boolean(c.online),
+        lastMessage: lastMsg || null
+      });
+    }
+
+    res.json(detailedConvs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. Conversations Routes: Get Details (Messages list)
+app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) {
+      return res.status(404).json({ error: "Conversa não encontrada" });
+    }
+
+    const messages = await allRows(
+      "SELECT id, \`from\`, text, time FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
+      [id]
+    );
+
+    // Reset unread count
+    await runQuery("UPDATE conversations SET unread = 0 WHERE id = ?", [id]);
+
+    res.json({
+      ...convo,
+      online: Boolean(convo.online),
+      messages
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9. Conversations Routes: Send Message
+app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { text } = req.body;
+  if (!text) {
+    return res.status(400).json({ error: "Texto é obrigatório" });
+  }
+
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) {
+      return res.status(404).json({ error: "Conversa não encontrada" });
+    }
+
+    const accountId = convo.account;
+    const isConnected = sessions[accountId] && sessions[accountId].ws.isOpen;
+
+    let messageObj;
+
+    if (isConnected) {
+      // Send real WhatsApp message
+      messageObj = await sendWhatsAppMessage(accountId, id, text);
+    } else {
+      // Offline fallback: Save message locally and mock it
+      const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
+      
+      await runQuery(
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+        [msgId, id, 'me', text, timeStr, Date.now()]
+      );
+
+      await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
+
+      messageObj = {
+        id: msgId,
+        from: 'me',
+        text,
+        time: timeStr
+      };
+    }
+
+    res.json(messageObj);
+  } catch (err) {
+    console.error("Error sending message:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 10. Channels Routes: Get Accounts list
+app.get('/api/whatsapp/accounts', authenticateToken, async (req, res) => {
+  try {
+    const accounts = await allRows("SELECT * FROM whatsapp_accounts");
+    res.json(accounts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 11. Channels Routes: Trigger Connect
+app.post('/api/whatsapp/accounts/:id/connect', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const statusInfo = await connectWhatsApp(id);
+    res.json(statusInfo);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 12. Channels Routes: Status Check
+app.get('/api/whatsapp/accounts/:id/status', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const sock = sessions[id];
+    let status = 'disconnected';
+    if (sock) {
+      status = sock.ws.isOpen ? 'connected' : 'connecting';
+    } else {
+      // check database status
+      const account = await getRow("SELECT status FROM whatsapp_accounts WHERE id = ?", [id]);
+      if (account) status = account.status;
+    }
+
+    res.json({
+      id,
+      status,
+      qr: sessionQrs[id] || null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 13. Channels Routes: Disconnect
+app.post('/api/whatsapp/accounts/:id/disconnect', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const statusInfo = await disconnectWhatsApp(id);
+    res.json(statusInfo);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Start Express Server
+app.listen(PORT, async () => {
+  console.log(`CRM WhatsApp Backend Server running on http://localhost:${PORT}`);
+  // Autostart active sessions
+  try {
+    await initSessions();
+  } catch (err) {
+    console.error("Error initializing sessions:", err);
+  }
+});
