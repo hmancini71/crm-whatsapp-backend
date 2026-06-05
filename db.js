@@ -73,6 +73,18 @@ db.serialize(() => {
     connect_at TEXT
   )`);
 
+  // 7. Email Accounts Table (SMTP)
+  db.run(`CREATE TABLE IF NOT EXISTS email_accounts (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE,
+    host TEXT,
+    port INTEGER,
+    secure INTEGER,
+    password TEXT,
+    status TEXT,
+    connected_at TEXT
+  )`);
+
   // Check if tables are empty, and insert initial data
   db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
     if (row && row.count === 0) {

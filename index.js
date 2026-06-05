@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
+const nodemailer = require('nodemailer');
 const { runQuery, getRow, allRows } = require('./db');
 const {
   connectWhatsApp,
@@ -636,6 +637,65 @@ app.post('/api/whatsapp/accounts/:id/disconnect', authenticateToken, async (req,
   try {
     const statusInfo = await disconnectWhatsApp(id);
     res.json(statusInfo);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 14. Email Routes: Connect (verify SMTP and save)
+app.post('/api/email/connect', authenticateToken, async (req, res) => {
+  const { email, password, host, port, secure } = req.body;
+  if (!email || !password || !host) {
+    return res.status(400).json({ error: "E-mail, senha e servidor SMTP sao obrigatorios" });
+  }
+  const p = parseInt(port, 10) || (secure ? 465 : 587);
+  try {
+    const transporter = nodemailer.createTransport({
+      host,
+      port: p,
+      secure: !!secure,
+      auth: { user: email, pass: password },
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000
+    });
+    await transporter.verify();
+
+    const existing = await getRow("SELECT id FROM email_accounts WHERE email = ?", [email]);
+    const now = new Date().toISOString();
+    if (existing) {
+      await runQuery(
+        "UPDATE email_accounts SET host=?, port=?, secure=?, password=?, status='connected', connected_at=? WHERE email=?",
+        [host, p, secure ? 1 : 0, password, now, email]
+      );
+    } else {
+      const id = 'em_' + Math.random().toString(36).substr(2, 9);
+      await runQuery(
+        "INSERT INTO email_accounts (id, email, host, port, secure, password, status, connected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [id, email, host, p, secure ? 1 : 0, password, 'connected', now]
+      );
+    }
+    res.json({ success: true, email, host, port: p });
+  } catch (err) {
+    console.error("Email connect error:", err && err.message);
+    res.status(400).json({ error: (err && err.message) || "Falha na conexao SMTP" });
+  }
+});
+
+// 15. Email Routes: Status (latest connected account, no password)
+app.get('/api/email/status', authenticateToken, async (req, res) => {
+  try {
+    const acc = await getRow(
+      "SELECT email, host, port, secure, status, connected_at FROM email_accounts ORDER BY connected_at DESC LIMIT 1"
+    );
+    if (!acc) return res.json({ connected: false });
+    res.json({
+      connected: acc.status === 'connected',
+      email: acc.email,
+      host: acc.host,
+      port: acc.port,
+      secure: Boolean(acc.secure)
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
