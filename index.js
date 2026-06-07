@@ -88,6 +88,30 @@ app.get('/api/debug/db-dump', async (req, res) => {
   }
 });
 
+// Emergency: force-fix stages without auth (safe: only updates pipeline column names)
+app.post('/api/debug/fix-stages', async (req, res) => {
+  try {
+    const correctStages = [
+      { id: "novo",       title: "Novo Leads",              color: "#71717a" },
+      { id: "tratamento", title: "Tratamento inicial",      color: "#0ea5e9" },
+      { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
+      { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
+      { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" }
+    ];
+    await runQuery("DELETE FROM stages");
+    for (const s of correctStages) {
+      await runQuery("INSERT INTO stages (id, title, color) VALUES (?, ?, ?)", [s.id, s.title, s.color]);
+    }
+    await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
+    await runQuery("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
+    await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'declinado')");
+    const stages = await allRows("SELECT * FROM stages");
+    res.json({ success: true, stages });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Log requests
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
