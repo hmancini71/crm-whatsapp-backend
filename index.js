@@ -817,6 +817,17 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
   }
 });
 
+// 18b. Email Routes: Disconnect
+app.post('/api/email/disconnect', authenticateToken, async (req, res) => {
+  try {
+    await runQuery("UPDATE email_accounts SET status = 'disconnected'");
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Email disconnect error:", err && err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 19. Leads Routes: Create lead from an email sender
 app.post('/api/leads/from-email', authenticateToken, async (req, res) => {
   const { name, email } = req.body;
