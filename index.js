@@ -264,7 +264,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { value, tags, comments, priority, lastClientReply } = req.body;
+  const { name, phone, value, tags, comments, priority, lastClientReply } = req.body;
   
   try {
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
@@ -273,6 +273,14 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
     let updates = [];
     let params = [];
 
+    if (name !== undefined) {
+      updates.push("name = ?");
+      params.push(name);
+    }
+    if (phone !== undefined) {
+      updates.push("phone = ?");
+      params.push(phone);
+    }
     if (value !== undefined) {
       updates.push("value = ?");
       params.push(value);
