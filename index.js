@@ -701,6 +701,145 @@ app.get('/api/email/status', authenticateToken, async (req, res) => {
   }
 });
 
+// 16. Email Routes: List inbox messages (IMAP)
+app.get('/api/email/messages', authenticateToken, async (req, res) => {
+  try {
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    if (!acc) return res.status(400).json({ error: "Nenhum e-mail conectado" });
+
+    let ImapFlow;
+    try { ImapFlow = require('imapflow').ImapFlow; }
+    catch (e) { return res.status(500).json({ error: "Biblioteca IMAP nao instalada no servidor" }); }
+
+    const client = new ImapFlow({
+      host: acc.host,
+      port: 993,
+      secure: true,
+      auth: { user: acc.email, pass: acc.password },
+      logger: false,
+      tls: { rejectUnauthorized: false }
+    });
+
+    const out = [];
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX');
+    try {
+      const total = (client.mailbox && client.mailbox.exists) || 0;
+      if (total > 0) {
+        const start = Math.max(1, total - 29);
+        for await (const msg of client.fetch(start + ':*', { envelope: true, internalDate: true })) {
+          const f = msg.envelope && msg.envelope.from && msg.envelope.from[0];
+          out.push({
+            uid: msg.uid,
+            subject: (msg.envelope && msg.envelope.subject) || '(sem assunto)',
+            from: f ? (f.name || f.address) : '',
+            fromAddress: f ? f.address : '',
+            date: msg.internalDate || (msg.envelope && msg.envelope.date) || null
+          });
+        }
+      }
+    } finally {
+      lock.release();
+    }
+    try { await client.logout(); } catch (e) {}
+    out.reverse();
+    res.json(out);
+  } catch (err) {
+    console.error("IMAP error:", err && err.message);
+    res.status(500).json({ error: (err && err.message) || "Falha ao ler e-mails" });
+  }
+});
+
+// 17. Email Routes: Read full message body (IMAP + parse)
+app.get('/api/email/message/:uid', authenticateToken, async (req, res) => {
+  try {
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    if (!acc) return res.status(400).json({ error: "Nenhum e-mail conectado" });
+    let ImapFlow, simpleParser;
+    try { ImapFlow = require('imapflow').ImapFlow; simpleParser = require('mailparser').simpleParser; }
+    catch (e) { return res.status(500).json({ error: "Bibliotecas de e-mail nao instaladas" }); }
+
+    const client = new ImapFlow({
+      host: acc.host, port: 993, secure: true,
+      auth: { user: acc.email, pass: acc.password },
+      logger: false, tls: { rejectUnauthorized: false }
+    });
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX');
+    let parsed = null;
+    try {
+      const msg = await client.fetchOne(String(req.params.uid), { source: true }, { uid: true });
+      if (msg && msg.source) {
+        const p = await simpleParser(msg.source);
+        parsed = {
+          subject: p.subject || '(sem assunto)',
+          from: p.from ? p.from.text : '',
+          fromAddress: (p.from && p.from.value && p.from.value[0]) ? p.from.value[0].address : '',
+          to: p.to ? p.to.text : '',
+          toAddresses: (p.to && p.to.value) ? p.to.value.map(v => v.address).filter(Boolean) : [],
+          cc: p.cc ? p.cc.text : '',
+          ccAddresses: (p.cc && p.cc.value) ? p.cc.value.map(v => v.address).filter(Boolean) : [],
+          date: p.date || null,
+          html: p.html || null,
+          text: p.text || ''
+        };
+      }
+    } finally { lock.release(); }
+    try { await client.logout(); } catch (e) {}
+    if (!parsed) return res.status(404).json({ error: "E-mail nao encontrado" });
+    res.json(parsed);
+  } catch (err) {
+    console.error("IMAP read error:", err && err.message);
+    res.status(500).json({ error: (err && err.message) || "Falha ao abrir e-mail" });
+  }
+});
+
+// 18. Email Routes: Send (reply/forward/compose) via SMTP
+app.post('/api/email/send', authenticateToken, async (req, res) => {
+  const { to, cc, subject, text, html } = req.body;
+  if (!to || !subject) return res.status(400).json({ error: "Destinatario e assunto sao obrigatorios" });
+  try {
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    if (!acc) return res.status(400).json({ error: "Nenhum e-mail conectado" });
+    const transporter = nodemailer.createTransport({
+      host: acc.host, port: acc.port, secure: !!acc.secure,
+      auth: { user: acc.email, pass: acc.password },
+      tls: { rejectUnauthorized: false }
+    });
+    await transporter.sendMail({
+      from: acc.email, to, cc: cc || undefined, subject,
+      text: text || undefined, html: html || undefined
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Email send error:", err && err.message);
+    res.status(500).json({ error: (err && err.message) || "Falha ao enviar e-mail" });
+  }
+});
+
+// 19. Leads Routes: Create lead from an email sender
+app.post('/api/leads/from-email', authenticateToken, async (req, res) => {
+  const { name, email } = req.body;
+  if (!email) return res.status(400).json({ error: "E-mail do remetente e obrigatorio" });
+  try {
+    const existing = await getRow("SELECT * FROM leads WHERE email = ? AND archived = 0", [email]);
+    if (existing) {
+      return res.json({ ...existing, tags: existing.tags ? JSON.parse(existing.tags) : [], existed: true });
+    }
+    const id = 'l_' + Math.random().toString(36).substr(2, 9);
+    const createdAt = new Date().toISOString().slice(0, 10);
+    await runQuery(
+      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, name || email, "", "", email, 0, "novo", "Email", "", "Henry Mancini", JSON.stringify([]), createdAt, 0]
+    );
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({ ...lead, tags: [], created: true });
+  } catch (err) {
+    console.error("from-email error:", err && err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Start Express Server
 app.listen(PORT, async () => {
   console.log(`CRM WhatsApp Backend Server running on http://localhost:${PORT}`);

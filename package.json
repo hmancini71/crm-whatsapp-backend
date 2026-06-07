@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
+    "@whiskeysockets/baileys": "7.0.0-rc13",
     "bcryptjs": "^2.4.3",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
@@ -18,6 +18,8 @@
     "nodemailer": "^6.9.14",
     "pino": "^9.1.0",
     "qrcode": "^1.5.3",
-    "sqlite3": "^5.1.7"
+    "sqlite3": "^5.1.7",
+    "imapflow": "^1.0.164",
+    "mailparser": "^3.7.1"
   }
 }

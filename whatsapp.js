@@ -1,10 +1,9 @@
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  downloadMediaMessage
-} = require('@whiskeysockets/baileys');
+// Baileys (versao atual, ESM-only) carregado via import() dinamico
+let _baileysMod = null;
+async function loadBaileys() {
+  if (!_baileysMod) { _baileysMod = await import('@whiskeysockets/baileys'); }
+  return _baileysMod;
+}
 const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
@@ -56,16 +55,8 @@ function transcodeToOpusOgg(inputBuffer) {
   });
 }
 
-const customLogger = {
-  level: 'debug',
-  child: () => customLogger,
-  trace: (obj, msg, ...args) => console.log('[Baileys TRACE]', msg || (typeof obj === 'string' ? obj : JSON.stringify(obj)), ...args),
-  debug: (obj, msg, ...args) => console.log('[Baileys DEBUG]', msg || (typeof obj === 'string' ? obj : JSON.stringify(obj)), ...args),
-  info: (obj, msg, ...args) => console.log('[Baileys INFO]', msg || (typeof obj === 'string' ? obj : JSON.stringify(obj)), ...args),
-  warn: (obj, msg, ...args) => console.warn('[Baileys WARN]', msg || (typeof obj === 'string' ? obj : JSON.stringify(obj)), ...args),
-  error: (obj, msg, ...args) => console.error('[Baileys ERROR]', msg || (typeof obj === 'string' ? obj : JSON.stringify(obj)), ...args)
-};
-const logger = customLogger;
+// Logger pino real (compativel com o Baileys novo) - nivel 'warn' p/ menos ruido
+const logger = pino({ level: 'warn' });
 
 function sanitizePhoneNumber(phone) {
   // Strip all non-digit characters
@@ -94,6 +85,14 @@ async function connectWhatsApp(id, isReconnect = false) {
     connectionRetries[id] = 0;
   }
 
+  // Carrega o Baileys (ESM) sob demanda e extrai as funcoes usadas
+  const _b = await loadBaileys();
+  const makeWASocket = _b.default || _b.makeWASocket;
+  const useMultiFileAuthState = _b.useMultiFileAuthState;
+  const DisconnectReason = _b.DisconnectReason;
+  const fetchLatestBaileysVersion = _b.fetchLatestBaileysVersion;
+  const downloadMediaMessage = _b.downloadMediaMessage;
+
   const sessionDir = path.join(__dirname, 'sessions', id);
   // Ensure sessions dir exists
   fs.mkdirSync(sessionDir, { recursive: true });
@@ -113,7 +112,7 @@ async function connectWhatsApp(id, isReconnect = false) {
     auth: state,
     logger,
     version,
-    printQRInTerminal: false
+    browser: ['Eccere CRM', 'Chrome', '120.0.0']
   });
 
   sessions[id] = sock;
