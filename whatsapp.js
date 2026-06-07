@@ -214,7 +214,7 @@ async function connectWhatsApp(id, isReconnect = false) {
           continue; // ignore groups/broadcasts
         }
 
-        const phone = fromJid.endsWith('@lid') ? fromJid : '+' + fromJid.split('@')[0];
+        const phone = fromJid.endsWith('@lid') ? '' : '+' + fromJid.split('@')[0];
         const incomingMsgId = msg.key.id || ('m_' + Math.random().toString(36).substr(2, 9));
         let text, incomingType = 'text', incomingMediaPath = null;
         if (msg.message?.conversation || msg.message?.extendedTextMessage?.text) {
@@ -349,7 +349,7 @@ async function sendWhatsAppMessage(accountId, convoId, text) {
   const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
   if (!convo) throw new Error("Conversation not found");
 
-  const jid = convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`;
+  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
   
   const sock = sessions[accountId];
   if (!sock) {
@@ -387,7 +387,7 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
   const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
   if (!convo) throw new Error("Conversation not found");
 
-  const jid = convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`;
+  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
 
   const sock = sessions[accountId];
   if (!sock) {

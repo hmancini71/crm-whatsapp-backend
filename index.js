@@ -280,6 +280,15 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
     if (phone !== undefined) {
       updates.push("phone = ?");
       params.push(phone);
+      // Synchronize conversation phone
+      if (lead.whatsapp_jid) {
+        await runQuery("UPDATE conversations SET phone = ? WHERE whatsapp_jid = ?", [phone, lead.whatsapp_jid]);
+      } else if (lead.phone) {
+        const oldClean = lead.phone.replace(/\D/g, '');
+        if (oldClean.length >= 8) {
+          await runQuery("UPDATE conversations SET phone = ? WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone, '+',''), ' ',''), '-',''), '(','') LIKE ?", [phone, `%${oldClean.slice(-8)}%`]);
+        }
+      }
     }
     if (value !== undefined) {
       updates.push("value = ?");

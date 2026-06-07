@@ -292,6 +292,13 @@ db.serialize(() => {
     }
   });
 
+  // Unconditional database cleanup on start to move any remaining JIDs to whatsapp_jid and clean up the phone column
+  db.run("UPDATE leads SET whatsapp_jid = phone WHERE phone LIKE '%@%' AND (whatsapp_jid IS NULL OR whatsapp_jid = '')");
+  db.run("UPDATE leads SET phone = '' WHERE phone LIKE '%@%'");
+  db.run("UPDATE conversations SET whatsapp_jid = phone WHERE phone LIKE '%@%' AND (whatsapp_jid IS NULL OR whatsapp_jid = '')");
+  db.run("UPDATE conversations SET phone = '' WHERE phone LIKE '%@%'");
+
+
   db.get("SELECT COUNT(*) as count FROM messages", (err, row) => {
     if (row && row.count === 0) {
       const initialMessages = [];
