@@ -103,12 +103,11 @@ db.serialize(() => {
   db.get("SELECT COUNT(*) as count FROM stages", (err, row) => {
     if (row && row.count === 0) {
       const initialStages = [
-        ["novo",           "Novo Lead",                "#64748b"],
-        ["tratamento",     "Tratamento Inicial",       "#0ea5e9"],
-        ["qualificado",    "Qualificado",              "#8b5cf6"],
-        ["proposta",       "Proposta Enviada",         "#f59e0b"],
-        ["followup",       "Follow Up de Pagamento",   "#ec4899"],
-        ["fechado",        "Contrato Fechado",         "#16a34a"]
+        ["novo",           "Novo Leads",               "#71717a"],
+        ["tratamento",     "Tratamento inicial",       "#0ea5e9"],
+        ["proposta",       "Proposta enviada",         "#f59e0b"],
+        ["followup",       "Follow-up pagamento",      "#ec4899"],
+        ["declinado",      "Lead declinou/cancelado",  "#ef4444"]
       ];
       const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");
       initialStages.forEach(s => stmt.run(s));
@@ -200,26 +199,25 @@ db.serialize(() => {
     }
   });
 
-  // Safe migration: update stages to new pipeline if old stages exist
-  db.get("SELECT id FROM stages WHERE id = 'contato'", (err, row) => {
-    if (row) {
-      console.log("Migration: updating stages to new pipeline phases...");
-      db.run("DELETE FROM stages");
-      const newStages = [
-        ["novo",       "Novo Lead",              "#64748b"],
-        ["tratamento", "Tratamento Inicial",     "#0ea5e9"],
-        ["qualificado","Qualificado",            "#8b5cf6"],
-        ["proposta",   "Proposta Enviada",       "#f59e0b"],
-        ["followup",   "Follow Up de Pagamento", "#ec4899"],
-        ["fechado",    "Contrato Fechado",       "#16a34a"]
-      ];
-      const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");
-      newStages.forEach(s => stmt.run(s));
-      stmt.finalize();
-      // Migrate existing leads: contato -> tratamento, negociacao -> followup
-      db.run("UPDATE leads SET stage = 'tratamento' WHERE stage = 'contato'");
-      db.run("UPDATE leads SET stage = 'followup' WHERE stage = 'negociacao'");
-    }
+  // Unconditional migration: update stages to new pipeline phases (Novo Leads, Tratamento inicial, Proposta enviada, Follow-up pagamento, Lead declinou/cancelado)
+  db.serialize(() => {
+    console.log("Migration: sync stages to new 5-column pipeline...");
+    db.run("DELETE FROM stages");
+    const newStages = [
+      ["novo",           "Novo Leads",               "#71717a"],
+      ["tratamento",     "Tratamento inicial",       "#0ea5e9"],
+      ["proposta",       "Proposta enviada",         "#f59e0b"],
+      ["followup",       "Follow-up pagamento",      "#ec4899"],
+      ["declinado",      "Lead declinou/cancelado",  "#ef4444"]
+    ];
+    const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");
+    newStages.forEach(s => stmt.run(s));
+    stmt.finalize();
+
+    // Migrate existing leads to fit the new stage IDs:
+    db.run("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
+    db.run("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
+    db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'declinado')");
   });
 
   // Safe migration: add 'type' column to messages (text | audio | image | other)

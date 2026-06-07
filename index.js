@@ -342,12 +342,12 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const totalLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE archived = 0");
     const totalConvs = await getRow("SELECT COUNT(*) as count FROM conversations WHERE (archived IS NULL OR archived = 0)");
     
-    // Revenue sum of 'fechado' leads (non-archived)
-    const revenueRow = await getRow("SELECT SUM(value) as total FROM leads WHERE stage = 'fechado' AND archived = 0");
+    // Revenue sum of 'followup' leads (non-archived)
+    const revenueRow = await getRow("SELECT SUM(value) as total FROM leads WHERE stage = 'followup' AND archived = 0");
     const totalRevenue = revenueRow.total || 0;
 
     // Conversion rate: closed leads / total leads (non-archived)
-    const closedLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE stage = 'fechado' AND archived = 0");
+    const closedLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE stage = 'followup' AND archived = 0");
     const conversionRate = totalLeads.count > 0 ? ((closedLeads.count / totalLeads.count) * 100).toFixed(1) : 0;
 
     // Source distribution (non-archived)
