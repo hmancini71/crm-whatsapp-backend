@@ -210,7 +210,7 @@ db.serialize(() => {
       ["followup",       "Follow-up pagamento",      "#ec4899"],
       ["declinado",      "Lead declinou/cancelado",  "#ef4444"]
     ];
-    const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");
+    const stmt = db.prepare("INSERT OR REPLACE INTO stages VALUES (?, ?, ?)");
     newStages.forEach(s => stmt.run(s));
     stmt.finalize();
 
