@@ -187,6 +187,70 @@ app.get('/api/auth/me', authenticateToken, (req, res) => {
   });
 });
 
+// 2b. Users management (somente Administrador)
+function requireAdmin(req, res) {
+  if (!req.user || req.user.role !== 'Administrador') {
+    res.status(403).json({ detail: "Apenas administradores" });
+    return false;
+  }
+  return true;
+}
+
+app.get('/api/users', authenticateToken, async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const users = await allRows("SELECT id, name, email, role, avatar FROM users ORDER BY name");
+    res.json(users);
+  } catch (e) { res.status(500).json({ detail: String(e) }); }
+});
+
+app.post('/api/users', authenticateToken, async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { name, email, password, role } = req.body;
+  if (!name || !email || !password) return res.status(400).json({ detail: "Nome, e-mail e senha são obrigatórios" });
+  const r = (role === 'Vendedor') ? 'Vendedor' : 'Administrador';
+  const mail = String(email).trim().toLowerCase();
+  try {
+    const existing = await getRow("SELECT id FROM users WHERE email = ?", [mail]);
+    if (existing) return res.status(409).json({ detail: "Já existe um usuário com este e-mail" });
+    const id = 'u_' + Math.random().toString(36).substr(2, 9);
+    const hash = bcrypt.hashSync(String(password), 10);
+    const avatar = String(name).trim().slice(0, 2).toUpperCase();
+    await runQuery("INSERT INTO users (id, email, password_hash, name, role, avatar) VALUES (?, ?, ?, ?, ?, ?)",
+      [id, mail, hash, String(name).trim(), r, avatar]);
+    res.json({ id, name: String(name).trim(), email: mail, role: r, avatar });
+  } catch (e) { res.status(500).json({ detail: String(e) }); }
+});
+
+app.patch('/api/users/:id', authenticateToken, async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { id } = req.params;
+  const { name, role, password } = req.body;
+  try {
+    const u = await getRow("SELECT * FROM users WHERE id = ?", [id]);
+    if (!u) return res.status(404).json({ detail: "Usuário não encontrado" });
+    const updates = [], params = [];
+    if (name !== undefined && String(name).trim()) {
+      updates.push("name = ?"); params.push(String(name).trim());
+      updates.push("avatar = ?"); params.push(String(name).trim().slice(0, 2).toUpperCase());
+    }
+    if (role !== undefined) { updates.push("role = ?"); params.push(role === 'Vendedor' ? 'Vendedor' : 'Administrador'); }
+    if (password) { updates.push("password_hash = ?"); params.push(bcrypt.hashSync(String(password), 10)); }
+    if (updates.length) { params.push(id); await runQuery("UPDATE users SET " + updates.join(", ") + " WHERE id = ?", params); }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ detail: String(e) }); }
+});
+
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { id } = req.params;
+  if (id === req.user.sub) return res.status(400).json({ detail: "Você não pode excluir o próprio usuário" });
+  try {
+    await runQuery("DELETE FROM users WHERE id = ?", [id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ detail: String(e) }); }
+});
+
 // 3. Leads Routes: Get All (active only)
 app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
@@ -287,6 +351,10 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
 
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
+  // Vendedor não pode editar os dados do lead (apenas mover de etapa via /stage)
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para editar leads" });
+  }
   const { id } = req.params;
   const { name, phone, value, tags, comments, priority, lastClientReply } = req.body;
   
