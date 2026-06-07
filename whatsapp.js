@@ -238,7 +238,7 @@ async function connectWhatsApp(id, isReconnect = false) {
         console.log(`[WhatsApp ${id}] Message details: phone=${phone}, name=${name}, text="${text}"`);
 
         // Find or create conversation
-        let convo = await getRow("SELECT * FROM conversations WHERE phone = ?", [phone]);
+        let convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? OR phone = ?", [fromJid, phone]);
         let convoId;
 
         if (convo) {
@@ -255,8 +255,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           console.log(`[WhatsApp ${id}] No conversation found. Creating new one with convoId=${convoId}`);
           const avatar = name.slice(0, 2).toUpperCase();
           await runQuery(
-            "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [convoId, id, name, phone, avatar, timeStr, 1, 0]
+            "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [convoId, id, name, phone, avatar, timeStr, 1, 0, fromJid]
           );
         }
 
@@ -270,7 +270,7 @@ async function connectWhatsApp(id, isReconnect = false) {
 
         // Check if phone matches any lead (active OR archived); if archived, restore it
         const searchNumber = fromJid.split('@')[0];
-        let lead = await getRow("SELECT * FROM leads WHERE phone LIKE ?", [`%${searchNumber}%`]);
+        let lead = await getRow("SELECT * FROM leads WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [fromJid, `%${searchNumber}%`]);
         if (!lead) {
           const leadId = 'l_' + Math.random().toString(36).substr(2, 9);
           const createdAt = new Date().toISOString().slice(0, 10);
@@ -280,8 +280,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           }
           console.log(`[WhatsApp ${id}] No lead found for ${phone}. Creating new lead: leadId=${leadId}`);
           await runQuery(
-            "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [leadId, name, "", formattedPhone, "", 0, "novo", "Venda", id, "Rafael Andrade", JSON.stringify([]), createdAt, 0]
+            "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [leadId, name, "", fromJid.endsWith('@lid') ? "" : formattedPhone, "", 0, "novo", "Venda", id, "Rafael Andrade", JSON.stringify([]), createdAt, 0, fromJid]
           );
         } else if (lead.archived === 1) {
           // Lead was archived — restore it automatically since they reached out again

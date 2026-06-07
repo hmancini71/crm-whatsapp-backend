@@ -255,6 +255,43 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: add 'whatsapp_jid' column to leads if it doesn't exist yet
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'whatsapp_jid')) {
+      db.run("ALTER TABLE leads ADD COLUMN whatsapp_jid TEXT DEFAULT NULL", (alterErr) => {
+        if (!alterErr) {
+          console.log("Migration: added 'whatsapp_jid' column to leads table.");
+          db.run("UPDATE leads SET whatsapp_jid = phone WHERE phone LIKE '%@%'");
+          db.run("UPDATE leads SET phone = '' WHERE phone LIKE '%@lid%'");
+          db.all("SELECT id, phone FROM leads WHERE phone LIKE '%@s.whatsapp%'", (selErr, rows) => {
+            if (!selErr && rows) {
+              rows.forEach(r => {
+                const digits = r.phone.split('@')[0].replace(/\D/g, '');
+                let formatted = '+' + digits;
+                if (digits.startsWith('55') && digits.length >= 12) {
+                  formatted = `+55 ${digits.slice(2, 4)} ${digits.slice(4, -4)}-${digits.slice(-4)}`;
+                }
+                db.run("UPDATE leads SET phone = ? WHERE id = ?", [formatted, r.id]);
+              });
+            }
+          });
+        }
+      });
+    }
+  });
+
+  // Safe migration: add 'whatsapp_jid' column to conversations if it doesn't exist yet
+  db.all("PRAGMA table_info(conversations)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'whatsapp_jid')) {
+      db.run("ALTER TABLE conversations ADD COLUMN whatsapp_jid TEXT DEFAULT NULL", (alterErr) => {
+        if (!alterErr) {
+          console.log("Migration: added 'whatsapp_jid' column to conversations table.");
+          db.run("UPDATE conversations SET whatsapp_jid = phone WHERE phone LIKE '%@%'");
+        }
+      });
+    }
+  });
+
   db.get("SELECT COUNT(*) as count FROM messages", (err, row) => {
     if (row && row.count === 0) {
       const initialMessages = [];
