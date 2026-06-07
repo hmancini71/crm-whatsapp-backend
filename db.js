@@ -255,52 +255,64 @@ db.serialize(() => {
 
   // Safe migration: add 'whatsapp_jid' column to leads if it doesn't exist yet
   db.all("PRAGMA table_info(leads)", (err, cols) => {
-    if (!err && cols && !cols.find(c => c.name === 'whatsapp_jid')) {
-      db.run("ALTER TABLE leads ADD COLUMN whatsapp_jid TEXT DEFAULT NULL", (alterErr) => {
-        if (!alterErr) {
-          console.log("Migration: added 'whatsapp_jid' column to leads table.");
-          db.run("UPDATE leads SET whatsapp_jid = phone WHERE phone LIKE '%@%'");
-          db.run("UPDATE leads SET phone = '' WHERE phone LIKE '%@lid%'");
-          db.all("SELECT id, phone FROM leads WHERE phone LIKE '%@s.whatsapp%'", (selErr, rows) => {
-            if (!selErr && rows) {
-              rows.forEach(r => {
-                const digits = r.phone.split('@')[0].replace(/\D/g, '');
-                let formatted = '+' + digits;
-                if (digits.startsWith('55') && digits.length >= 12) {
-                  formatted = `+55 ${digits.slice(2, 4)} ${digits.slice(4, -4)}-${digits.slice(-4)}`;
-                }
-                db.run("UPDATE leads SET phone = ? WHERE id = ?", [formatted, r.id]);
-              });
-            }
-          });
-        }
-      });
+    if (!err && cols) {
+      const hasJid = cols.find(c => c.name === 'whatsapp_jid');
+      if (!hasJid) {
+        db.run("ALTER TABLE leads ADD COLUMN whatsapp_jid TEXT DEFAULT NULL", (alterErr) => {
+          if (!alterErr) {
+            console.log("Migration: added 'whatsapp_jid' column to leads table.");
+            runLeadsCleanups();
+          }
+        });
+      } else {
+        runLeadsCleanups();
+      }
     }
   });
+
+  function runLeadsCleanups() {
+    db.run("UPDATE leads SET whatsapp_jid = phone WHERE phone LIKE '%@%' AND (whatsapp_jid IS NULL OR whatsapp_jid = '')");
+    db.run("UPDATE leads SET phone = '' WHERE phone LIKE '%@%'");
+    db.all("SELECT id, phone FROM leads WHERE phone LIKE '%@s.whatsapp%'", (selErr, rows) => {
+      if (!selErr && rows) {
+        rows.forEach(r => {
+          const digits = r.phone.split('@')[0].replace(/\D/g, '');
+          let formatted = '+' + digits;
+          if (digits.startsWith('55') && digits.length >= 12) {
+            formatted = `+55 ${digits.slice(2, 4)} ${digits.slice(4, -4)}-${digits.slice(-4)}`;
+          }
+          db.run("UPDATE leads SET phone = ? WHERE id = ?", [formatted, r.id]);
+        });
+      }
+    });
+    // Fix specific leads
+    db.run("UPDATE leads SET phone = '+55 12 98284-0157' WHERE id = 'l_92i9bqbvg' AND (phone = '' OR phone IS NULL)");
+    db.run("UPDATE leads SET phone = '+55 12 98317-6000' WHERE id = 'l_zfe33v8mt' AND (phone = '' OR phone IS NULL)");
+  }
 
   // Safe migration: add 'whatsapp_jid' column to conversations if it doesn't exist yet
   db.all("PRAGMA table_info(conversations)", (err, cols) => {
-    if (!err && cols && !cols.find(c => c.name === 'whatsapp_jid')) {
-      db.run("ALTER TABLE conversations ADD COLUMN whatsapp_jid TEXT DEFAULT NULL", (alterErr) => {
-        if (!alterErr) {
-          console.log("Migration: added 'whatsapp_jid' column to conversations table.");
-          db.run("UPDATE conversations SET whatsapp_jid = phone WHERE phone LIKE '%@%'");
-        }
-      });
+    if (!err && cols) {
+      const hasJid = cols.find(c => c.name === 'whatsapp_jid');
+      if (!hasJid) {
+        db.run("ALTER TABLE conversations ADD COLUMN whatsapp_jid TEXT DEFAULT NULL", (alterErr) => {
+          if (!alterErr) {
+            console.log("Migration: added 'whatsapp_jid' column to conversations table.");
+            runConversationsCleanups();
+          }
+        });
+      } else {
+        runConversationsCleanups();
+      }
     }
   });
 
-  // Unconditional database cleanup on start to move any remaining JIDs to whatsapp_jid and clean up the phone column
-  db.run("UPDATE leads SET whatsapp_jid = phone WHERE phone LIKE '%@%' AND (whatsapp_jid IS NULL OR whatsapp_jid = '')");
-  db.run("UPDATE leads SET phone = '' WHERE phone LIKE '%@%'");
-  db.run("UPDATE conversations SET whatsapp_jid = phone WHERE phone LIKE '%@%' AND (whatsapp_jid IS NULL OR whatsapp_jid = '')");
-  db.run("UPDATE conversations SET phone = '' WHERE phone LIKE '%@%'");
-
-  // Fix specific leads where phone was not resolved previously (using remoteJidAlt values from logs)
-  db.run("UPDATE leads SET phone = '+55 12 98284-0157' WHERE id = 'l_92i9bqbvg' AND (phone = '' OR phone IS NULL)");
-  db.run("UPDATE conversations SET phone = '+55 12 98284-0157' WHERE whatsapp_jid = '117617763291159@lid' AND (phone = '' OR phone IS NULL)");
-  db.run("UPDATE leads SET phone = '+55 12 98317-6000' WHERE id = 'l_zfe33v8mt' AND (phone = '' OR phone IS NULL)");
-  db.run("UPDATE conversations SET phone = '+55 12 98317-6000' WHERE whatsapp_jid = '278516415348907@lid' AND (phone = '' OR phone IS NULL)");
+  function runConversationsCleanups() {
+    db.run("UPDATE conversations SET whatsapp_jid = phone WHERE phone LIKE '%@%' AND (whatsapp_jid IS NULL OR whatsapp_jid = '')");
+    db.run("UPDATE conversations SET phone = '' WHERE phone LIKE '%@%'");
+    db.run("UPDATE conversations SET phone = '+55 12 98284-0157' WHERE whatsapp_jid = '117617763291159@lid' AND (phone = '' OR phone IS NULL)");
+    db.run("UPDATE conversations SET phone = '+55 12 98317-6000' WHERE whatsapp_jid = '278516415348907@lid' AND (phone = '' OR phone IS NULL)");
+  }
 
 
   db.get("SELECT COUNT(*) as count FROM messages", (err, row) => {
