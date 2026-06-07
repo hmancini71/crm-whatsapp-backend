@@ -326,10 +326,33 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// 5. Stages Routes: Get All
+// 5. Stages Routes: Get All (self-healing: if old stages found, fix them)
+const CORRECT_STAGES = [
+  { id: "novo",       title: "Novo Leads",              color: "#71717a" },
+  { id: "tratamento", title: "Tratamento inicial",      color: "#0ea5e9" },
+  { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
+  { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
+  { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" }
+];
+
 app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
   try {
-    const stages = await allRows("SELECT * FROM stages");
+    let stages = await allRows("SELECT * FROM stages");
+    // Self-healing: if stages don't match expected set, fix them
+    const ids = stages.map(s => s.id).sort().join(',');
+    const expectedIds = CORRECT_STAGES.map(s => s.id).sort().join(',');
+    if (ids !== expectedIds) {
+      console.log("Self-healing stages: current=" + ids + " expected=" + expectedIds);
+      await runQuery("DELETE FROM stages");
+      for (const s of CORRECT_STAGES) {
+        await runQuery("INSERT INTO stages (id, title, color) VALUES (?, ?, ?)", [s.id, s.title, s.color]);
+      }
+      // Migrate leads with old stage IDs
+      await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
+      await runQuery("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
+      await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'declinado')");
+      stages = await allRows("SELECT * FROM stages");
+    }
     res.json(stages);
   } catch (err) {
     res.status(500).json({ error: err.message });
