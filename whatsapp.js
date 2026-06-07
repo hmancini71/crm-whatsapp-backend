@@ -203,10 +203,9 @@ async function connectWhatsApp(id, isReconnect = false) {
 
       for (const msg of m.messages) {
         console.log(`[WhatsApp ${id}] Processing message:`, JSON.stringify(msg));
-        if (msg.key.fromMe) {
-          console.log(`[WhatsApp ${id}] Ignored outgoing message from self.`);
-          continue; // ignore outgoing messages
-        }
+        // Mensagem enviada por nós (pelo CRM OU pelo celular). Antes era descartada;
+        // agora gravamos como mensagem de saída para o chat mostrar os dois lados.
+        const isMine = !!msg.key.fromMe;
 
         const fromJid = msg.key.remoteJid;
         if (!fromJid.endsWith('@s.whatsapp.net') && !fromJid.endsWith('@lid')) {
@@ -238,7 +237,7 @@ async function connectWhatsApp(id, isReconnect = false) {
           text = '[Mídia/Outro]';
         }
         const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-        const name = msg.pushName || (fromJid.endsWith('@lid') ? 'Usuário WhatsApp' : phone);
+        const name = (!isMine && msg.pushName) ? msg.pushName : (fromJid.endsWith('@lid') ? 'Usuário WhatsApp' : (phone || 'Usuário WhatsApp'));
 
         console.log(`[WhatsApp ${id}] Message details: phone=${phone}, name=${name}, text="${text}"`);
 
@@ -251,8 +250,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           console.log(`[WhatsApp ${id}] Existing conversation found: convoId=${convoId}`);
           // Update conversation
           await runQuery(
-            "UPDATE conversations SET lastTime = ?, unread = unread + 1 WHERE id = ?",
-            [timeStr, convoId]
+            "UPDATE conversations SET lastTime = ?, unread = unread + ? WHERE id = ?",
+            [timeStr, isMine ? 0 : 1, convoId]
           );
         } else {
           // Generate new conversation id
@@ -261,7 +260,7 @@ async function connectWhatsApp(id, isReconnect = false) {
           const avatar = name.slice(0, 2).toUpperCase();
           await runQuery(
             "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [convoId, id, name, phone, avatar, timeStr, 1, 0, fromJid]
+            [convoId, id, name, phone, avatar, timeStr, isMine ? 0 : 1, 0, fromJid]
           );
         }
 
@@ -269,10 +268,12 @@ async function connectWhatsApp(id, isReconnect = false) {
         const msgId = incomingMsgId;
         console.log(`[WhatsApp ${id}] Saving message to DB: msgId=${msgId}, convoId=${convoId}, type=${incomingType}`);
         await runQuery(
-          "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          [msgId, convoId, 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath]
+          "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [msgId, convoId, isMine ? 'me' : 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath]
         );
 
+        // Regras de lead só valem para mensagens RECEBIDAS (do cliente), não para as nossas
+        if (!isMine) {
         // Check if phone matches any lead (active OR archived); if archived, restore it
         const searchNumber = fromJid.split('@')[0];
         let lead = await getRow("SELECT * FROM leads WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [fromJid, `%${searchNumber}%`]);
@@ -305,6 +306,7 @@ async function connectWhatsApp(id, isReconnect = false) {
           // Stamp lastClientReply to track when client last responded
           await runQuery("UPDATE leads SET lastClientReply = ? WHERE id = ?", [new Date().toISOString(), lead.id]);
         }
+        } // fim if (!isMine)
       }
     } catch (err) {
       console.error(`[WhatsApp ${id}] Error in messages.upsert handler:`, err);
