@@ -214,7 +214,12 @@ async function connectWhatsApp(id, isReconnect = false) {
           continue; // ignore groups/broadcasts
         }
 
-        const phone = fromJid.endsWith('@lid') ? '' : '+' + fromJid.split('@')[0];
+        let phone = '';
+        if (msg.key?.remoteJidAlt && msg.key.remoteJidAlt.endsWith('@s.whatsapp.net')) {
+          phone = '+' + msg.key.remoteJidAlt.split('@')[0];
+        } else if (!fromJid.endsWith('@lid')) {
+          phone = '+' + fromJid.split('@')[0];
+        }
         const incomingMsgId = msg.key.id || ('m_' + Math.random().toString(36).substr(2, 9));
         let text, incomingType = 'text', incomingMediaPath = null;
         if (msg.message?.conversation || msg.message?.extendedTextMessage?.text) {

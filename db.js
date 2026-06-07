@@ -298,6 +298,12 @@ db.serialize(() => {
   db.run("UPDATE conversations SET whatsapp_jid = phone WHERE phone LIKE '%@%' AND (whatsapp_jid IS NULL OR whatsapp_jid = '')");
   db.run("UPDATE conversations SET phone = '' WHERE phone LIKE '%@%'");
 
+  // Fix specific leads where phone was not resolved previously (using remoteJidAlt values from logs)
+  db.run("UPDATE leads SET phone = '+55 12 98284-0157' WHERE id = 'l_92i9bqbvg' AND (phone = '' OR phone IS NULL)");
+  db.run("UPDATE conversations SET phone = '+55 12 98284-0157' WHERE whatsapp_jid = '117617763291159@lid' AND (phone = '' OR phone IS NULL)");
+  db.run("UPDATE leads SET phone = '+55 12 98317-6000' WHERE id = 'l_zfe33v8mt' AND (phone = '' OR phone IS NULL)");
+  db.run("UPDATE conversations SET phone = '+55 12 98317-6000' WHERE whatsapp_jid = '278516415348907@lid' AND (phone = '' OR phone IS NULL)");
+
 
   db.get("SELECT COUNT(*) as count FROM messages", (err, row) => {
     if (row && row.count === 0) {
