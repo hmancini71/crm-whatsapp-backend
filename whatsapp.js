@@ -70,6 +70,11 @@ function sanitizePhoneNumber(phone) {
 
 const connectionRetries = {};
 
+// Versão do Baileys cacheada: evita um fetch de rede a cada conexão.
+// Esse fetch repetido podia travar o event loop e fazer um socket JÁ
+// conectado estourar o keep-alive (408) quando um número novo conectava.
+let _cachedWaVersion = null;
+
 async function connectWhatsApp(id, isReconnect = false) {
   if (sessions[id]) {
     const sock = sessions[id];
@@ -99,13 +104,16 @@ async function connectWhatsApp(id, isReconnect = false) {
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
 
-  let version;
-  try {
-    const latest = await fetchLatestBaileysVersion();
-    version = latest.version;
-    console.log(`Using latest Baileys version: ${version.join('.')}, isLatest: ${latest.isLatest}`);
-  } catch (err) {
-    console.warn("Failed to fetch latest Baileys version, using fallback", err);
+  let version = _cachedWaVersion;
+  if (!version) {
+    try {
+      const latest = await fetchLatestBaileysVersion();
+      version = latest.version;
+      _cachedWaVersion = version;
+      console.log(`Using latest Baileys version: ${version.join('.')}, isLatest: ${latest.isLatest}`);
+    } catch (err) {
+      console.warn("Failed to fetch latest Baileys version, using fallback", err);
+    }
   }
 
   const sock = makeWASocket({
@@ -430,9 +438,26 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
 // Auto reconnect active sessions on startup
 async function initSessions() {
   const connectedAccounts = await allRows("SELECT id FROM whatsapp_accounts WHERE status = 'connected'");
+  let delay = 0;
   for (const acc of connectedAccounts) {
-    console.log(`Auto connecting WhatsApp session for ${acc.id}`);
-    connectWhatsApp(acc.id).catch(e => console.error(`Failed auto connect for ${acc.id}:`, e));
+    const sessionDir = path.join(__dirname, 'sessions', acc.id);
+    const credsFile = path.join(sessionDir, 'creds.json');
+    // Slot fantasma: marcado "connected" no banco, mas sem credencial salva
+    // (ex.: sessões apagadas no reset). NÃO reconectar — isso gerava QR/408 em
+    // loop e atrapalhava os números reais. Apenas marca como desconectado.
+    if (!fs.existsSync(credsFile)) {
+      console.log(`Skipping auto-connect for ${acc.id}: sem creds.json (sessão fantasma). Marcando desconectado.`);
+      runQuery("UPDATE whatsapp_accounts SET status = 'disconnected' WHERE id = ?", [acc.id])
+        .catch(e => console.error(`Falha ao marcar ${acc.id} desconectado:`, e));
+      continue;
+    }
+    // Espaça as reconexões (3s entre cada) p/ não abrir vários handshakes ao
+    // mesmo tempo e estrangular o event loop (causa de timeouts 408).
+    console.log(`Auto connecting WhatsApp session for ${acc.id} (em ${delay}ms)`);
+    setTimeout(() => {
+      connectWhatsApp(acc.id).catch(e => console.error(`Failed auto connect for ${acc.id}:`, e));
+    }, delay);
+    delay += 3000;
   }
 }
 
