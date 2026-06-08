@@ -281,6 +281,10 @@ app.get('/api/leads/archived', authenticateToken, async (req, res) => {
 
 // 3c. Leads Routes: Archive Lead (soft delete)
 app.patch('/api/leads/:id/archive', authenticateToken, async (req, res) => {
+  // Vendedor não pode excluir/arquivar leads
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para excluir leads" });
+  }
   const { id } = req.params;
   try {
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
@@ -351,10 +355,6 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
 
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
-  // Vendedor não pode editar os dados do lead (apenas mover de etapa via /stage)
-  if (req.user && req.user.role === 'Vendedor') {
-    return res.status(403).json({ detail: "Sem permissão para editar leads" });
-  }
   const { id } = req.params;
   const { name, phone, value, tags, comments, priority, lastClientReply } = req.body;
   
