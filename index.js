@@ -1144,6 +1144,25 @@ app.post('/api/leads/from-email', authenticateToken, async (req, res) => {
   }
 });
 
+// 20. Leads Routes: Create lead manually (botão "Novo Lead")
+app.post('/api/leads', authenticateToken, async (req, res) => {
+  const { name, phone, email, value, stage, source, company, priority } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: "Nome é obrigatório" });
+  try {
+    const id = 'l_' + Math.random().toString(36).substr(2, 9);
+    const createdAt = new Date().toISOString().slice(0, 10);
+    await runQuery(
+      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, stage || "novo", source || "Manual", "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify([]), createdAt, 0, priority || ""]
+    );
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({ ...lead, tags: [], created: true });
+  } catch (err) {
+    console.error("create lead error:", err && err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Start Express Server
 app.listen(PORT, async () => {
   console.log(`CRM WhatsApp Backend Server running on http://localhost:${PORT}`);
