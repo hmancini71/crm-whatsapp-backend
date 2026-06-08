@@ -375,6 +375,14 @@ app.get('/api/instagram/status', authenticateToken, async (req, res) => {
   } catch (e) { res.json({ connected: false }); }
 });
 
+// Desconecta o Instagram (remove o token guardado)
+app.post('/api/instagram/disconnect', authenticateToken, async (req, res) => {
+  try {
+    await runQuery("DELETE FROM ig_connections");
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Envia uma mensagem de Direct pelo Instagram usando o token guardado
 async function sendIgMessage(recipientId, text) {
   const conn = await getRow("SELECT * FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
@@ -1140,6 +1148,38 @@ app.post('/api/leads/from-email', authenticateToken, async (req, res) => {
     res.json({ ...lead, tags: [], created: true });
   } catch (err) {
     console.error("from-email error:", err && err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 19b. Leads Routes: Create lead from a conversation (Instagram/Meta ou WhatsApp)
+app.post('/api/leads/from-conversation', authenticateToken, async (req, res) => {
+  const { conversationId } = req.body || {};
+  if (!conversationId) return res.status(400).json({ error: "conversationId é obrigatório" });
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [conversationId]);
+    if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
+
+    // Dedupe por whatsapp_jid (ex.: ig:<id>) — se já existir lead ativo, devolve ele
+    let existing = null;
+    if (convo.whatsapp_jid) {
+      existing = await getRow("SELECT * FROM leads WHERE whatsapp_jid = ? AND archived = 0", [convo.whatsapp_jid]);
+    }
+    if (existing) {
+      return res.json({ ...existing, tags: existing.tags ? JSON.parse(existing.tags) : [], existed: true });
+    }
+
+    const id = 'l_' + Math.random().toString(36).substr(2, 9);
+    const createdAt = new Date().toISOString().slice(0, 10);
+    const src = convo.account === 'ig' ? 'Instagram' : 'WhatsApp';
+    await runQuery(
+      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, convo.name || (src + ' lead'), "", convo.phone || "", "", 0, "novo", src, convo.account || 'ig', "Henry Mancini", JSON.stringify([]), createdAt, 0, convo.whatsapp_jid || null]
+    );
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({ ...lead, tags: [], created: true });
+  } catch (err) {
+    console.error("from-conversation error:", err && err.message);
     res.status(500).json({ error: err.message });
   }
 });
