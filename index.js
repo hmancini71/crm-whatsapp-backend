@@ -251,6 +251,71 @@ app.delete('/api/users/:id', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ detail: String(e) }); }
 });
 
+// 2c. Instagram (Meta) — Webhook de verificação + recebimento (Direct e comentários)
+const IG_VERIFY_TOKEN = process.env.IG_VERIFY_TOKEN || 'eccere_ig_2026';
+
+// Verificação do webhook (a Meta chama via GET ao configurar)
+app.get('/api/instagram/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && token === IG_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// Grava uma mensagem/comentário do Instagram como conversa (account = 'ig')
+async function storeIgMessage(senderId, text, from, name, msgId) {
+  const jid = 'ig:' + senderId;
+  const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  let convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ?", [jid]);
+  let convoId;
+  if (convo) {
+    convoId = convo.id;
+    await runQuery("UPDATE conversations SET lastTime = ?, unread = unread + ? WHERE id = ?", [timeStr, from === 'them' ? 1 : 0, convoId]);
+  } else {
+    convoId = 'c_' + Math.random().toString(36).substr(2, 9);
+    const nm = name || 'Instagram';
+    await runQuery(
+      "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [convoId, 'ig', nm, '', nm.slice(0, 2).toUpperCase(), timeStr, from === 'them' ? 1 : 0, 0, jid]
+    );
+  }
+  const mid = msgId || ('m_' + Math.random().toString(36).substr(2, 9));
+  await runQuery(
+    "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [mid, convoId, from, text, timeStr, Date.now(), 'text', null]
+  );
+}
+
+// Recebe eventos do Instagram (Direct e comentários)
+app.post('/api/instagram/webhook', async (req, res) => {
+  res.sendStatus(200); // responder rápido (Meta exige < 5s)
+  try {
+    const body = req.body || {};
+    if (body.object !== 'instagram') return;
+    for (const entry of (body.entry || [])) {
+      // Direct (mensagens)
+      for (const ev of (entry.messaging || [])) {
+        const sid = ev.sender && ev.sender.id;
+        const txt = ev.message && ev.message.text;
+        if (sid && txt) {
+          await storeIgMessage(sid, txt, (ev.message && ev.message.is_echo) ? 'me' : 'them', null, ev.message && ev.message.mid);
+        }
+      }
+      // Comentários
+      for (const ch of (entry.changes || [])) {
+        if (ch.field === 'comments' && ch.value && ch.value.text) {
+          const fromId = (ch.value.from && ch.value.from.id) || ('cmt_' + (ch.value.id || ''));
+          const fromName = (ch.value.from && ch.value.from.username) || 'Instagram';
+          await storeIgMessage(fromId, '[Comentário] ' + ch.value.text, 'them', fromName, 'cmt_' + (ch.value.id || Math.random().toString(36).substr(2, 9)));
+        }
+      }
+    }
+  } catch (e) { console.error('[IG webhook] erro:', e); }
+});
+
 // 3. Leads Routes: Get All (active only)
 app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
