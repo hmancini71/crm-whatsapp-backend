@@ -85,6 +85,15 @@ db.serialize(() => {
     connected_at TEXT
   )`);
 
+  // 8. Instagram Connections (conta conectada via OAuth Meta)
+  db.run(`CREATE TABLE IF NOT EXISTS ig_connections (
+    id TEXT PRIMARY KEY,
+    ig_user_id TEXT,
+    username TEXT,
+    access_token TEXT,
+    connected_at TEXT
+  )`);
+
   // Check if tables are empty, and insert initial data
   db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
     if (row && row.count === 0) {

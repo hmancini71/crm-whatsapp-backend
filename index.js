@@ -316,6 +316,78 @@ app.post('/api/instagram/webhook', async (req, res) => {
   } catch (e) { console.error('[IG webhook] erro:', e); }
 });
 
+// 2d. Instagram OAuth (Instagram API with Instagram Login) + envio de Direct
+const IG_APP_ID = process.env.IG_APP_ID || '1315059453545733';
+const IG_APP_SECRET = process.env.IG_APP_SECRET || '';
+const IG_REDIRECT_URI = process.env.IG_REDIRECT_URI || 'https://crm-api.eccere.com.br/api/instagram/callback';
+const IG_SCOPES = 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments';
+const APP_BASE_URL = process.env.APP_BASE_URL || 'https://eccere.com.br/leads';
+
+// Inicia o login: redireciona para a tela de autorização do Instagram
+app.get('/api/instagram/connect', (req, res) => {
+  const url = 'https://www.instagram.com/oauth/authorize'
+    + '?enable_fb_login=0&force_authentication=1'
+    + '&client_id=' + encodeURIComponent(IG_APP_ID)
+    + '&redirect_uri=' + encodeURIComponent(IG_REDIRECT_URI)
+    + '&response_type=code'
+    + '&scope=' + encodeURIComponent(IG_SCOPES);
+  res.redirect(url);
+});
+
+// Callback do OAuth: troca o code por token de longa duração e guarda
+app.get('/api/instagram/callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.redirect(APP_BASE_URL + '/app/conexoes?ig=erro');
+  if (!IG_APP_SECRET) { console.error('[IG OAuth] IG_APP_SECRET nao configurado'); return res.redirect(APP_BASE_URL + '/app/conexoes?ig=sem_segredo'); }
+  try {
+    const form = new URLSearchParams();
+    form.set('client_id', IG_APP_ID);
+    form.set('client_secret', IG_APP_SECRET);
+    form.set('grant_type', 'authorization_code');
+    form.set('redirect_uri', IG_REDIRECT_URI);
+    form.set('code', String(code).replace(/#_$/, ''));
+    const r1 = await fetch('https://api.instagram.com/oauth/access_token', { method: 'POST', body: form });
+    const d1 = await r1.json();
+    if (!d1.access_token) { console.error('[IG OAuth] short token falhou', d1); return res.redirect(APP_BASE_URL + '/app/conexoes?ig=erro_token'); }
+    const shortToken = d1.access_token;
+    const igUserId = String(d1.user_id || '');
+    const r2 = await fetch('https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=' + encodeURIComponent(IG_APP_SECRET) + '&access_token=' + encodeURIComponent(shortToken));
+    const d2 = await r2.json();
+    const longToken = d2.access_token || shortToken;
+    let username = '';
+    try { const r3 = await fetch('https://graph.instagram.com/me?fields=user_id,username&access_token=' + encodeURIComponent(longToken)); const d3 = await r3.json(); username = d3.username || ''; } catch (e) {}
+    await runQuery("DELETE FROM ig_connections WHERE ig_user_id = ?", [igUserId]);
+    await runQuery("INSERT INTO ig_connections (id, ig_user_id, username, access_token, connected_at) VALUES (?, ?, ?, ?, ?)",
+      ['ig_' + igUserId, igUserId, username, longToken, new Date().toISOString()]);
+    return res.redirect(APP_BASE_URL + '/app/conexoes?ig=ok');
+  } catch (e) {
+    console.error('[IG OAuth] erro', e);
+    return res.redirect(APP_BASE_URL + '/app/conexoes?ig=erro');
+  }
+});
+
+// Status da conexao do Instagram (para o front exibir conectado)
+app.get('/api/instagram/status', authenticateToken, async (req, res) => {
+  try {
+    const row = await getRow("SELECT ig_user_id, username, connected_at FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+    res.json(row ? { connected: true, username: row.username, connected_at: row.connected_at } : { connected: false });
+  } catch (e) { res.json({ connected: false }); }
+});
+
+// Envia uma mensagem de Direct pelo Instagram usando o token guardado
+async function sendIgMessage(recipientId, text) {
+  const conn = await getRow("SELECT * FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+  if (!conn || !conn.access_token) throw new Error('Instagram nao conectado');
+  const resp = await fetch('https://graph.instagram.com/v21.0/me/messages?access_token=' + encodeURIComponent(conn.access_token), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recipient: { id: recipientId }, message: { text: text } })
+  });
+  const d = await resp.json();
+  if (d.error) throw new Error((d.error && d.error.message) || 'Falha ao enviar Direct');
+  return d;
+}
+
 // 3. Leads Routes: Get All (active only)
 app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
@@ -645,6 +717,21 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
     if (!convo) {
       return res.status(404).json({ error: "Conversa não encontrada" });
+    }
+
+    // Instagram: envia pelo Direct e grava a mensagem
+    if (convo.account === 'ig') {
+      const recipientId = (convo.whatsapp_jid || '').replace(/^ig:/, '');
+      const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
+      try {
+        await sendIgMessage(recipientId, text);
+      } catch (e) {
+        return res.status(502).json({ error: 'Falha ao enviar no Instagram: ' + e.message });
+      }
+      await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)", [msgId, id, 'me', text, timeStr, Date.now()]);
+      await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
+      return res.json({ id: msgId, conversationId: id, from: 'me', text: text, time: timeStr, timestamp: Date.now() });
     }
 
     const accountId = convo.account;
