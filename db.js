@@ -128,10 +128,10 @@ db.serialize(() => {
   db.get("SELECT COUNT(*) as count FROM whatsapp_accounts", (err, row) => {
     if (row && row.count === 0) {
       const initialAccounts = [
-        ["wa1", "Comercial", "", "#0d9488", "disconnected", 0, null],
-        ["wa2", "Suporte", "", "#2563eb", "disconnected", 0, null],
+        ["wa1", "Vendas", "", "#0d9488", "disconnected", 0, null],
+        ["wa2", "Vendas", "", "#2563eb", "disconnected", 0, null],
         ["wa3", "Vendas", "", "#7c3aed", "disconnected", 0, null],
-        ["wa4", "Financeiro", "", "#ea580c", "disconnected", 0, null]
+        ["wa4", "Vendas", "", "#ea580c", "disconnected", 0, null]
       ];
       const stmt = db.prepare("INSERT INTO whatsapp_accounts VALUES (?, ?, ?, ?, ?, ?, ?)");
       initialAccounts.forEach(a => stmt.run(a));
@@ -207,6 +207,12 @@ db.serialize(() => {
         }
       });
     }
+  });
+
+  // Normaliza os rótulos das contas de WhatsApp: todas são de "Vendas"
+  // (substitui nomes antigos como Comercial/Suporte/Financeiro).
+  db.run("UPDATE whatsapp_accounts SET label = 'Vendas' WHERE label IS NULL OR label <> 'Vendas'", (e) => {
+    if (!e) console.log("Migration: rótulos de whatsapp_accounts normalizados para 'Vendas'.");
   });
 
   // Safe migration: add 'recv_number' (nosso número que RECEBEU o lead, carimbado
