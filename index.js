@@ -1258,7 +1258,10 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
 // ('me'), zera o lastClientReply (limpa vermelhos antigos onde já respondemos).
 async function reconcileReplyDots() {
   try {
-    const leads = await allRows("SELECT id, whatsapp_jid, phone FROM leads WHERE lastClientReply IS NOT NULL");
+    // Reconcilia a bolinha de tempo de TODOS os leads ativos com base na última
+    // mensagem real de cada conversa: cliente foi o último → carimba com a data
+    // dela; nós fomos os últimos → zera. Cobre novos, restaurados e antigos.
+    const leads = await allRows("SELECT id, whatsapp_jid, phone FROM leads WHERE archived = 0");
     for (const l of leads) {
       let convo = null;
       if (l.whatsapp_jid) {
@@ -1271,12 +1274,16 @@ async function reconcileReplyDots() {
         }
       }
       if (!convo) continue;
-      const last = await getRow("SELECT `from` FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
-      if (last && last.from === 'me') {
+      const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
+      if (!last) continue;
+      if (last.from === 'me') {
         await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [l.id]);
+      } else {
+        const iso = last.timestamp ? new Date(Number(last.timestamp)).toISOString() : new Date().toISOString();
+        await runQuery("UPDATE leads SET lastClientReply = ? WHERE id = ?", [iso, l.id]);
       }
     }
-    console.log("reconcileReplyDots: pontos de tempo reconciliados.");
+    console.log("reconcileReplyDots: pontos de tempo reconciliados (todos os leads).");
   } catch (e) {
     console.error("reconcileReplyDots error:", e && e.message);
   }

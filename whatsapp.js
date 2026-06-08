@@ -420,9 +420,11 @@ async function connectWhatsApp(id, isReconnect = false) {
           }
         } else {
           console.log(`[WhatsApp ${id}] Received message from existing lead: ${lead.name}`);
-          // Stamp lastClientReply to track when client last responded
-          await runQuery("UPDATE leads SET lastClientReply = ? WHERE id = ?", [new Date().toISOString(), lead.id]);
         }
+        // Carimba lastClientReply para QUALQUER mensagem recebida do cliente
+        // (novo, restaurado OU existente) — assim a bolinha de tempo aparece já
+        // na 1ª mensagem, não só a partir da segunda.
+        await runQuery("UPDATE leads SET lastClientReply = ? WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [new Date().toISOString(), fromJid, `%${searchNumber}%`]);
         // Carimba o número recebido se o lead ainda não tiver (vale para criar,
         // restaurar e existentes — backfill automático no próximo contato).
         if (ourNumber) {
