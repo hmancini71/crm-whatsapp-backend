@@ -1216,6 +1216,35 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
 });
 
 // Start Express Server
+// Reconciliação única do "controle de tempo": para cada lead com o ponto aceso
+// (lastClientReply != NULL), olha a ÚLTIMA mensagem da conversa; se foi nossa
+// ('me'), zera o lastClientReply (limpa vermelhos antigos onde já respondemos).
+async function reconcileReplyDots() {
+  try {
+    const leads = await allRows("SELECT id, whatsapp_jid, phone FROM leads WHERE lastClientReply IS NOT NULL");
+    for (const l of leads) {
+      let convo = null;
+      if (l.whatsapp_jid) {
+        convo = await getRow("SELECT id FROM conversations WHERE whatsapp_jid = ?", [l.whatsapp_jid]);
+      }
+      if (!convo && l.phone) {
+        const p = l.phone.replace(/\D/g, '');
+        if (p.length >= 8) {
+          convo = await getRow("SELECT id FROM conversations WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${p.slice(-8)}%`]);
+        }
+      }
+      if (!convo) continue;
+      const last = await getRow("SELECT `from` FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
+      if (last && last.from === 'me') {
+        await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [l.id]);
+      }
+    }
+    console.log("reconcileReplyDots: pontos de tempo reconciliados.");
+  } catch (e) {
+    console.error("reconcileReplyDots error:", e && e.message);
+  }
+}
+
 app.listen(PORT, async () => {
   console.log(`CRM WhatsApp Backend Server running on http://localhost:${PORT}`);
   // Autostart active sessions
@@ -1223,5 +1252,11 @@ app.listen(PORT, async () => {
     await initSessions();
   } catch (err) {
     console.error("Error initializing sessions:", err);
+  }
+  // Limpa pontos de tempo antigos onde nós já fomos os últimos a responder
+  try {
+    await reconcileReplyDots();
+  } catch (err) {
+    console.error("Error reconciling reply dots:", err);
   }
 });
