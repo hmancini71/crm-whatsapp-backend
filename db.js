@@ -94,6 +94,12 @@ db.serialize(() => {
     connected_at TEXT
   )`);
 
+  // 9. App Settings (configurações gerais em pares chave/valor JSON)
+  db.run(`CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )`);
+
   // Check if tables are empty, and insert initial data
   db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
     if (row && row.count === 0) {
@@ -205,6 +211,15 @@ db.serialize(() => {
         } else {
           console.log("Migration: added 'lastClientReply' column to leads table.");
         }
+      });
+    }
+  });
+
+  // Safe migration: coluna last_autoreply em conversations (cooldown da resposta automática)
+  db.all("PRAGMA table_info(conversations)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'last_autoreply')) {
+      db.run("ALTER TABLE conversations ADD COLUMN last_autoreply INTEGER DEFAULT NULL", (alterErr) => {
+        if (!alterErr) console.log("Migration: added 'last_autoreply' column to conversations.");
       });
     }
   });

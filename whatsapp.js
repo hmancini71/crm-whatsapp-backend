@@ -68,6 +68,47 @@ function sanitizePhoneNumber(phone) {
   return cleaned;
 }
 
+// ===== Resposta automática fora do horário de expediente =====
+// Verifica se AGORA está dentro do expediente (fuso de São Paulo), conforme config.
+function isWithinBusinessHours(cfg) {
+  try {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(now);
+    const map = {}; parts.forEach(p => { map[p.type] = p.value; });
+    const wd = { Sun: 'sun', Mon: 'mon', Tue: 'tue', Wed: 'wed', Thu: 'thu', Fri: 'fri', Sat: 'sat' }[map.weekday];
+    const d = cfg.days && cfg.days[wd];
+    if (!d || !d.on) return false; // dia sem expediente => está fora
+    let hh = parseInt(map.hour, 10); if (hh === 24) hh = 0;
+    const cur = hh * 60 + parseInt(map.minute, 10);
+    const toMin = (s) => { const a = (s || '0:0').split(':'); return parseInt(a[0], 10) * 60 + parseInt(a[1], 10); };
+    return cur >= toMin(d.open) && cur < toMin(d.close);
+  } catch (e) { return true; } // em dúvida, NÃO responde (considera dentro)
+}
+
+// Envia a mensagem fora do horário, se habilitada, fora do expediente e respeitando cooldown.
+async function maybeAutoReply(sock, fromJid, convoId) {
+  try {
+    if (!fromJid || !fromJid.endsWith('@s.whatsapp.net')) return; // só números reais
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'business_hours'");
+    if (!row || !row.value) return;
+    let cfg; try { cfg = JSON.parse(row.value); } catch (e) { return; }
+    if (!cfg.autoReply || !cfg.message) return;
+    if (isWithinBusinessHours(cfg)) return; // dentro do expediente: não responde
+    // Cooldown: no máx. 1 resposta automática a cada 6h por conversa
+    const COOLDOWN = 6 * 3600 * 1000;
+    const conv = await getRow("SELECT last_autoreply FROM conversations WHERE id = ?", [convoId]);
+    if (conv && conv.last_autoreply && (Date.now() - Number(conv.last_autoreply) < COOLDOWN)) return;
+    await sock.sendMessage(fromJid, { text: cfg.message });
+    const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
+    await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)", [msgId, convoId, 'me', cfg.message, timeStr, Date.now()]);
+    await runQuery("UPDATE conversations SET lastTime = ?, last_autoreply = ? WHERE id = ?", [timeStr, Date.now(), convoId]);
+    console.log(`[autoReply] mensagem fora do horário enviada para ${fromJid}`);
+  } catch (e) { console.error('[autoReply] erro:', e && e.message); }
+}
+
 const connectionRetries = {};
 
 // Versão do Baileys cacheada: evita um fetch de rede a cada conexão.
@@ -387,6 +428,8 @@ async function connectWhatsApp(id, isReconnect = false) {
         if (ourNumber) {
           await runQuery("UPDATE leads SET recv_number = ? WHERE (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) AND (recv_number IS NULL OR recv_number = '')", [ourNumber, fromJid, `%${searchNumber}%`]);
         }
+        // Resposta automática fora do horário de expediente (se habilitada)
+        await maybeAutoReply(sock, fromJid, convoId);
         } else {
           // NÓS respondemos (mensagem de saída): zera o lastClientReply para o
           // "controle de tempo" sumir — ele só vale enquanto o CLIENTE foi o último.

@@ -1196,6 +1196,31 @@ app.post('/api/leads/from-conversation', authenticateToken, async (req, res) => 
   }
 });
 
+// 19c. Settings: horário de expediente + mensagem fora do horário
+app.get('/api/settings/business-hours', authenticateToken, async (req, res) => {
+  try {
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'business_hours'");
+    if (row && row.value) {
+      try { return res.json(JSON.parse(row.value)); } catch (e) { return res.json({}); }
+    }
+    res.json({});
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/settings/business-hours', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
+  }
+  try {
+    const value = JSON.stringify(req.body || {});
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES ('business_hours', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [value]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
   const { name, phone, email, value, stage, source, company, priority } = req.body || {};
