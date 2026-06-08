@@ -90,22 +90,22 @@ function isWithinBusinessHours(cfg) {
 // Envia a mensagem fora do horário, se habilitada, fora do expediente e respeitando cooldown.
 async function maybeAutoReply(sock, fromJid, convoId) {
   try {
-    if (!fromJid || !fromJid.endsWith('@s.whatsapp.net')) return; // só números reais
+    if (!fromJid || (!fromJid.endsWith('@s.whatsapp.net') && !fromJid.endsWith('@lid'))) {
+      console.log(`[autoReply] ignora jid não-usuário: ${fromJid}`); return;
+    }
     const row = await getRow("SELECT value FROM app_settings WHERE key = 'business_hours'");
-    if (!row || !row.value) return;
-    let cfg; try { cfg = JSON.parse(row.value); } catch (e) { return; }
-    if (!cfg.autoReply || !cfg.message) return;
-    if (isWithinBusinessHours(cfg)) return; // dentro do expediente: não responde
-    // Cooldown: no máx. 1 resposta automática a cada 6h por conversa
-    const COOLDOWN = 6 * 3600 * 1000;
-    const conv = await getRow("SELECT last_autoreply FROM conversations WHERE id = ?", [convoId]);
-    if (conv && conv.last_autoreply && (Date.now() - Number(conv.last_autoreply) < COOLDOWN)) return;
+    if (!row || !row.value) { console.log('[autoReply] sem config de horário salva'); return; }
+    let cfg; try { cfg = JSON.parse(row.value); } catch (e) { console.log('[autoReply] config inválida'); return; }
+    if (!cfg.autoReply) { console.log('[autoReply] auto-resposta DESLIGADA'); return; }
+    if (!cfg.message) { console.log('[autoReply] mensagem vazia'); return; }
+    if (isWithinBusinessHours(cfg)) { console.log('[autoReply] DENTRO do expediente, não responde'); return; }
+    // Sem cooldown: toda mensagem recebida fora do horário recebe a resposta.
     await sock.sendMessage(fromJid, { text: cfg.message });
     const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
     const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
     await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)", [msgId, convoId, 'me', cfg.message, timeStr, Date.now()]);
     await runQuery("UPDATE conversations SET lastTime = ?, last_autoreply = ? WHERE id = ?", [timeStr, Date.now(), convoId]);
-    console.log(`[autoReply] mensagem fora do horário enviada para ${fromJid}`);
+    console.log(`[autoReply] mensagem fora do horário ENVIADA para ${fromJid}`);
   } catch (e) { console.error('[autoReply] erro:', e && e.message); }
 }
 
