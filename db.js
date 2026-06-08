@@ -116,6 +116,7 @@ db.serialize(() => {
         ["tratamento",     "Tratamento inicial",       "#0ea5e9"],
         ["proposta",       "Proposta enviada",         "#f59e0b"],
         ["followup",       "Follow-up pagamento",      "#ec4899"],
+        ["convertida",     "Venda convertida",         "#16a34a"],
         ["declinado",      "Lead declinou/cancelado",  "#ef4444"]
       ];
       const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");

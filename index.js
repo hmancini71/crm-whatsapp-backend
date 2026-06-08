@@ -96,6 +96,7 @@ app.post('/api/debug/fix-stages', async (req, res) => {
       { id: "tratamento", title: "Tratamento inicial",      color: "#0ea5e9" },
       { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
       { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
+      { id: "convertida", title: "Venda convertida",        color: "#16a34a" },
       { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" }
     ];
     await runQuery("DELETE FROM stages");
@@ -104,7 +105,7 @@ app.post('/api/debug/fix-stages', async (req, res) => {
     }
     await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
     await runQuery("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
-    await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'declinado')");
+    await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado')");
     const stages = await allRows("SELECT * FROM stages");
     res.json({ success: true, stages });
   } catch (err) {
@@ -561,6 +562,7 @@ const CORRECT_STAGES = [
   { id: "tratamento", title: "Tratamento inicial",      color: "#0ea5e9" },
   { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
   { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
+  { id: "convertida", title: "Venda convertida",        color: "#16a34a" },
   { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" }
 ];
 
@@ -579,7 +581,7 @@ app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
       // Migrate leads with old stage IDs
       await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
       await runQuery("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
-      await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'declinado')");
+      await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado')");
       stages = await allRows("SELECT * FROM stages");
     }
     res.json(stages);
