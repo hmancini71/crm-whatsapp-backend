@@ -729,6 +729,18 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       return res.status(404).json({ error: "Conversa não encontrada" });
     }
 
+    // NÓS respondemos pelo CRM → zera o lastClientReply do lead correspondente
+    // (o "controle de tempo" só aparece enquanto o cliente foi o último a falar).
+    try {
+      if (convo.whatsapp_jid) {
+        await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ?", [convo.whatsapp_jid]);
+      }
+      const cleanP = (convo.phone || '').replace(/\D/g, '');
+      if (cleanP.length >= 8) {
+        await runQuery("UPDATE leads SET lastClientReply = NULL WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
+      }
+    } catch (e) { /* ignore */ }
+
     // Instagram: envia pelo Direct e grava a mensagem
     if (convo.account === 'ig') {
       const recipientId = (convo.whatsapp_jid || '').replace(/^ig:/, '');

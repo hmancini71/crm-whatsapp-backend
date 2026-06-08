@@ -387,6 +387,11 @@ async function connectWhatsApp(id, isReconnect = false) {
         if (ourNumber) {
           await runQuery("UPDATE leads SET recv_number = ? WHERE (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) AND (recv_number IS NULL OR recv_number = '')", [ourNumber, fromJid, `%${searchNumber}%`]);
         }
+        } else {
+          // NÓS respondemos (mensagem de saída): zera o lastClientReply para o
+          // "controle de tempo" sumir — ele só vale enquanto o CLIENTE foi o último.
+          const sn = fromJid.split('@')[0];
+          await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [fromJid, `%${sn}%`]);
         } // fim if (!isMine)
       }
     } catch (err) {
