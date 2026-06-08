@@ -662,10 +662,12 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
   const { account } = req.query;
   try {
     let convs;
+    // Ordena pela mensagem mais recente (a conversa com atividade mais nova fica no topo).
+    const ORDER = " ORDER BY (SELECT MAX(m.timestamp) FROM messages m WHERE m.conversationId = conversations.id) DESC";
     if (account && account !== 'all') {
-      convs = await allRows("SELECT * FROM conversations WHERE account = ? AND (archived IS NULL OR archived = 0)", [account]);
+      convs = await allRows("SELECT * FROM conversations WHERE account = ? AND (archived IS NULL OR archived = 0)" + ORDER, [account]);
     } else {
-      convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)");
+      convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)" + ORDER);
     }
 
     // Attach last message for each conversation
@@ -825,6 +827,16 @@ app.post('/api/conversations/:id/audio', authenticateToken, async (req, res) => 
     res.json(messageObj);
   } catch (err) {
     console.error("Error sending audio:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9b2. Conversations Routes: Archive a conversation (esconde da lista de WhatsApp)
+app.post('/api/conversations/:id/archive', authenticateToken, async (req, res) => {
+  try {
+    await runQuery("UPDATE conversations SET archived = 1 WHERE id = ?", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

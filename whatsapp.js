@@ -363,7 +363,7 @@ async function connectWhatsApp(id, isReconnect = false) {
           console.log(`[WhatsApp ${id}] Existing conversation found: convoId=${convoId}`);
           // Update conversation
           await runQuery(
-            "UPDATE conversations SET lastTime = ?, unread = unread + ? WHERE id = ?",
+            "UPDATE conversations SET lastTime = ?, unread = unread + ?, archived = 0 WHERE id = ?",
             [timeStr, isMine ? 0 : 1, convoId]
           );
         } else {
