@@ -112,7 +112,7 @@ async function connectWhatsApp(id, isReconnect = false) {
     auth: state,
     logger,
     version,
-    browser: ['Eccere CRM', 'Chrome', '120.0.0']
+    browser: ['Eccere CRM ' + id, 'Chrome', '120.0.0']
   });
 
   sessions[id] = sock;
