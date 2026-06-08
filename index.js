@@ -821,10 +821,17 @@ app.get('/api/media/:msgId', async (req, res) => {
       return res.status(404).json({ error: "Mídia não encontrada" });
     }
     const ext = path.extname(msg.mediaPath).toLowerCase();
-    const ctype = ext === '.ogg' ? 'audio/ogg'
-      : ext === '.webm' ? 'audio/webm'
-      : (ext === '.mp4' || ext === '.m4a') ? 'audio/mp4'
-      : 'application/octet-stream';
+    const ctypeMap = {
+      '.ogg':'audio/ogg', '.webm':'audio/webm', '.m4a':'audio/mp4', '.mp3':'audio/mpeg', '.amr':'audio/amr',
+      '.mp4':'video/mp4', '.3gp':'video/3gpp', '.mov':'video/quicktime',
+      '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.png':'image/png', '.gif':'image/gif', '.webp':'image/webp',
+      '.pdf':'application/pdf', '.doc':'application/msword',
+      '.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.xls':'application/vnd.ms-excel',
+      '.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '.txt':'text/plain', '.zip':'application/zip'
+    };
+    const ctype = ctypeMap[ext] || 'application/octet-stream';
     res.setHeader('Content-Type', ctype);
     fs.createReadStream(msg.mediaPath).pipe(res);
   } catch (err) {

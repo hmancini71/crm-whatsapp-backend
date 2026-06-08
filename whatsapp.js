@@ -229,18 +229,82 @@ async function connectWhatsApp(id, isReconnect = false) {
         }
         const incomingMsgId = msg.key.id || ('m_' + Math.random().toString(36).substr(2, 9));
         let text, incomingType = 'text', incomingMediaPath = null;
-        if (msg.message?.conversation || msg.message?.extendedTextMessage?.text) {
-          text = msg.message.conversation || msg.message.extendedTextMessage.text;
-        } else if (msg.message?.audioMessage) {
+
+        // Desembrulha mensagens "embrulhadas" (efêmeras, ver-uma-vez, doc c/ legenda)
+        const content = msg.message || {};
+        const inner = content.ephemeralMessage?.message
+          || content.viewOnceMessage?.message
+          || content.viewOnceMessageV2?.message
+          || content.documentWithCaptionMessage?.message
+          || content;
+
+        // Extensão de arquivo a partir do mimetype
+        const extFromMime = (mime, fallback) => {
+          if (!mime) return fallback;
+          const m = mime.split(';')[0].trim().toLowerCase();
+          const map = {
+            'image/jpeg':'.jpg','image/jpg':'.jpg','image/png':'.png','image/gif':'.gif','image/webp':'.webp',
+            'video/mp4':'.mp4','video/3gpp':'.3gp','video/quicktime':'.mov',
+            'audio/ogg':'.ogg','audio/mpeg':'.mp3','audio/mp4':'.m4a','audio/amr':'.amr',
+            'application/pdf':'.pdf','application/msword':'.doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document':'.docx',
+            'application/vnd.ms-excel':'.xls',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':'.xlsx',
+            'text/plain':'.txt','application/zip':'.zip'
+          };
+          return map[m] || fallback;
+        };
+        // Baixa a mídia e salva com a extensão dada; devolve o caminho (ou null)
+        const saveMedia = async (ext) => {
+          try {
+            const buf = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+            const p = path.join(MEDIA_DIR, incomingMsgId + ext);
+            fs.writeFileSync(p, buf);
+            return p;
+          } catch (e) {
+            console.error(`[WhatsApp ${id}] Falha ao baixar mídia (${incomingType}):`, e);
+            return null;
+          }
+        };
+
+        if (inner.conversation || inner.extendedTextMessage?.text) {
+          text = inner.conversation || inner.extendedTextMessage.text;
+        } else if (inner.imageMessage) {
+          incomingType = 'image';
+          text = inner.imageMessage.caption || '[Imagem]';
+          incomingMediaPath = await saveMedia(extFromMime(inner.imageMessage.mimetype, '.jpg'));
+        } else if (inner.videoMessage) {
+          incomingType = 'video';
+          text = inner.videoMessage.caption || '[Vídeo]';
+          incomingMediaPath = await saveMedia(extFromMime(inner.videoMessage.mimetype, '.mp4'));
+        } else if (inner.audioMessage) {
           incomingType = 'audio';
           text = '[Mensagem de voz]';
-          try {
-            const audioBuf = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-            incomingMediaPath = path.join(MEDIA_DIR, incomingMsgId + '.ogg');
-            fs.writeFileSync(incomingMediaPath, audioBuf);
-          } catch (e) {
-            console.error(`[WhatsApp ${id}] Falha ao baixar áudio recebido:`, e);
-          }
+          incomingMediaPath = await saveMedia('.ogg');
+        } else if (inner.stickerMessage) {
+          incomingType = 'sticker';
+          text = '[Figurinha]';
+          incomingMediaPath = await saveMedia('.webp');
+        } else if (inner.documentMessage) {
+          const doc = inner.documentMessage;
+          incomingType = 'document';
+          const fileName = doc.fileName || 'documento';
+          text = fileName;
+          let ext = path.extname(fileName).toLowerCase();
+          if (!ext) ext = extFromMime(doc.mimetype, '.bin');
+          incomingMediaPath = await saveMedia(ext);
+        } else if (inner.locationMessage) {
+          incomingType = 'text';
+          const lat = inner.locationMessage.degreesLatitude;
+          const lng = inner.locationMessage.degreesLongitude;
+          text = '📍 Localização: https://maps.google.com/?q=' + lat + ',' + lng;
+        } else if (inner.contactMessage || inner.contactsArrayMessage) {
+          incomingType = 'text';
+          const cm = inner.contactMessage || (inner.contactsArrayMessage?.contacts || [])[0];
+          text = '👤 Contato: ' + ((cm && cm.displayName) || 'contato compartilhado');
+        } else if (inner.reactionMessage) {
+          incomingType = 'text';
+          text = 'Reagiu: ' + (inner.reactionMessage.text || '👍');
         } else {
           text = '[Mídia/Outro]';
         }
@@ -282,6 +346,10 @@ async function connectWhatsApp(id, isReconnect = false) {
 
         // Regras de lead só valem para mensagens RECEBIDAS (do cliente), não para as nossas
         if (!isMine) {
+        // Nosso número que RECEBEU esta mensagem (carimbado no lead p/ ficar
+        // imune a futuras trocas de número entre slots). Vem do socket conectado.
+        let ourNumber = '';
+        try { if (sock.user && sock.user.id) ourNumber = '+' + sock.user.id.split(':')[0].split('@')[0]; } catch (e) {}
         // Check if phone matches any lead (active OR archived); if archived, restore it
         const searchNumber = fromJid.split('@')[0];
         let lead = await getRow("SELECT * FROM leads WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [fromJid, `%${searchNumber}%`]);
@@ -294,8 +362,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           }
           console.log(`[WhatsApp ${id}] No lead found for ${phone}. Creating new lead: leadId=${leadId}`);
           await runQuery(
-            "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [leadId, name, "", fromJid.endsWith('@lid') ? "" : formattedPhone, "", 0, "novo", "Venda", id, "Rafael Andrade", JSON.stringify([]), createdAt, 0, fromJid]
+            "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [leadId, name, "", fromJid.endsWith('@lid') ? "" : formattedPhone, "", 0, "novo", "Venda", id, "Rafael Andrade", JSON.stringify([]), createdAt, 0, fromJid, ourNumber]
           );
         } else if (lead.archived === 1) {
           // Lead was archived — restore it automatically since they reached out again
@@ -313,6 +381,11 @@ async function connectWhatsApp(id, isReconnect = false) {
           console.log(`[WhatsApp ${id}] Received message from existing lead: ${lead.name}`);
           // Stamp lastClientReply to track when client last responded
           await runQuery("UPDATE leads SET lastClientReply = ? WHERE id = ?", [new Date().toISOString(), lead.id]);
+        }
+        // Carimba o número recebido se o lead ainda não tiver (vale para criar,
+        // restaurar e existentes — backfill automático no próximo contato).
+        if (ourNumber) {
+          await runQuery("UPDATE leads SET recv_number = ? WHERE (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) AND (recv_number IS NULL OR recv_number = '')", [ourNumber, fromJid, `%${searchNumber}%`]);
         }
         } // fim if (!isMine)
       }

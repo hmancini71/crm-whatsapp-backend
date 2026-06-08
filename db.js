@@ -208,6 +208,21 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: add 'recv_number' (nosso número que RECEBEU o lead, carimbado
+  // na hora da mensagem) — assim o card mostra sempre o número certo, mesmo que o
+  // número troque de slot depois.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'recv_number')) {
+      db.run("ALTER TABLE leads ADD COLUMN recv_number TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) {
+          console.error("Failed to add recv_number column to leads:", alterErr);
+        } else {
+          console.log("Migration: added 'recv_number' column to leads table.");
+        }
+      });
+    }
+  });
+
   // Unconditional migration: update stages to new pipeline phases (Novo Leads, Tratamento inicial, Proposta enviada, Follow-up pagamento, Lead declinou/cancelado)
   db.serialize(() => {
     console.log("Migration: sync stages to new 5-column pipeline...");
