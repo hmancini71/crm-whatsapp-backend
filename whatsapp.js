@@ -347,7 +347,24 @@ async function connectWhatsApp(id, isReconnect = false) {
           incomingType = 'text';
           text = 'Reagiu: ' + (inner.reactionMessage.text || '👍');
         } else {
-          text = '[Mídia/Outro]';
+          // Catch-all: qualquer mídia com mimetype (tipos novos/menos comuns, ex.: ptv/
+          // vídeo redondo, áudios diferentes) é baixada e exibida pela categoria.
+          let mm = null;
+          for (const k of Object.keys(inner)) {
+            const v = inner[k];
+            if (v && typeof v === 'object' && v.mimetype) { mm = v; break; }
+          }
+          if (mm) {
+            const mime = String(mm.mimetype).toLowerCase();
+            incomingType = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'document';
+            text = mm.caption || mm.fileName || (incomingType === 'image' ? '[Imagem]' : incomingType === 'video' ? '[Vídeo]' : incomingType === 'audio' ? '[Mensagem de voz]' : '[Arquivo]');
+            let ext = mm.fileName ? path.extname(mm.fileName).toLowerCase() : '';
+            if (!ext) ext = extFromMime(mm.mimetype, '.bin');
+            incomingMediaPath = await saveMedia(ext);
+            if (!incomingMediaPath) { incomingType = 'text'; text = '[Mídia/Outro]'; }
+          } else {
+            text = '[Mídia/Outro]';
+          }
         }
         const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const name = (!isMine && msg.pushName) ? msg.pushName : (fromJid.endsWith('@lid') ? 'Usuário WhatsApp' : (phone || 'Usuário WhatsApp'));
