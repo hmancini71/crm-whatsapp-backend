@@ -598,6 +598,23 @@ app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
   }
 });
 
+// Data no fuso de São Paulo (YYYY-MM-DD) — usado p/ agrupar por dia "do Brasil".
+const _spDateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' });
+const _spWdFmt = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short' });
+function spDateISO(d) { return _spDateFmt.format(d); }            // "2026-06-09"
+function last7DaysSP() {
+  const out = [];
+  const now = Date.now();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(now - i * 86400000);
+    const iso = _spDateFmt.format(d);
+    const wd = _spWdFmt.format(d).replace(/\.$/, '').toLowerCase();
+    const parts = iso.split('-');
+    out.push({ iso, label: `${parts[2]}/${parts[1]}/${parts[0].slice(2)} (${wd})`, value: 0 });
+  }
+  return out;
+}
+
 // 6. Dashboard Route (counts only active/non-archived leads)
 app.get('/api/dashboard', authenticateToken, async (req, res) => {
   try {
@@ -624,16 +641,11 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     // WhatsApp accounts status
     const whatsappAccounts = await allRows("SELECT id, label, number, color, status, unread FROM whatsapp_accounts");
 
-    // Novos leads REAIS por dia (últimos 7 dias), rotulados pela data de registro.
-    const wdShort = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+    // Novos leads REAIS por dia (últimos 7 dias, fuso de São Paulo).
     const weeklyLeads = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(); d.setDate(d.getDate() - i);
-      const y = d.getFullYear(), mo = d.getMonth() + 1, da = d.getDate();
-      const iso = `${y}-${String(mo).padStart(2, '0')}-${String(da).padStart(2, '0')}`;
-      const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ?", [iso]);
-      const label = `${String(da).padStart(2, '0')}/${String(mo).padStart(2, '0')}/${String(y).slice(2)} (${wdShort[d.getDay()]})`;
-      weeklyLeads.push({ day: label, value: (r && r.count) || 0 });
+    for (const dia of last7DaysSP()) {
+      const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ?", [dia.iso]);
+      weeklyLeads.push({ day: dia.label, value: (r && r.count) || 0 });
     }
 
     res.json({
@@ -664,18 +676,8 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
 // 6b. Dashboard: contratos assinados por dia (e-mails "Contrato Assinado pelo Cliente:")
 let _signedCache = { ts: 0, data: null };
 app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) => {
-  // monta os 7 dias (mesma ordem/rótulo do weeklyLeads)
-  const wdShort = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
-  const days = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date(); d.setDate(d.getDate() - i);
-    const y = d.getFullYear(), mo = d.getMonth() + 1, da = d.getDate();
-    days.push({
-      iso: `${y}-${String(mo).padStart(2, '0')}-${String(da).padStart(2, '0')}`,
-      label: `${String(da).padStart(2, '0')}/${String(mo).padStart(2, '0')}/${String(y).slice(2)} (${wdShort[d.getDay()]})`,
-      value: 0
-    });
-  }
+  // monta os 7 dias (mesma ordem/rótulo do weeklyLeads, fuso de São Paulo)
+  const days = last7DaysSP();
   // cache de 5 min (IMAP é lento; o front consulta com frequência)
   if (_signedCache.data && (Date.now() - _signedCache.ts < 5 * 60 * 1000)) {
     return res.json(_signedCache.data);
@@ -714,7 +716,7 @@ app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) =
           if (!dt) continue;
           const dd = new Date(dt);
           if (dd < since) continue;
-          const iso = `${dd.getFullYear()}-${String(dd.getMonth() + 1).padStart(2, '0')}-${String(dd.getDate()).padStart(2, '0')}`;
+          const iso = spDateISO(dd); // dia no fuso de São Paulo
           const slot = days.find(x => x.iso === iso);
           if (slot) slot.value++;
         }
