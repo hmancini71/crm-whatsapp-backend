@@ -661,6 +661,63 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
   }
 });
 
+// 6b. Dashboard: contratos assinados por dia (e-mails "Contrato Assinado pelo Cliente:")
+let _signedCache = { ts: 0, data: null };
+app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) => {
+  // monta os 7 dias (mesma ordem/rótulo do weeklyLeads)
+  const wdShort = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    const y = d.getFullYear(), mo = d.getMonth() + 1, da = d.getDate();
+    days.push({
+      iso: `${y}-${String(mo).padStart(2, '0')}-${String(da).padStart(2, '0')}`,
+      label: `${String(da).padStart(2, '0')}/${String(mo).padStart(2, '0')}/${String(y).slice(2)} (${wdShort[d.getDay()]})`,
+      value: 0
+    });
+  }
+  // cache de 5 min (IMAP é lento; o front consulta com frequência)
+  if (_signedCache.data && (Date.now() - _signedCache.ts < 5 * 60 * 1000)) {
+    return res.json(_signedCache.data);
+  }
+  try {
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    let ImapFlow;
+    try { ImapFlow = require('imapflow').ImapFlow; } catch (e) { ImapFlow = null; }
+    if (acc && ImapFlow) {
+      const client = new ImapFlow({
+        host: acc.host, port: 993, secure: true,
+        auth: { user: acc.email, pass: acc.password }, logger: false, tls: { rejectUnauthorized: false }
+      });
+      await client.connect();
+      const lock = await client.getMailboxLock('INBOX');
+      try {
+        const since = new Date(); since.setDate(since.getDate() - 7); since.setHours(0, 0, 0, 0);
+        let uids = [];
+        try { uids = await client.search({ since, header: { subject: 'Contrato Assinado pelo Cliente:' } }, { uid: true }); } catch (e) { uids = []; }
+        if (uids && uids.length) {
+          for await (const msg of client.fetch(uids, { envelope: true, internalDate: true }, { uid: true })) {
+            const subj = (msg.envelope && msg.envelope.subject) || '';
+            if (!subj.includes('Contrato Assinado pelo Cliente:')) continue;
+            const dt = msg.internalDate || (msg.envelope && msg.envelope.date);
+            if (!dt) continue;
+            const dd = new Date(dt);
+            const iso = `${dd.getFullYear()}-${String(dd.getMonth() + 1).padStart(2, '0')}-${String(dd.getDate()).padStart(2, '0')}`;
+            const slot = days.find(x => x.iso === iso);
+            if (slot) slot.value++;
+          }
+        }
+      } finally { lock.release(); }
+      try { await client.logout(); } catch (e) {}
+    }
+  } catch (err) {
+    console.error('signed-contracts error:', err && err.message);
+  }
+  const payload = { days: days.map(d => ({ day: d.label, value: d.value })) };
+  _signedCache = { ts: Date.now(), data: payload };
+  res.json(payload);
+});
+
 // 7. Conversations Routes: Get List (exclude archived leads' conversations)
 app.get('/api/conversations', authenticateToken, async (req, res) => {
   const { account } = req.query;
