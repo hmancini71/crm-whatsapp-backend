@@ -400,7 +400,8 @@ async function sendIgMessage(recipientId, text) {
 // 3. Leads Routes: Get All (active only)
 app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
-    const leads = await allRows("SELECT * FROM leads WHERE archived = 0 ORDER BY createdAt DESC");
+    // Ordena por prioridade (followup no topo, depois urgente/vermelho, depois média/amarelo, depois sem), e por data.
+    const leads = await allRows("SELECT * FROM leads WHERE archived = 0 ORDER BY CASE priority WHEN 'followup' THEN 1 WHEN 'urgente' THEN 2 WHEN 'media' THEN 3 ELSE 4 END, createdAt DESC");
     const parsedLeads = leads.map(l => ({
       ...l,
       tags: l.tags ? JSON.parse(l.tags) : []
@@ -695,7 +696,8 @@ app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) =
       const lock = await client.getMailboxLock('INBOX');
       try {
         const since = new Date(); since.setDate(since.getDate() - 7); since.setHours(0, 0, 0, 0);
-        const TARGET = 'contrato assinado pelo cliente:';
+        // Conta "Contrato Assinado pelo Cliente:".
+        const matchSubj = (s) => s.includes('contrato assinado pelo cliente');
         // Estratégia robusta: tenta SEARCH SINCE (todas as msgs dos últimos 7 dias);
         // se falhar/vier vazio, faz fallback nas últimas 300 mensagens da caixa.
         // Em ambos os casos, o que conta é o filtro de ASSUNTO + janela de 7 dias.
@@ -711,7 +713,7 @@ app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) =
         }
         for await (const msg of iter) {
           const subj = ((msg.envelope && msg.envelope.subject) || '').toLowerCase();
-          if (!subj.includes(TARGET)) continue;
+          if (!matchSubj(subj)) continue;
           const dt = msg.internalDate || (msg.envelope && msg.envelope.date);
           if (!dt) continue;
           const dd = new Date(dt);
@@ -814,6 +816,13 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       const cleanP = (convo.phone || '').replace(/\D/g, '');
       if (cleanP.length >= 8) {
         await runQuery("UPDATE leads SET lastClientReply = NULL WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
+      }
+      // Novos Leads: ao responder, move automaticamente para "Tratamento inicial".
+      if (convo.whatsapp_jid) {
+        await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND whatsapp_jid = ?", [convo.whatsapp_jid]);
+      }
+      if (cleanP.length >= 8) {
+        await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
       }
     } catch (e) { /* ignore */ }
 

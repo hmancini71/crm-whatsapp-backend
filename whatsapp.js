@@ -454,6 +454,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           // "controle de tempo" sumir — ele só vale enquanto o CLIENTE foi o último.
           const sn = fromJid.split('@')[0];
           await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [fromJid, `%${sn}%`]);
+          // Novos Leads: ao responder (pelo celular), move para "Tratamento inicial".
+          await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?))", [fromJid, `%${sn}%`]);
         } // fim if (!isMine)
       }
     } catch (err) {
