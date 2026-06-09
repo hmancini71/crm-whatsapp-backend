@@ -693,19 +693,30 @@ app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) =
       const lock = await client.getMailboxLock('INBOX');
       try {
         const since = new Date(); since.setDate(since.getDate() - 7); since.setHours(0, 0, 0, 0);
-        let uids = [];
-        try { uids = await client.search({ since, header: { subject: 'Contrato Assinado pelo Cliente:' } }, { uid: true }); } catch (e) { uids = []; }
-        if (uids && uids.length) {
-          for await (const msg of client.fetch(uids, { envelope: true, internalDate: true }, { uid: true })) {
-            const subj = (msg.envelope && msg.envelope.subject) || '';
-            if (!subj.includes('Contrato Assinado pelo Cliente:')) continue;
-            const dt = msg.internalDate || (msg.envelope && msg.envelope.date);
-            if (!dt) continue;
-            const dd = new Date(dt);
-            const iso = `${dd.getFullYear()}-${String(dd.getMonth() + 1).padStart(2, '0')}-${String(dd.getDate()).padStart(2, '0')}`;
-            const slot = days.find(x => x.iso === iso);
-            if (slot) slot.value++;
-          }
+        const TARGET = 'contrato assinado pelo cliente:';
+        // Estratégia robusta: tenta SEARCH SINCE (todas as msgs dos últimos 7 dias);
+        // se falhar/vier vazio, faz fallback nas últimas 300 mensagens da caixa.
+        // Em ambos os casos, o que conta é o filtro de ASSUNTO + janela de 7 dias.
+        let iter = null;
+        try {
+          const uids = await client.search({ since }, { uid: true });
+          if (uids && uids.length) iter = client.fetch(uids, { envelope: true, internalDate: true }, { uid: true });
+        } catch (e) { iter = null; }
+        if (!iter) {
+          const total = (client.mailbox && client.mailbox.exists) || 0;
+          const start = Math.max(1, total - 299);
+          iter = client.fetch(start + ':*', { envelope: true, internalDate: true });
+        }
+        for await (const msg of iter) {
+          const subj = ((msg.envelope && msg.envelope.subject) || '').toLowerCase();
+          if (!subj.includes(TARGET)) continue;
+          const dt = msg.internalDate || (msg.envelope && msg.envelope.date);
+          if (!dt) continue;
+          const dd = new Date(dt);
+          if (dd < since) continue;
+          const iso = `${dd.getFullYear()}-${String(dd.getMonth() + 1).padStart(2, '0')}-${String(dd.getDate()).padStart(2, '0')}`;
+          const slot = days.find(x => x.iso === iso);
+          if (slot) slot.value++;
         }
       } finally { lock.release(); }
       try { await client.logout(); } catch (e) {}
