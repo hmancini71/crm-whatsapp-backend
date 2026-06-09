@@ -624,6 +624,18 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     // WhatsApp accounts status
     const whatsappAccounts = await allRows("SELECT id, label, number, color, status, unread FROM whatsapp_accounts");
 
+    // Novos leads REAIS por dia (últimos 7 dias), rotulados pela data de registro.
+    const wdShort = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+    const weeklyLeads = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const y = d.getFullYear(), mo = d.getMonth() + 1, da = d.getDate();
+      const iso = `${y}-${String(mo).padStart(2, '0')}-${String(da).padStart(2, '0')}`;
+      const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ?", [iso]);
+      const label = `${String(da).padStart(2, '0')}/${String(mo).padStart(2, '0')}/${String(y).slice(2)} (${wdShort[d.getDay()]})`;
+      weeklyLeads.push({ day: label, value: (r && r.count) || 0 });
+    }
+
     res.json({
       metrics: {
         totalLeads: totalLeads.count,
@@ -636,15 +648,7 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
         revenueGrowth: 18.7
       },
       leadsBySource,
-      weeklyLeads: [
-        {"day": "Seg", "value": 12},
-        {"day": "Ter", "value": 19},
-        {"day": "Qua", "value": 9},
-        {"day": "Qui", "value": 22},
-        {"day": "Sex", "value": 28},
-        {"day": "Sáb", "value": 14},
-        {"day": "Dom", "value": 7}
-      ],
+      weeklyLeads,
       recentActivity: [
         {"id": "a1", "type": "lead", "text": "Novo lead Mariana Costa entrou via WhatsApp Comercial", "time": "há 5 min"},
         {"id": "a2", "type": "deal", "text": "Patrício Souza avançou para Negociação", "time": "há 27 min"},
