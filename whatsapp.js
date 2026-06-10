@@ -454,8 +454,20 @@ async function connectWhatsApp(id, isReconnect = false) {
           // "controle de tempo" sumir — ele só vale enquanto o CLIENTE foi o último.
           const sn = fromJid.split('@')[0];
           await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [fromJid, `%${sn}%`]);
-          // Novos Leads: ao responder (pelo celular), move para "Tratamento inicial".
-          await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?))", [fromJid, `%${sn}%`]);
+          // A auto-resposta de fora do horário NÃO conta como atendimento:
+          // não pode mover o lead de "Novo Leads" para "Tratamento inicial".
+          let isAutoReply = false;
+          try {
+            const bhRow = await getRow("SELECT value FROM app_settings WHERE key = 'business_hours'");
+            const bh = bhRow && bhRow.value ? JSON.parse(bhRow.value) : null;
+            if (bh && bh.message && text && String(text).trim() === String(bh.message).trim()) isAutoReply = true;
+          } catch (e) {}
+          if (!isAutoReply) {
+            // Novos Leads: ao responder (pelo celular OU pelo CRM), move para "Tratamento inicial".
+            // Casa por jid E por telefone normalizado (8 últimos dígitos), robusto a formatação.
+            const tail = sn.replace(/\D/g, '').slice(-8);
+            await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?))", [fromJid, `%${tail}%`]);
+          }
         } // fim if (!isMine)
       }
     } catch (err) {
