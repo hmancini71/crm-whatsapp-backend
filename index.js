@@ -1318,17 +1318,26 @@ app.post('/api/settings/business-hours', authenticateToken, async (req, res) => 
 
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
-  const { name, phone, email, value, stage, source, company, priority } = req.body || {};
+  const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: "Nome é obrigatório" });
   try {
     const id = 'l_' + Math.random().toString(36).substr(2, 9);
     const createdAt = new Date().toISOString().slice(0, 10);
+    const safeTags = Array.isArray(tags) ? tags.filter(t => typeof t === 'string' && t) : [];
+    // Se veio a linha de atendimento (wa1..wa4), carimba o recv_number com o número dela
+    let recvNumber = null;
+    if (account) {
+      try {
+        const acc = await getRow("SELECT number FROM whatsapp_accounts WHERE id = ?", [account]);
+        recvNumber = (acc && acc.number) || null;
+      } catch (e) {}
+    }
     await runQuery(
-      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, stage || "novo", source || "Manual", "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify([]), createdAt, 0, priority || ""]
+      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, stage || "novo", source || "Manual", account || "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify(safeTags), createdAt, 0, priority || "", recvNumber]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
-    res.json({ ...lead, tags: [], created: true });
+    res.json({ ...lead, tags: safeTags, created: true });
   } catch (err) {
     console.error("create lead error:", err && err.message);
     res.status(500).json({ error: err.message });
