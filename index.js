@@ -622,12 +622,12 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const totalLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE archived = 0");
     const totalConvs = await getRow("SELECT COUNT(*) as count FROM conversations WHERE (archived IS NULL OR archived = 0)");
     
-    // Revenue sum of 'followup' leads (non-archived)
-    const revenueRow = await getRow("SELECT SUM(value) as total FROM leads WHERE stage = 'followup' AND archived = 0");
+    // Receita real = soma das VENDAS CONVERTIDAS (não arquivadas)
+    const revenueRow = await getRow("SELECT SUM(value) as total FROM leads WHERE stage = 'convertida' AND archived = 0");
     const totalRevenue = revenueRow.total || 0;
 
-    // Conversion rate: closed leads / total leads (non-archived)
-    const closedLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE stage = 'followup' AND archived = 0");
+    // Taxa de conversão real = vendas convertidas / total de leads (não arquivados)
+    const closedLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE stage = 'convertida' AND archived = 0");
     const conversionRate = totalLeads.count > 0 ? ((closedLeads.count / totalLeads.count) * 100).toFixed(1) : 0;
 
     // Source distribution (non-archived)
@@ -652,21 +652,17 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     res.json({
       metrics: {
         totalLeads: totalLeads.count,
-        leadsGrowth: 12.5,
+        leadsGrowth: 0,
         conversations: totalConvs.count,
-        conversationsGrowth: 8.2,
+        conversationsGrowth: 0,
         conversionRate: parseFloat(conversionRate),
-        conversionGrowth: 3.1,
+        conversionGrowth: 0,
         revenue: totalRevenue,
-        revenueGrowth: 18.7
+        revenueGrowth: 0
       },
       leadsBySource,
       weeklyLeads,
-      recentActivity: [
-        {"id": "a1", "type": "lead", "text": "Novo lead Mariana Costa entrou via WhatsApp Comercial", "time": "há 5 min"},
-        {"id": "a2", "type": "deal", "text": "Patrício Souza avançou para Negociação", "time": "há 27 min"},
-        {"id": "a3", "type": "won", "text": "Negócio fechado com Ricardo Alves – R$ 6.200", "time": "há 2 h"}
-      ],
+      recentActivity: [],
       whatsappAccounts
     });
   } catch (err) {
@@ -750,7 +746,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     const detailedConvs = [];
     for (const c of convs) {
       const lastMsg = await getRow(
-        "SELECT id, \`from\`, text, time, type FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1",
+        "SELECT id, \`from\`, text, time, type, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1",
         [c.id]
       );
       detailedConvs.push({
@@ -761,6 +757,27 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     }
 
     res.json(detailedConvs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7b. Conversations Routes: editar dados do contato (nome/telefone)
+app.patch('/api/conversations/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { name, phone } = req.body || {};
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
+    const updates = [], params = [];
+    if (name !== undefined && String(name).trim()) { updates.push("name = ?"); params.push(String(name).trim()); }
+    if (phone !== undefined && String(phone).trim()) { updates.push("phone = ?"); params.push(String(phone).trim()); }
+    if (updates.length) {
+      params.push(id);
+      await runQuery("UPDATE conversations SET " + updates.join(', ') + " WHERE id = ?", params);
+    }
+    const updated = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    res.json({ ...updated, online: Boolean(updated.online) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
