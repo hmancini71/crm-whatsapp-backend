@@ -1398,6 +1398,41 @@ async function reconcileReplyDots() {
   }
 }
 
+// Reconciliação: leads parados em "Novo Leads" cuja conversa JÁ tem resposta nossa
+// (fora a auto-resposta) migram para "Tratamento inicial". Cobre trocas feitas antes
+// da regra existir e qualquer mensagem que tenha escapado do gatilho em tempo real.
+async function reconcileNovoLeads() {
+  try {
+    let autoMsg = null;
+    try {
+      const bhRow = await getRow("SELECT value FROM app_settings WHERE key = 'business_hours'");
+      const bh = bhRow && bhRow.value ? JSON.parse(bhRow.value) : null;
+      if (bh && bh.message) autoMsg = String(bh.message).trim();
+    } catch (e) {}
+    const novos = await allRows("SELECT id, name, phone, whatsapp_jid FROM leads WHERE stage = 'novo' AND archived = 0");
+    if (!novos.length) return;
+    const convs = await allRows("SELECT id, phone, whatsapp_jid FROM conversations");
+    const norm = (p) => String(p || '').replace(/\D/g, '');
+    let moved = 0;
+    for (const l of novos) {
+      const lt = norm(l.phone).slice(-8);
+      const conv = convs.find(c =>
+        (l.whatsapp_jid && c.whatsapp_jid && c.whatsapp_jid === l.whatsapp_jid) ||
+        (lt.length === 8 && norm(c.phone).slice(-8) === lt)
+      );
+      if (!conv) continue;
+      const mine = await allRows("SELECT text FROM messages WHERE conversationId = ? AND `from` = 'me'", [conv.id]);
+      const respondeu = mine.some(m => !autoMsg || String((m && m.text) || '').trim() !== autoMsg);
+      if (respondeu) {
+        await runQuery("UPDATE leads SET stage = 'tratamento' WHERE id = ? AND stage = 'novo'", [l.id]);
+        moved++;
+        console.log(`[reconcileNovoLeads] "${l.name}" movido para Tratamento inicial (já tinha resposta nossa).`);
+      }
+    }
+    if (moved) console.log(`[reconcileNovoLeads] total: ${moved} lead(s) movidos.`);
+  } catch (e) { console.error('[reconcileNovoLeads]', e && e.message); }
+}
+
 app.listen(PORT, async () => {
   console.log(`CRM WhatsApp Backend Server running on http://localhost:${PORT}`);
   // Autostart active sessions
@@ -1412,4 +1447,11 @@ app.listen(PORT, async () => {
   } catch (err) {
     console.error("Error reconciling reply dots:", err);
   }
+  // Novo Leads já respondidos → Tratamento inicial (no boot e a cada 15 min)
+  try {
+    await reconcileNovoLeads();
+  } catch (err) {
+    console.error("Error reconciling novo leads:", err);
+  }
+  setInterval(() => { reconcileNovoLeads().catch(() => {}); }, 15 * 60 * 1000);
 });
