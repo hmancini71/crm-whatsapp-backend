@@ -589,6 +589,33 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
   return { id: msgId, from: 'me', text: '[Mensagem de voz]', time: timeStr, type: 'audio' };
 }
 
+// Envia foto/vídeo/documento pela conversa (e persiste no CRM)
+async function sendWhatsAppMedia(accountId, convoId, buffer, mimetype, fileName) {
+  const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
+  if (!convo) throw new Error("Conversation not found");
+  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
+  const sock = sessions[accountId];
+  if (!sock) throw new Error("WhatsApp account not connected");
+  const mime = String(mimetype || 'application/octet-stream').toLowerCase();
+  let content, type, label;
+  if (mime.startsWith('image/')) { content = { image: buffer, mimetype: mime }; type = 'image'; label = fileName || '[Imagem]'; }
+  else if (mime.startsWith('video/')) { content = { video: buffer, mimetype: mime }; type = 'video'; label = fileName || '[Vídeo]'; }
+  else { content = { document: buffer, mimetype: mime, fileName: fileName || 'arquivo' }; type = 'document'; label = fileName || '[Arquivo]'; }
+  const sent = await sock.sendMessage(jid, content);
+  const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const msgId = (sent && sent.key && sent.key.id) || ('m_' + Math.random().toString(36).substr(2, 9));
+  let ext = path.extname(fileName || '');
+  if (!ext) ext = type === 'image' ? '.jpg' : type === 'video' ? '.mp4' : '.bin';
+  const mediaPath = path.join(MEDIA_DIR, msgId + ext);
+  try { fs.writeFileSync(mediaPath, buffer); } catch (e) { console.error('Falha ao salvar mídia enviada:', e); }
+  await runQuery(
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', label, timeStr, Date.now(), type, mediaPath]
+  );
+  await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
+  return { id: msgId, from: 'me', text: label, time: timeStr, type: type };
+}
+
 // Auto reconnect active sessions on startup
 async function initSessions() {
   const connectedAccounts = await allRows("SELECT id FROM whatsapp_accounts WHERE status = 'connected'");
@@ -616,6 +643,7 @@ async function initSessions() {
 }
 
 module.exports = {
+  sendWhatsAppMedia,
   connectWhatsApp,
   disconnectWhatsApp,
   sendWhatsAppMessage,

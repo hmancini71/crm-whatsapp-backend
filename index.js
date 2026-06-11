@@ -15,8 +15,7 @@ const {
   initSessions,
   sessionQrs,
   sessions,
-  MEDIA_DIR
-} = require('./whatsapp');
+  MEDIA_DIR, sendWhatsAppMedia } = require('./whatsapp');
 
 // Redirect console logs to an in-memory buffer
 const logBuffer = [];
@@ -927,6 +926,45 @@ app.post('/api/conversations/:id/audio', authenticateToken, async (req, res) => 
     res.json(messageObj);
   } catch (err) {
     console.error("Error sending audio:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9b1b. Conversations Routes: enviar foto/vídeo/documento
+app.post('/api/conversations/:id/media', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { data, mimetype, fileName } = req.body || {};
+  if (!data) return res.status(400).json({ error: "Arquivo é obrigatório" });
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
+    const buffer = Buffer.from(data, 'base64');
+    if (buffer.length > 16 * 1024 * 1024) return res.status(400).json({ error: "Arquivo acima de 16 MB" });
+    const accountId = convo.account;
+    const isConnected = sessions[accountId] && sessions[accountId].ws.isOpen;
+    let messageObj;
+    if (isConnected) {
+      messageObj = await sendWhatsAppMedia(accountId, id, buffer, mimetype, fileName);
+    } else {
+      // Offline: guarda localmente para aparecer no CRM mesmo sem conexão
+      const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
+      const mime = String(mimetype || '').toLowerCase();
+      const type = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'document';
+      let ext = path.extname(fileName || '');
+      if (!ext) ext = type === 'image' ? '.jpg' : type === 'video' ? '.mp4' : '.bin';
+      const mediaPath = path.join(MEDIA_DIR, msgId + ext);
+      try { fs.writeFileSync(mediaPath, buffer); } catch (e) {}
+      await runQuery(
+        "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [msgId, id, 'me', fileName || '[Arquivo]', timeStr, Date.now(), type, mediaPath]
+      );
+      await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
+      messageObj = { id: msgId, from: 'me', text: fileName || '[Arquivo]', time: timeStr, type: type };
+    }
+    res.json(messageObj);
+  } catch (err) {
+    console.error("Error sending media:", err);
     res.status(500).json({ error: err.message });
   }
 });
