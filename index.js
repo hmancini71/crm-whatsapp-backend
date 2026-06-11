@@ -1259,8 +1259,21 @@ app.get('/api/email/message/:uid', authenticateToken, async (req, res) => {
 
 // 18. Email Routes: Send (reply/forward/compose) via SMTP
 app.post('/api/email/send', authenticateToken, async (req, res) => {
-  const { to, cc, subject, text, html } = req.body;
+  const { to, cc, subject, text, html, attachments } = req.body;
   if (!to || !subject) return res.status(400).json({ error: "Destinatario e assunto sao obrigatorios" });
+  // Anexos: [{ filename, content(base64), contentType }]
+  let mailAttachments;
+  if (Array.isArray(attachments) && attachments.length) {
+    let total = 0;
+    mailAttachments = [];
+    for (const a of attachments) {
+      if (!a || !a.content || !a.filename) continue;
+      const buf = Buffer.from(String(a.content), 'base64');
+      total += buf.length;
+      if (total > 20 * 1024 * 1024) return res.status(400).json({ error: "Anexos acima de 20 MB no total" });
+      mailAttachments.push({ filename: String(a.filename), content: buf, contentType: a.contentType || undefined });
+    }
+  }
   try {
     const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
     if (!acc) return res.status(400).json({ error: "Nenhum e-mail conectado" });
@@ -1271,7 +1284,8 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
     });
     await transporter.sendMail({
       from: acc.email, to, cc: cc || undefined, subject,
-      text: text || undefined, html: html || undefined
+      text: text || undefined, html: html || undefined,
+      attachments: mailAttachments && mailAttachments.length ? mailAttachments : undefined
     });
     res.json({ success: true });
   } catch (err) {
