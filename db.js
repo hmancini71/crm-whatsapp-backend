@@ -230,6 +230,24 @@ db.serialize(() => {
     if (!e) console.log("Migration: rótulos de whatsapp_accounts normalizados para 'Vendas'.");
   });
 
+  // Safe migration: contadores de follow-up da IA
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols) {
+      if (!cols.find(c => c.name === 'ai_fu_count')) db.run("ALTER TABLE leads ADD COLUMN ai_fu_count INTEGER DEFAULT 0");
+      if (!cols.find(c => c.name === 'ai_fu_last')) db.run("ALTER TABLE leads ADD COLUMN ai_fu_last INTEGER DEFAULT 0");
+    }
+  });
+
+  // Safe migration: add 'tracking' (rastreamento de marketing: UTMs, gclid, fbclid)
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'tracking')) {
+      db.run("ALTER TABLE leads ADD COLUMN tracking TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) console.error("Failed to add tracking column to leads:", alterErr);
+        else console.log("Migration: added 'tracking' column to leads table.");
+      });
+    }
+  });
+
   // Safe migration: add 'recv_number' (nosso número que RECEBEU o lead, carimbado
   // na hora da mensagem) — assim o card mostra sempre o número certo, mesmo que o
   // número troque de slot depois.

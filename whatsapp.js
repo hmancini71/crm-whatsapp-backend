@@ -11,6 +11,9 @@ const QRCode = require('qrcode');
 const ffmpegPath = require('ffmpeg-static');
 const ffmpeg = require('fluent-ffmpeg');
 const { runQuery, getRow, allRows } = require('./db');
+const { getNovoLeadReply } = require('./ai');
+// ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
+const _aiSentIds = new Set();
 
 if (ffmpegPath) {
   try { ffmpeg.setFfmpegPath(ffmpegPath); } catch (e) { console.error('ffmpeg path set failed', e); }
@@ -449,6 +452,40 @@ async function connectWhatsApp(id, isReconnect = false) {
         }
         // Resposta automática fora do horário de expediente (se habilitada)
         await maybeAutoReply(sock, fromJid, convoId);
+
+        // ===== IA (Gemini): 1ª interação nos leads em "Novo Leads" =====
+        // Coleta dados do cliente conforme as instruções de Configurações; quando
+        // concluir (dados coletados), É A IA quem move o card para Tratamento inicial.
+        try {
+          const sn2 = fromJid.split('@')[0];
+          const aiLead = await getRow(
+            "SELECT * FROM leads WHERE archived = 0 AND stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) LIMIT 1",
+            [fromJid, `%${sn2}%`]
+          );
+          if (aiLead) {
+            const ai = await getNovoLeadReply(convoId, aiLead.name);
+            if (ai && ai.reply) {
+              const sentAi = await sock.sendMessage(fromJid, { text: ai.reply });
+              const aiMsgId = (sentAi && sentAi.key && sentAi.key.id) || ('m_' + Math.random().toString(36).substr(2, 9));
+              _aiSentIds.add(aiMsgId);
+              if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }
+              const tAi = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+              await runQuery(
+                "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                [aiMsgId, convoId, 'me', ai.reply, tAi, Date.now()]
+              );
+              await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convoId]);
+              // IA respondeu → zera o controle de tempo (fomos os últimos a falar)
+              await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [aiLead.id]);
+              if (ai.dados_coletados) {
+                await runQuery("UPDATE leads SET stage = 'tratamento' WHERE id = ? AND stage = 'novo'", [aiLead.id]);
+                console.log(`[IA] "${aiLead.name}": tratamento concluído pela IA → movido para Tratamento inicial.`);
+              } else {
+                console.log(`[IA] "${aiLead.name}": IA respondeu (coleta de dados em andamento).`);
+              }
+            }
+          }
+        } catch (aiErr) { console.error('[IA novo-lead]', aiErr && aiErr.message); }
         } else {
           // NÓS respondemos (mensagem de saída): zera o lastClientReply para o
           // "controle de tempo" sumir — ele só vale enquanto o CLIENTE foi o último.
@@ -462,7 +499,7 @@ async function connectWhatsApp(id, isReconnect = false) {
             const bh = bhRow && bhRow.value ? JSON.parse(bhRow.value) : null;
             if (bh && bh.message && text && String(text).trim() === String(bh.message).trim()) isAutoReply = true;
           } catch (e) {}
-          if (!isAutoReply) {
+          if (!isAutoReply && !_aiSentIds.has(msg.key.id)) {
             // Novos Leads: ao responder (pelo celular OU pelo CRM), move para "Tratamento inicial".
             // Casa por jid E por telefone normalizado (8 últimos dígitos), robusto a formatação.
             const tail = sn.replace(/\D/g, '').slice(-8);

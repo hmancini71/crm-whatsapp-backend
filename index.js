@@ -7,6 +7,8 @@ const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const { runQuery, getRow, allRows } = require('./db');
+const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
+const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
 const {
   connectWhatsApp,
   disconnectWhatsApp,
@@ -490,6 +492,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: "Lead não encontrado" });
     }
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    sendWebhook('lead.stage_changed', { ...lead, tags: lead.tags ? JSON.parse(lead.tags) : [] });
     res.json({
       ...lead,
       tags: lead.tags ? JSON.parse(lead.tags) : []
@@ -1406,6 +1409,7 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
       [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, stage || "novo", source || "Manual", account || "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify(safeTags), createdAt, 0, priority || "", recvNumber]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    sendWebhook('lead.created', { ...lead, tags: safeTags });
     res.json({ ...lead, tags: safeTags, created: true });
   } catch (err) {
     console.error("create lead error:", err && err.message);
@@ -1449,6 +1453,171 @@ async function reconcileReplyDots() {
     console.error("reconcileReplyDots error:", e && e.message);
   }
 }
+
+// ===== IA (Gemini): configurações + teste =====
+app.get('/api/settings/ai', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try { res.json(await getAiSettings()); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/settings/ai', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try {
+    const cur = await getAiSettings();
+    const b = req.body || {};
+    ['gemini_key', 'model', 'novo_instructions', 'fu_instructions'].forEach(k => { if (b[k] !== undefined) cur[k] = String(b[k]); });
+    ['enabled', 'novo_enabled', 'fu_enabled'].forEach(k => { if (b[k] !== undefined) cur[k] = !!b[k]; });
+    if (b.fu_hours !== undefined) cur.fu_hours = Math.max(1, Math.min(168, Number(b.fu_hours) || 24));
+    if (b.fu_max !== undefined) cur.fu_max = Math.max(0, Math.min(10, Number(b.fu_max) || 2));
+    await saveAiSettings(cur);
+    res.json(cur);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/ai/test', authenticateToken, async (req, res) => {
+  try {
+    const cfg = await getAiSettings();
+    if (req.body && req.body.gemini_key) cfg.gemini_key = String(req.body.gemini_key);
+    if (req.body && req.body.model) cfg.model = String(req.body.model);
+    const out = await callGemini(cfg, 'Responda apenas: OK', [{ role: 'user', text: 'teste de conexão' }], false);
+    res.json({ ok: true, resposta: String(out).slice(0, 100) });
+  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+// ===== IA: protocolo de FOLLOW-UP (colunas 2-3 do Tratamento inicial) =====
+// A cada 30 min procura leads em 'tratamento' SEM prioridade e SEM bolinha
+// (nós falamos por último) parados há X horas; manda follow-up gerado pela IA.
+let _fuRunning = false;
+async function aiFollowUpSweep() {
+  if (_fuRunning) return;
+  _fuRunning = true;
+  try {
+    const cfg = await getAiSettings();
+    if (!cfg.enabled || !cfg.fu_enabled || !cfg.gemini_key) return;
+    const horasMs = (cfg.fu_hours || 24) * 3600 * 1000;
+    const leads = await allRows(
+      "SELECT * FROM leads WHERE archived = 0 AND stage = 'tratamento' AND (priority IS NULL OR priority = '') AND lastClientReply IS NULL AND COALESCE(ai_fu_count, 0) < ?",
+      [cfg.fu_max || 2]
+    );
+    if (!leads.length) return;
+    const convs = await allRows("SELECT id, account, phone, whatsapp_jid FROM conversations WHERE (archived IS NULL OR archived = 0)");
+    const norm = (p) => String(p || '').replace(/\D/g, '');
+    for (const l of leads) {
+      try {
+        const lt = norm(l.phone).slice(-8);
+        const conv = convs.find(c =>
+          (l.whatsapp_jid && c.whatsapp_jid && c.whatsapp_jid === l.whatsapp_jid) ||
+          (lt.length === 8 && norm(c.phone).slice(-8) === lt)
+        );
+        if (!conv || !conv.account) continue;
+        const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [conv.id]);
+        if (!last || last.from !== 'me') continue;              // só quando NÓS falamos por último
+        if (Date.now() - (last.timestamp || 0) < horasMs) continue; // ainda dentro da janela
+        if ((l.ai_fu_last || 0) > (last.timestamp || 0)) continue;  // já fizemos follow-up desta pausa
+        const tentativa = (l.ai_fu_count || 0) + 1;
+        const texto = await getFollowUpReply(conv.id, l.name, tentativa);
+        if (!texto) continue;
+        await sendWhatsAppMessage(conv.account, conv.id, texto);
+        await runQuery("UPDATE leads SET ai_fu_count = ?, ai_fu_last = ? WHERE id = ?", [tentativa, Date.now(), l.id]);
+        console.log(`[IA follow-up] "${l.name}": tentativa ${tentativa} enviada.`);
+      } catch (e) { console.error('[IA follow-up]', l && l.name, e && e.message); }
+    }
+  } catch (e) { console.error('[IA follow-up sweep]', e && e.message); }
+  finally { _fuRunning = false; }
+}
+
+// ===== Integrações: API de entrada (marketing) + export + configurações =====
+async function checkApiKey(req, res, next) {
+  try {
+    const key = req.headers['x-api-key'] || req.query.key;
+    const cfg = await getIntegrationSettings();
+    if (!cfg.api_key || !key || key !== cfg.api_key) {
+      return res.status(401).json({ error: 'API key inválida' });
+    }
+    next();
+  } catch (e) { res.status(500).json({ error: e.message }); }
+}
+
+// Configurações de integração (admin)
+app.get('/api/settings/integrations', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try {
+    const cfg = await getIntegrationSettings();
+    if (!cfg.api_key) { cfg.api_key = newApiKey(); await saveIntegrationSettings(cfg); }
+    res.json(cfg);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/settings/integrations', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try {
+    const cfg = await getIntegrationSettings();
+    const { webhook_url, webhook_secret, webhook_enabled, regenerate_key } = req.body || {};
+    if (webhook_url !== undefined) cfg.webhook_url = String(webhook_url).trim();
+    if (webhook_secret !== undefined) cfg.webhook_secret = String(webhook_secret).trim();
+    if (webhook_enabled !== undefined) cfg.webhook_enabled = !!webhook_enabled;
+    if (regenerate_key) cfg.api_key = newApiKey();
+    if (!cfg.api_key) cfg.api_key = newApiKey();
+    await saveIntegrationSettings(cfg);
+    res.json(cfg);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// API de ENTRADA: recebe leads/rastreamento do marketing digital.
+// Body: { name, phone, email, value, service, source, utm_source, utm_medium,
+//         utm_campaign, utm_term, utm_content, gclid, fbclid, landing_page }
+// Se telefone/e-mail já existir no funil: só CARIMBA o rastreamento no card existente.
+app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.name && !b.phone && !b.email) return res.status(400).json({ error: 'Informe ao menos name, phone ou email' });
+    const tracking = {};
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid', 'landing_page'].forEach(k => {
+      if (b[k]) tracking[k] = String(b[k]).slice(0, 300);
+    });
+    tracking.received_at = new Date().toISOString();
+    const digits = String(b.phone || '').replace(/\D/g, '');
+    let existing = null;
+    if (digits.length >= 8) {
+      existing = await getRow(
+        "SELECT * FROM leads WHERE archived = 0 AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?",
+        ['%' + digits.slice(-8) + '%']
+      );
+    }
+    if (!existing && b.email) {
+      existing = await getRow("SELECT * FROM leads WHERE archived = 0 AND LOWER(email) = ?", [String(b.email).toLowerCase()]);
+    }
+    if (existing) {
+      await runQuery("UPDATE leads SET tracking = ? WHERE id = ?", [JSON.stringify(tracking), existing.id]);
+      const upd = await getRow("SELECT * FROM leads WHERE id = ?", [existing.id]);
+      sendWebhook('lead.updated', { ...upd, tags: upd.tags ? JSON.parse(upd.tags) : [], tracking });
+      return res.json({ ok: true, action: 'tracking_stamped', leadId: existing.id });
+    }
+    const id = 'l_' + Math.random().toString(36).substr(2, 9);
+    const createdAt = new Date().toISOString().slice(0, 10);
+    const tags = b.service ? [String(b.service)] : [];
+    await runQuery(
+      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority, tracking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, String(b.name || b.email || b.phone).slice(0, 200), '', String(b.phone || ''), String(b.email || ''), Number(b.value) || 0,
+       'novo', String(b.source || b.utm_source || 'Marketing').slice(0, 80), '', 'Marketing', JSON.stringify(tags), createdAt, 0, '', JSON.stringify(tracking)]
+    );
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    sendWebhook('lead.created', { ...lead, tags, tracking });
+    res.json({ ok: true, action: 'created', leadId: id });
+  } catch (e) {
+    console.error('[integrations/lead]', e && e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Export completo (BI/planilhas): GET com a mesma API key
+app.get('/api/integrations/leads', checkApiKey, async (req, res) => {
+  try {
+    const leads = await allRows("SELECT * FROM leads ORDER BY createdAt DESC");
+    res.json(leads.map(l => ({
+      ...l,
+      tags: l.tags ? JSON.parse(l.tags) : [],
+      tracking: l.tracking ? (function () { try { return JSON.parse(l.tracking); } catch (e) { return null; } })() : null
+    })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // Reconciliação: leads parados em "Novo Leads" cuja conversa JÁ tem resposta nossa
 // (fora a auto-resposta) migram para "Tratamento inicial". Cobre trocas feitas antes
@@ -1506,4 +1675,7 @@ app.listen(PORT, async () => {
     console.error("Error reconciling novo leads:", err);
   }
   setInterval(() => { reconcileNovoLeads().catch(() => {}); }, 15 * 60 * 1000);
+  // IA: follow-up das colunas 2-3 do Tratamento inicial (a cada 30 min; 1ª passada após 2 min)
+  setTimeout(() => { aiFollowUpSweep().catch(() => {}); }, 2 * 60 * 1000);
+  setInterval(() => { aiFollowUpSweep().catch(() => {}); }, 30 * 60 * 1000);
 });
