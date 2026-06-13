@@ -39,7 +39,12 @@ async function fetchAndStoreAvatar(sock, jid) {
     const file = avatarFileForJid(jid);
     try { const st = fs.statSync(file); if (Date.now() - st.mtimeMs < 7 * 86400000) return true; } catch (e) {}
     let url = null;
-    try { url = await sock.profilePictureUrl(jid, 'image'); } catch (e) { url = null; }
+    try {
+      url = await Promise.race([
+        sock.profilePictureUrl(jid, 'image'),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))
+      ]);
+    } catch (e) { url = null; }
     if (!url) return false;
     return await new Promise((resolve) => {
       https.get(url, (res) => {

@@ -146,7 +146,10 @@ function callGemini(cfg, systemText, contents, jsonMode) {
       system_instruction: { parts: [{ text: systemText || '' }] },
       contents: contents.map(c => ({ role: c.role, parts: [{ text: String(c.text || '').slice(0, 4000) }] })),
       generationConfig: Object.assign(
-        { temperature: 0.7, maxOutputTokens: 500 },
+        { temperature: 0.7, maxOutputTokens: 1024 },
+        // Modelos 2.5 são de "raciocínio": sem isso, o thinking consome a cota de saída e o
+        // JSON volta truncado/vazio (a IA não responde). thinkingBudget:0 desliga o raciocínio.
+        /2\.5/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {},
         jsonMode ? { responseMimeType: 'application/json' } : {}
       )
     });
