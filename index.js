@@ -404,6 +404,34 @@ app.get('/api/instagram/status', authenticateToken, async (req, res) => {
   } catch (e) { res.json({ connected: false }); }
 });
 
+// Diagnóstico SEM login (protegido por chave fixa) — só devolve booleanos de status, nunca o token.
+// Permite checar de fora se é token expirado ou webhook não inscrito.
+app.get('/api/instagram/diag', async (req, res) => {
+  if ((req.query && req.query.k) !== 'eccere_diag_2026') return res.status(403).json({ error: 'forbidden' });
+  try {
+    const row = await getRow("SELECT username, access_token, connected_at FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+    if (!row) return res.json({ connected: false });
+    const out = { connected: true, username: row.username, connected_at: row.connected_at };
+    if (row.connected_at) out.days_since = Math.floor((Date.now() - new Date(row.connected_at).getTime()) / 86400000);
+    try {
+      const r = await fetch('https://graph.instagram.com/me?fields=user_id,username&access_token=' + encodeURIComponent(row.access_token));
+      const d = await r.json().catch(() => ({}));
+      out.token_valid = !!(d && d.user_id);
+      if (d && d.error) out.token_error = d.error.message || 'token inválido';
+    } catch (e) { out.token_valid = false; out.token_error = e.message; }
+    try {
+      const s = await fetch('https://graph.instagram.com/v21.0/me/subscribed_apps?access_token=' + encodeURIComponent(row.access_token));
+      const sd = await s.json().catch(() => ({}));
+      const apps = (sd && sd.data) || [];
+      const fields = apps.length ? (apps[0].subscribed_fields || []) : [];
+      out.webhook_subscribed = Array.isArray(fields) && fields.indexOf('messages') !== -1;
+      out.webhook_fields = fields;
+      if (sd && sd.error) out.webhook_error = sd.error.message;
+    } catch (e) { out.webhook_subscribed = false; out.webhook_error = e.message; }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Desconecta o Instagram (remove o token guardado)
 app.post('/api/instagram/disconnect', authenticateToken, async (req, res) => {
   try {
