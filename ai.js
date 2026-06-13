@@ -146,7 +146,7 @@ function callGemini(cfg, systemText, contents, jsonMode) {
       system_instruction: { parts: [{ text: systemText || '' }] },
       contents: contents.map(c => ({ role: c.role, parts: [{ text: String(c.text || '').slice(0, 4000) }] })),
       generationConfig: Object.assign(
-        { temperature: 0.7, maxOutputTokens: 1024 },
+        { temperature: 0.7, maxOutputTokens: 2048 },
         // Modelos 2.5 são de "raciocínio": sem isso, o thinking consome a cota de saída e o
         // JSON volta truncado/vazio (a IA não responde). thinkingBudget:0 desliga o raciocínio.
         /2\.5/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {},
@@ -223,8 +223,18 @@ async function getNovoLeadReply(convoId, leadName) {
       dados_coletados: !!j.dados_coletados && !!tag
     };
   }
-  // Se parece JSON mas não parseou, NÃO envia o JSON bruto ao cliente
-  if (raw.trim().startsWith('{')) return null;
+  // Fallback: extrai o texto do "reply" mesmo de JSON sujo/truncado (sem parsear o objeto inteiro),
+  // para nunca enviar o JSON cru ao cliente e ainda assim aproveitar a resposta quando possível.
+  {
+    const rm = raw.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (rm && rm[1].trim()) {
+      const txt = rm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
+      const tm = raw.match(/"visa_tag"\s*:\s*"([^"]*)"/);
+      return { reply: txt.slice(0, 1500), visa_tag: normalizeServiceTag(tm ? tm[1] : ''), dados_coletados: false };
+    }
+  }
+  // Se parece JSON (mesmo truncado tipo {"reply":) mas não deu pra extrair, NÃO envia o cru ao cliente.
+  if (raw.trim().startsWith('{') || raw.includes('"reply"')) return null;
   // Texto simples (sem JSON) → usa como resposta, sem concluir
   return { reply: String(raw).trim().slice(0, 1500), visa_tag: '', dados_coletados: false };
 }
