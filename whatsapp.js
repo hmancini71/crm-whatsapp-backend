@@ -311,64 +311,102 @@ async function connectWhatsApp(id, isReconnect = false) {
           }
         };
 
-        if (inner.conversation || inner.extendedTextMessage?.text) {
-          text = inner.conversation || inner.extendedTextMessage.text;
-        } else if (inner.imageMessage) {
+        // Desembrulha wrappers comuns: viewOnce, ephemeral, ptvMessage, etc.
+        function unwrapInner(obj) {
+          if (!obj) return obj;
+          // viewOnceMessage / viewOnceMessageV2 / viewOnceMessageV2Extension
+          if (obj.viewOnceMessage?.message) return unwrapInner(obj.viewOnceMessage.message);
+          if (obj.viewOnceMessageV2?.message) return unwrapInner(obj.viewOnceMessageV2.message);
+          if (obj.viewOnceMessageV2Extension?.message) return unwrapInner(obj.viewOnceMessageV2Extension.message);
+          // ephemeralMessage
+          if (obj.ephemeralMessage?.message) return unwrapInner(obj.ephemeralMessage.message);
+          // documentWithCaptionMessage
+          if (obj.documentWithCaptionMessage?.message) return unwrapInner(obj.documentWithCaptionMessage.message);
+          // ptvMessage (vídeo redondo) → trata como vídeo
+          if (obj.ptvMessage) return { videoMessage: obj.ptvMessage };
+          return obj;
+        }
+        const innerMsg = unwrapInner(inner);
+
+        if (innerMsg.conversation || innerMsg.extendedTextMessage?.text) {
+          text = innerMsg.conversation || innerMsg.extendedTextMessage.text;
+        } else if (innerMsg.imageMessage) {
           incomingType = 'image';
-          text = inner.imageMessage.caption || '[Imagem]';
-          incomingMediaPath = await saveMedia(extFromMime(inner.imageMessage.mimetype, '.jpg'));
-        } else if (inner.videoMessage) {
+          text = innerMsg.imageMessage.caption || '[Imagem]';
+          incomingMediaPath = await saveMedia(extFromMime(innerMsg.imageMessage.mimetype, '.jpg'));
+        } else if (innerMsg.videoMessage) {
           incomingType = 'video';
-          text = inner.videoMessage.caption || '[Vídeo]';
-          incomingMediaPath = await saveMedia(extFromMime(inner.videoMessage.mimetype, '.mp4'));
-        } else if (inner.audioMessage) {
+          text = innerMsg.videoMessage.caption || '[Vídeo]';
+          incomingMediaPath = await saveMedia(extFromMime(innerMsg.videoMessage.mimetype, '.mp4'));
+        } else if (innerMsg.audioMessage) {
           incomingType = 'audio';
           text = '[Mensagem de voz]';
           incomingMediaPath = await saveMedia('.ogg');
-        } else if (inner.stickerMessage) {
+        } else if (innerMsg.stickerMessage) {
           incomingType = 'sticker';
           text = '[Figurinha]';
-          incomingMediaPath = await saveMedia('.webp');
-        } else if (inner.documentMessage) {
-          const doc = inner.documentMessage;
+          incomingMediaPath = await saveMedia(innerMsg.stickerMessage.isAnimated ? '.webp' : '.webp');
+        } else if (innerMsg.documentMessage) {
+          const doc = innerMsg.documentMessage;
           incomingType = 'document';
           const fileName = doc.fileName || 'documento';
           text = fileName;
           let ext = path.extname(fileName).toLowerCase();
           if (!ext) ext = extFromMime(doc.mimetype, '.bin');
           incomingMediaPath = await saveMedia(ext);
-        } else if (inner.locationMessage) {
+        } else if (innerMsg.locationMessage) {
           incomingType = 'text';
-          const lat = inner.locationMessage.degreesLatitude;
-          const lng = inner.locationMessage.degreesLongitude;
+          const lat = innerMsg.locationMessage.degreesLatitude;
+          const lng = innerMsg.locationMessage.degreesLongitude;
           text = '📍 Localização: https://maps.google.com/?q=' + lat + ',' + lng;
-        } else if (inner.contactMessage || inner.contactsArrayMessage) {
+        } else if (innerMsg.liveLocationMessage) {
           incomingType = 'text';
-          const cm = inner.contactMessage || (inner.contactsArrayMessage?.contacts || [])[0];
+          const lat2 = innerMsg.liveLocationMessage.degreesLatitude;
+          const lng2 = innerMsg.liveLocationMessage.degreesLongitude;
+          text = '📍 Localização ao vivo: https://maps.google.com/?q=' + lat2 + ',' + lng2;
+        } else if (innerMsg.contactMessage || innerMsg.contactsArrayMessage) {
+          incomingType = 'text';
+          const cm = innerMsg.contactMessage || (innerMsg.contactsArrayMessage?.contacts || [])[0];
           text = '👤 Contato: ' + ((cm && cm.displayName) || 'contato compartilhado');
-        } else if (inner.reactionMessage) {
+        } else if (innerMsg.reactionMessage) {
           incomingType = 'text';
-          text = 'Reagiu: ' + (inner.reactionMessage.text || '👍');
+          text = 'Reagiu: ' + (innerMsg.reactionMessage.text || '👍');
+        } else if (innerMsg.pollCreationMessage || innerMsg.pollCreationMessageV3) {
+          incomingType = 'text';
+          const poll = innerMsg.pollCreationMessage || innerMsg.pollCreationMessageV3;
+          text = '📊 Enquete: ' + (poll.name || 'enquete');
+        } else if (innerMsg.groupInviteMessage) {
+          incomingType = 'text';
+          text = '👥 Convite de grupo: ' + (innerMsg.groupInviteMessage.groupName || 'grupo');
+        } else if (innerMsg.interactiveMessage || innerMsg.buttonsMessage || innerMsg.listMessage || innerMsg.templateMessage) {
+          incomingType = 'text';
+          const im = innerMsg.interactiveMessage || innerMsg.buttonsMessage || innerMsg.listMessage || innerMsg.templateMessage;
+          text = im?.body?.text || im?.contentText || im?.footerText || '[Mensagem interativa]';
         } else {
-          // Catch-all: qualquer mídia com mimetype (tipos novos/menos comuns, ex.: ptv/
-          // vídeo redondo, áudios diferentes) é baixada e exibida pela categoria.
+          // Catch-all: qualquer objeto com mimetype (tipos novos do WhatsApp)
           let mm = null;
-          for (const k of Object.keys(inner)) {
-            const v = inner[k];
+          for (const k of Object.keys(innerMsg)) {
+            const v = innerMsg[k];
             if (v && typeof v === 'object' && v.mimetype) { mm = v; break; }
           }
           if (mm) {
             const mime = String(mm.mimetype).toLowerCase();
-            incomingType = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'document';
-            text = mm.caption || mm.fileName || (incomingType === 'image' ? '[Imagem]' : incomingType === 'video' ? '[Vídeo]' : incomingType === 'audio' ? '[Mensagem de voz]' : '[Arquivo]');
+            incomingType = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : mime.includes('webp') ? 'sticker' : 'document';
+            text = mm.caption || mm.fileName || (incomingType === 'image' ? '[Imagem]' : incomingType === 'video' ? '[Vídeo]' : incomingType === 'audio' ? '[Mensagem de voz]' : incomingType === 'sticker' ? '[Figurinha]' : '[Arquivo]');
             let ext = mm.fileName ? path.extname(mm.fileName).toLowerCase() : '';
-            if (!ext) ext = extFromMime(mm.mimetype, '.bin');
+            if (!ext) ext = extFromMime(mm.mimetype, incomingType === 'sticker' ? '.webp' : '.bin');
             incomingMediaPath = await saveMedia(ext);
-            if (!incomingMediaPath) { incomingType = 'text'; text = '[Mídia/Outro]'; }
+            if (!incomingMediaPath) { incomingType = 'text'; text = text || '[Mídia]'; }
           } else {
-            text = '[Mídia/Outro]';
+            // Nenhum conteúdo reconhecível — loga para diagnóstico e ignora silenciosamente
+            const keys = Object.keys(innerMsg).join(', ');
+            console.warn(`[WhatsApp ${id}] Tipo de mensagem não reconhecido (chaves: ${keys}) — ignorado.`);
+            text = null; // sinaliza para não salvar
           }
         }
+        // Mensagem sem conteúdo reconhecível (ex.: tipo desconhecido futuro) — ignora
+        if (text === null) return;
+
         const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const name = (!isMine && msg.pushName) ? msg.pushName : (fromJid.endsWith('@lid') ? 'Usuário WhatsApp' : (phone || 'Usuário WhatsApp'));
 
