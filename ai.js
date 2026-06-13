@@ -107,14 +107,29 @@ async function getNovoLeadReply(convoId, leadName) {
     '{"reply": "texto da mensagem ao cliente", "dados_coletados": true ou false}. ' +
     '"dados_coletados" deve ser true SOMENTE quando você já souber o nome do cliente E o serviço de interesse.';
   const raw = await callGemini(cfg, system, contents, true);
+  // Tenta parsear diretamente
   try {
     const j = JSON.parse(raw);
     if (j && j.reply) return { reply: String(j.reply).slice(0, 1500), dados_coletados: !!j.dados_coletados };
-  } catch (e) {
-    // se o modelo não devolveu JSON, usa o texto cru como resposta (sem mover o card)
-    return { reply: String(raw).slice(0, 1500), dados_coletados: false };
+  } catch (e) { /* segue para extração robusta */ }
+  // Gemini às vezes adiciona texto extra fora do JSON — extrai só o bloco { }
+  const jsonMatch = raw.match(/\{[\s\S]*?\}/);
+  if (jsonMatch) {
+    try {
+      const j2 = JSON.parse(jsonMatch[0]);
+      if (j2 && j2.reply) return { reply: String(j2.reply).slice(0, 1500), dados_coletados: !!j2.dados_coletados };
+    } catch (e2) { /* continua */ }
   }
-  return null;
+  // Remove blocos de código markdown e tenta de novo
+  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  try {
+    const j3 = JSON.parse(cleaned);
+    if (j3 && j3.reply) return { reply: String(j3.reply).slice(0, 1500), dados_coletados: !!j3.dados_coletados };
+  } catch (e3) { /* continua */ }
+  // Se parece JSON mas não conseguimos parsear, NÃO envia o JSON bruto ao cliente
+  if (raw.trim().startsWith('{')) return null;
+  // Se é texto simples (sem JSON), usa como resposta
+  return { reply: String(raw).trim().slice(0, 1500), dados_coletados: false };
 }
 
 // Follow-up (Tratamento inicial, colunas 2-3): devolve texto ou null
