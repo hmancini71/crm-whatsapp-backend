@@ -11,7 +11,7 @@ const QRCode = require('qrcode');
 const ffmpegPath = require('ffmpeg-static');
 const ffmpeg = require('fluent-ffmpeg');
 const { runQuery, getRow, allRows } = require('./db');
-const { getNovoLeadReply } = require('./ai');
+const { getNovoLeadReply, getAiSettings } = require('./ai');
 // ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
 const _aiSentIds = new Set();
 
@@ -488,8 +488,20 @@ async function connectWhatsApp(id, isReconnect = false) {
         if (ourNumber) {
           await runQuery("UPDATE leads SET recv_number = ? WHERE (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) AND (recv_number IS NULL OR recv_number = '')", [ourNumber, fromJid, `%${searchNumber}%`]);
         }
-        // Resposta automática fora do horário de expediente (se habilitada)
-        await maybeAutoReply(sock, fromJid, convoId);
+        // Resposta automática fora do horário de expediente (se habilitada).
+        // PORÉM: se a IA vai atender este lead (em "Novo Leads" e IA ligada), é ELA quem fala
+        // (inclusive o aviso de fora do horário) — então NÃO dispara a auto-resposta antiga,
+        // para o cliente não receber mensagem duplicada.
+        let _aiWillHandle = false;
+        try {
+          const _aiCfg = await getAiSettings();
+          if (_aiCfg && _aiCfg.enabled && _aiCfg.novo_enabled && _aiCfg.gemini_key) {
+            const _sn = fromJid.split('@')[0];
+            const _nl = await getRow("SELECT id FROM leads WHERE archived = 0 AND stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) LIMIT 1", [fromJid, `%${_sn}%`]);
+            if (_nl) _aiWillHandle = true;
+          }
+        } catch (e) {}
+        if (!_aiWillHandle) await maybeAutoReply(sock, fromJid, convoId);
 
         // ===== IA (Gemini): 1ª interação nos leads em "Novo Leads" =====
         // Coleta dados do cliente conforme as instruções de Configurações; quando
