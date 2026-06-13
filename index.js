@@ -755,6 +755,7 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
   const emails = new Set();
   const names = new Set();
   const dbg = [];
+  let scanOk = false; // só atualiza o cache se a varredura completou sem erro (evita gravar lista vazia por falha de IMAP)
   try {
     const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
     let ImapFlow, simpleParser;
@@ -824,6 +825,7 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
         }
       } finally { lock.release(); }
       try { await client.logout(); } catch (e) {}
+      scanOk = true; // chegou aqui = varredura completou
     } else if (debug) {
       dbg.push({ note: 'Sem conta de e-mail conectada ou imapflow ausente', hasAcc: !!acc });
     }
@@ -832,8 +834,19 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
     if (debug) dbg.push({ error: err && err.message });
   }
   const payload = { emails: Array.from(emails), names: Array.from(names) };
-  if (debug) { payload.matched = dbg; payload.matchedCount = dbg.length; return res.json(payload); }
-  _signedEmailsCache = { ts: Date.now(), data: payload };
+  if (debug) { payload.matched = dbg; payload.matchedCount = dbg.length; payload.scanOk = scanOk; return res.json(payload); }
+  if (scanOk) {
+    // Varredura OK: atualiza o cache (une com o último bom p/ nunca encolher por uma leitura parcial do IMAP).
+    if (_signedEmailsCache.data) {
+      const e = new Set([...(_signedEmailsCache.data.emails || []), ...payload.emails]);
+      const n = new Set([...(_signedEmailsCache.data.names || []), ...payload.names]);
+      payload.emails = Array.from(e); payload.names = Array.from(n);
+    }
+    _signedEmailsCache = { ts: Date.now(), data: payload };
+    return res.json(payload);
+  }
+  // Varredura falhou (IMAP indisponível): devolve o último resultado bom, sem gravar lista vazia.
+  if (_signedEmailsCache.data) return res.json(_signedEmailsCache.data);
   res.json(payload);
 });
 
