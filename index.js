@@ -1452,6 +1452,31 @@ app.post('/api/settings/quick-replies', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Relação de serviços (classificação) — editável em Configurações, usada na combo "Classificação (Serviço)".
+app.get('/api/settings/services', authenticateToken, async (req, res) => {
+  try {
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'services'");
+    let arr = [];
+    if (row && row.value) { try { arr = JSON.parse(row.value); } catch (e) { arr = []; } }
+    res.json(Array.isArray(arr) ? arr : []);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/settings/services', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
+  }
+  try {
+    const arr = Array.isArray(req.body) ? req.body : ((req.body && req.body.items) || []);
+    const clean = arr.map(x => String(x == null ? '' : x).trim()).filter(Boolean);
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES ('services', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [JSON.stringify(clean)]
+    );
+    res.json({ success: true, count: clean.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Enviar formulário de coleta de dados DS-160 (sistema de contratos gerencia_ds-160).
 // Cria a credencial/token (DRAFT) e o PRÓPRIO servidor de contratos envia o e-mail ao cliente.
 // Servidor-a-servidor: a senha de admin NÃO trafega pelo navegador.
