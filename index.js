@@ -382,7 +382,7 @@ app.get('/api/instagram/status', authenticateToken, async (req, res) => {
     if (!row) return res.json({ connected: false });
     const out = { connected: true, username: row.username, connected_at: row.connected_at };
     if (row.connected_at) out.days_since = Math.floor((Date.now() - new Date(row.connected_at).getTime()) / 86400000);
-    // ?check=1 testa o token ao vivo (pinga a Graph API) — confirma se ainda está válido.
+    // ?check=1 testa o token ao vivo e a inscrição do webhook (o que faz as msgs chegarem).
     if (req.query && (req.query.check === '1' || req.query.check === 'true')) {
       try {
         const r = await fetch('https://graph.instagram.com/me?fields=user_id,username&access_token=' + encodeURIComponent(row.access_token));
@@ -390,6 +390,15 @@ app.get('/api/instagram/status', authenticateToken, async (req, res) => {
         out.token_valid = !!(d && d.user_id);
         if (d && d.error) out.token_error = d.error.message || 'token inválido';
       } catch (e) { out.token_valid = false; out.token_error = e.message; }
+      try {
+        const s = await fetch('https://graph.instagram.com/v21.0/me/subscribed_apps?access_token=' + encodeURIComponent(row.access_token));
+        const sd = await s.json().catch(() => ({}));
+        const apps = (sd && sd.data) || [];
+        const fields = apps.length ? (apps[0].subscribed_fields || []) : [];
+        out.webhook_subscribed = Array.isArray(fields) && fields.indexOf('messages') !== -1;
+        out.webhook_fields = fields;
+        if (sd && sd.error) out.webhook_error = sd.error.message;
+      } catch (e) { out.webhook_subscribed = false; out.webhook_error = e.message; }
     }
     res.json(out);
   } catch (e) { res.json({ connected: false }); }
@@ -400,6 +409,19 @@ app.post('/api/instagram/disconnect', authenticateToken, async (req, res) => {
   try {
     await runQuery("DELETE FROM ig_connections");
     res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// (Re)inscreve o webhook de mensagens/comentários usando o token guardado (sem refazer o login).
+// Útil quando o token ainda é válido mas a inscrição lapsou — é o que faz os Directs voltarem a chegar.
+app.post('/api/instagram/subscribe', authenticateToken, async (req, res) => {
+  try {
+    const conn = await getRow("SELECT * FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+    if (!conn || !conn.access_token) return res.status(400).json({ error: 'Instagram não conectado' });
+    const r = await fetch('https://graph.instagram.com/v21.0/me/subscribed_apps?subscribed_fields=messages,comments&access_token=' + encodeURIComponent(conn.access_token), { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (d && d.error) return res.status(502).json({ error: d.error.message || 'Falha ao inscrever o webhook' });
+    res.json({ success: !!d.success || true, result: d });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
