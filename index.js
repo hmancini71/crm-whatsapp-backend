@@ -487,10 +487,15 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
   }
 
   try {
-    const result = await runQuery("UPDATE leads SET stage = ? WHERE id = ?", [stage, id]);
-    if (result.changes === 0) {
-      return res.status(404).json({ error: "Lead não encontrado" });
+    const cur = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!cur) return res.status(404).json({ error: "Lead não encontrado" });
+    // Estágios TERMINAIS: uma vez em "Venda convertida" ou "Lead declinou/cancelado",
+    // o lead NÃO muda mais de etapa (protege o controle do que vendeu / declinou).
+    if ((cur.stage === 'convertida' || cur.stage === 'declinado') && stage !== cur.stage) {
+      console.log(`[stage] BLOQUEADO: "${cur.name}" está em '${cur.stage}' (terminal) — mudança p/ '${stage}' ignorada.`);
+      return res.json({ ...cur, tags: cur.tags ? JSON.parse(cur.tags) : [], _locked: true });
     }
+    await runQuery("UPDATE leads SET stage = ? WHERE id = ?", [stage, id]);
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.stage_changed', { ...lead, tags: lead.tags ? JSON.parse(lead.tags) : [] });
     res.json({
