@@ -1642,8 +1642,15 @@ async function reconcileNovoLeads() {
         (lt.length === 8 && norm(c.phone).slice(-8) === lt)
       );
       if (!conv) continue;
-      const mine = await allRows("SELECT text FROM messages WHERE conversationId = ? AND `from` = 'me'", [conv.id]);
-      const respondeu = mine.some(m => !autoMsg || String((m && m.text) || '').trim() !== autoMsg);
+      const mine = await allRows("SELECT id, text FROM messages WHERE conversationId = ? AND `from` = 'me'", [conv.id]);
+      const respondeu = mine.some(m => {
+        const txt = String((m && m.text) || '').trim();
+        const mid = String((m && m.id) || '');
+        if (autoMsg && txt === autoMsg) return false; // auto-resposta fora de horário
+        if (mid.startsWith('m_')) return false;       // ID interno = auto-reply ou IA
+        if (txt.startsWith('{')) return false;         // JSON bruto enviado por erro da IA
+        return true;                                   // resposta humana real
+      });
       if (respondeu) {
         await runQuery("UPDATE leads SET stage = 'tratamento' WHERE id = ? AND stage = 'novo'", [l.id]);
         moved++;
