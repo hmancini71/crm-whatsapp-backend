@@ -1447,6 +1447,41 @@ app.post('/api/settings/quick-replies', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Enviar formulário de coleta de dados DS-160 (sistema de contratos gerencia_ds-160).
+// Cria a credencial/token (DRAFT) e o PRÓPRIO servidor de contratos envia o e-mail ao cliente.
+// Servidor-a-servidor: a senha de admin NÃO trafega pelo navegador.
+const DS160_BASE = 'https://www.valevisto.com.br/api';
+const DS160_ADMIN_USER = 'admin';
+const DS160_ADMIN_PASS = process.env.DS160_ADMIN_PASS || 'ValeVisto@12';
+app.post('/api/ds160/send-form', authenticateToken, async (req, res) => {
+  try {
+    const { leadId, email } = req.body || {};
+    if (!leadId) return res.status(400).json({ error: 'leadId obrigatório' });
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [leadId]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    const clientEmail = String(email || lead.email || '').trim();
+    if (!clientEmail) return res.json({ needEmail: true });
+    // 1) login admin no sistema de contratos → token
+    const lr = await fetch(DS160_BASE + '/auth.php?action=login_admin', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: DS160_ADMIN_USER, password: DS160_ADMIN_PASS })
+    });
+    const lj = await lr.json().catch(() => ({}));
+    if (!lr.ok || !lj.token) return res.status(502).json({ error: 'Falha ao autenticar no sistema de contratos.' });
+    // 2) cria o rascunho DS-160 com token → o servidor de contratos envia o e-mail
+    const cr = await fetch(DS160_BASE + '/submissions.php?action=create_draft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + lj.token },
+      body: JSON.stringify({ clientName: lead.name || clientEmail, clientEmail: clientEmail, clientRef: '', formType: 'ds-160' })
+    });
+    const cj = await cr.json().catch(() => ({}));
+    if (!cr.ok || !cj.success) return res.status(502).json({ error: (cj && cj.error) || 'Falha ao gerar/enviar o formulário DS-160.' });
+    // guarda o e-mail no lead se ainda não tinha
+    if (!lead.email && clientEmail) { try { await runQuery("UPDATE leads SET email = ? WHERE id = ?", [clientEmail, leadId]); } catch (e) {} }
+    res.json({ success: true, id: cj.id, email: clientEmail });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
   const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
