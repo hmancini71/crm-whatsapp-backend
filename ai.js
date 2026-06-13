@@ -79,16 +79,20 @@ function callGemini(cfg, systemText, contents, jsonMode) {
   });
 }
 
-// Monta o histórico da conversa no formato do Gemini (últimas N mensagens, só texto)
+// Monta o histórico da conversa no formato do Gemini (últimas N mensagens, só texto).
+// O Gemini exige que a última mensagem seja sempre role:'user'; remove model-trailing.
 async function buildContents(convoId, limit) {
   const msgs = await allRows(
     "SELECT `from`, text, type FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT ?",
     [convoId, limit || 20]
   );
-  return msgs.reverse().map(m => ({
+  const contents = msgs.reverse().map(m => ({
     role: m.from === 'me' ? 'model' : 'user',
     text: (m.type && m.type !== 'text') ? ('[' + m.type + '] ' + (m.text || '')) : (m.text || '')
   })).filter(c => c.text.trim());
+  // Remove mensagens finais do tipo 'model' para garantir que a última seja 'user'
+  while (contents.length && contents[contents.length - 1].role === 'model') contents.pop();
+  return contents;
 }
 
 // 1ª interação (Novo Leads): devolve { reply, dados_coletados } ou null se IA desligada
