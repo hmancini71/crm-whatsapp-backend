@@ -742,6 +742,81 @@ app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) =
   res.json(payload);
 });
 
+// 6c. E-mails de clientes que ASSINARAM o contrato (assunto "Contrato Assinado pelo Cliente:").
+// Varre a caixa (últimos 90 dias), extrai TODOS os endereços de e-mail de cada mensagem casada
+// e devolve o conjunto. O front marca o card como "assinado" quando o e-mail do lead está nesse conjunto.
+let _signedEmailsCache = { ts: 0, data: null };
+app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
+  if (_signedEmailsCache.data && (Date.now() - _signedEmailsCache.ts < 5 * 60 * 1000)) {
+    return res.json(_signedEmailsCache.data);
+  }
+  const emails = new Set();
+  try {
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    let ImapFlow, simpleParser;
+    try { ImapFlow = require('imapflow').ImapFlow; simpleParser = require('mailparser').simpleParser; }
+    catch (e) { ImapFlow = null; }
+    if (acc && ImapFlow) {
+      const client = new ImapFlow({
+        host: acc.host, port: 993, secure: true,
+        auth: { user: acc.email, pass: acc.password }, logger: false, tls: { rejectUnauthorized: false }
+      });
+      await client.connect();
+      const lock = await client.getMailboxLock('INBOX');
+      try {
+        const since = new Date(); since.setDate(since.getDate() - 90); since.setHours(0, 0, 0, 0);
+        const matchSubj = (s) => s.includes('contrato assinado pelo cliente');
+        const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+        const ownDomain = (acc.email || '').split('@')[1] || '';
+        const addAll = (txt) => {
+          if (!txt) return;
+          const m = String(txt).match(EMAIL_RE);
+          if (m) m.forEach(e => {
+            const lo = e.toLowerCase();
+            // ignora o próprio e-mail da empresa / mesmo domínio (não é cliente)
+            if (ownDomain && lo.endsWith('@' + ownDomain.toLowerCase())) return;
+            emails.add(lo);
+          });
+        };
+        // 1) UIDs candidatos: SEARCH SINCE; fallback nas últimas 300 mensagens.
+        let uids = [];
+        try { uids = await client.search({ since }, { uid: true }) || []; } catch (e) { uids = []; }
+        if (!uids.length) {
+          const total = (client.mailbox && client.mailbox.exists) || 0;
+          const start = Math.max(1, total - 299);
+          const seqUids = [];
+          for await (const m of client.fetch(start + ':*', { uid: true })) seqUids.push(m.uid);
+          uids = seqUids;
+        }
+        // 2) Filtra por assunto e extrai e-mails do corpo de cada mensagem casada.
+        for (const uid of uids) {
+          let env = null;
+          try { env = await client.fetchOne(String(uid), { envelope: true, internalDate: true }, { uid: true }); } catch (e) { continue; }
+          const subj = ((env && env.envelope && env.envelope.subject) || '').toLowerCase();
+          if (!matchSubj(subj)) continue;
+          const dt = (env && (env.internalDate || (env.envelope && env.envelope.date)));
+          if (dt && new Date(dt) < since) continue;
+          addAll(subj);
+          try {
+            const full = await client.fetchOne(String(uid), { source: true }, { uid: true });
+            if (full && full.source) {
+              const p = await simpleParser(full.source);
+              addAll(p.subject); addAll(p.text);
+              if (p.html) addAll(String(p.html).replace(/<[^>]+>/g, ' '));
+            }
+          } catch (e) { /* segue */ }
+        }
+      } finally { lock.release(); }
+      try { await client.logout(); } catch (e) {}
+    }
+  } catch (err) {
+    console.error('signed-emails error:', err && err.message);
+  }
+  const payload = { emails: Array.from(emails) };
+  _signedEmailsCache = { ts: Date.now(), data: payload };
+  res.json(payload);
+});
+
 // 7. Conversations Routes: Get List (exclude archived leads' conversations)
 app.get('/api/conversations', authenticateToken, async (req, res) => {
   const { account } = req.query;
