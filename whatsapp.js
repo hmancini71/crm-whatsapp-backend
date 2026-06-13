@@ -478,8 +478,8 @@ async function connectWhatsApp(id, isReconnect = false) {
               // IA respondeu → zera o controle de tempo (fomos os últimos a falar)
               await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [aiLead.id]);
               if (ai.dados_coletados) {
-                await runQuery("UPDATE leads SET stage = 'tratamento' WHERE id = ? AND stage = 'novo'", [aiLead.id]);
-                console.log(`[IA] "${aiLead.name}": tratamento concluído pela IA → movido para Tratamento inicial.`);
+                await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'followup' WHERE id = ? AND stage = 'novo'", [aiLead.id]);
+                console.log(`[IA] "${aiLead.name}": tratamento concluído pela IA → movido para Tratamento inicial (tag Follow-up aplicada).`);
               } else {
                 console.log(`[IA] "${aiLead.name}": IA respondeu (coleta de dados em andamento).`);
               }

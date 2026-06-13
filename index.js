@@ -836,12 +836,12 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       if (cleanP.length >= 8) {
         await runQuery("UPDATE leads SET lastClientReply = NULL WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
       }
-      // Novos Leads: ao responder, move automaticamente para "Tratamento inicial".
+      // Novos Leads: ao responder, move automaticamente para "Tratamento inicial" e aplica tag Follow-up.
       if (convo.whatsapp_jid) {
-        await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND whatsapp_jid = ?", [convo.whatsapp_jid]);
+        await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'followup' WHERE stage = 'novo' AND whatsapp_jid = ?", [convo.whatsapp_jid]);
       }
       if (cleanP.length >= 8) {
-        await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
+        await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'followup' WHERE stage = 'novo' AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
       }
     } catch (e) { /* ignore */ }
 
@@ -1652,9 +1652,9 @@ async function reconcileNovoLeads() {
         return true;                                   // resposta humana real
       });
       if (respondeu) {
-        await runQuery("UPDATE leads SET stage = 'tratamento' WHERE id = ? AND stage = 'novo'", [l.id]);
+        await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'followup' WHERE id = ? AND stage = 'novo'", [l.id]);
         moved++;
-        console.log(`[reconcileNovoLeads] "${l.name}" movido para Tratamento inicial (já tinha resposta nossa).`);
+        console.log(`[reconcileNovoLeads] "${l.name}" movido para Tratamento inicial (tag Follow-up aplicada).`);
       }
     }
     if (moved) console.log(`[reconcileNovoLeads] total: ${moved} lead(s) movidos.`);
