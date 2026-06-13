@@ -362,6 +362,12 @@ app.get('/api/instagram/callback', async (req, res) => {
     await runQuery("DELETE FROM ig_connections WHERE ig_user_id = ?", [igUserId]);
     await runQuery("INSERT INTO ig_connections (id, ig_user_id, username, access_token, connected_at) VALUES (?, ?, ?, ?, ?)",
       ['ig_' + igUserId, igUserId, username, longToken, new Date().toISOString()]);
+    // (RE)INSCREVE o webhook de mensagens/comentários — SEM isto a Meta não entrega os Directs.
+    try {
+      const sub = await fetch('https://graph.instagram.com/v21.0/me/subscribed_apps?subscribed_fields=messages,comments&access_token=' + encodeURIComponent(longToken), { method: 'POST' });
+      const sj = await sub.json().catch(() => ({}));
+      console.log('[IG OAuth] subscribed_apps:', JSON.stringify(sj));
+    } catch (e) { console.error('[IG OAuth] subscribe falhou:', e && e.message); }
     return res.redirect(APP_BASE_URL + '/app/conexoes?ig=ok');
   } catch (e) {
     console.error('[IG OAuth] erro', e);
@@ -372,8 +378,20 @@ app.get('/api/instagram/callback', async (req, res) => {
 // Status da conexao do Instagram (para o front exibir conectado)
 app.get('/api/instagram/status', authenticateToken, async (req, res) => {
   try {
-    const row = await getRow("SELECT ig_user_id, username, connected_at FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
-    res.json(row ? { connected: true, username: row.username, connected_at: row.connected_at } : { connected: false });
+    const row = await getRow("SELECT ig_user_id, username, access_token, connected_at FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+    if (!row) return res.json({ connected: false });
+    const out = { connected: true, username: row.username, connected_at: row.connected_at };
+    if (row.connected_at) out.days_since = Math.floor((Date.now() - new Date(row.connected_at).getTime()) / 86400000);
+    // ?check=1 testa o token ao vivo (pinga a Graph API) — confirma se ainda está válido.
+    if (req.query && (req.query.check === '1' || req.query.check === 'true')) {
+      try {
+        const r = await fetch('https://graph.instagram.com/me?fields=user_id,username&access_token=' + encodeURIComponent(row.access_token));
+        const d = await r.json().catch(() => ({}));
+        out.token_valid = !!(d && d.user_id);
+        if (d && d.error) out.token_error = d.error.message || 'token inválido';
+      } catch (e) { out.token_valid = false; out.token_error = e.message; }
+    }
+    res.json(out);
   } catch (e) { res.json({ connected: false }); }
 });
 
@@ -398,6 +416,28 @@ async function sendIgMessage(recipientId, text) {
   if (d.error) throw new Error((d.error && d.error.message) || 'Falha ao enviar Direct');
   return d;
 }
+
+// Renova o token de longa duração do Instagram (vale 60 dias; sem renovar, as msgs PARAM de chegar).
+// O ig_refresh_token estende por mais 60 dias e exige que o token tenha >24h e ainda esteja válido.
+async function refreshIgToken() {
+  try {
+    const conn = await getRow("SELECT * FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+    if (!conn || !conn.access_token) return;
+    const r = await fetch('https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=' + encodeURIComponent(conn.access_token));
+    const d = await r.json().catch(() => ({}));
+    if (d && d.access_token) {
+      await runQuery("UPDATE ig_connections SET access_token = ?, connected_at = ? WHERE id = ?", [d.access_token, new Date().toISOString(), conn.id]);
+      // garante que o webhook continua inscrito a cada renovação
+      try { await fetch('https://graph.instagram.com/v21.0/me/subscribed_apps?subscribed_fields=messages,comments&access_token=' + encodeURIComponent(d.access_token), { method: 'POST' }); } catch (e) {}
+      console.log('[IG] token renovado (+60 dias).');
+    } else {
+      console.error('[IG] refresh sem token (provável expiração — reconecte o Instagram):', JSON.stringify(d));
+    }
+  } catch (e) { console.error('[IG] refresh erro:', e && e.message); }
+}
+// Roda no boot (15s após subir) e depois 1x por dia.
+setTimeout(refreshIgToken, 15000);
+setInterval(refreshIgToken, 24 * 60 * 60 * 1000);
 
 // 3. Leads Routes: Get All (active only)
 app.get('/api/leads', authenticateToken, async (req, res) => {
