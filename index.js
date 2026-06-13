@@ -742,15 +742,19 @@ app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) =
   res.json(payload);
 });
 
-// 6c. E-mails de clientes que ASSINARAM o contrato (assunto "Contrato Assinado pelo Cliente:").
-// Varre a caixa (últimos 90 dias), extrai TODOS os endereços de e-mail de cada mensagem casada
-// e devolve o conjunto. O front marca o card como "assinado" quando o e-mail do lead está nesse conjunto.
+// 6c. Clientes que ASSINARAM o contrato (assunto "Contrato Assinado pelo Cliente: NOME").
+// Varre a caixa (últimos 90 dias). De cada mensagem casada extrai (a) os e-mails do corpo/assunto e
+// (b) o NOME que vem após "Cliente:" no assunto. O front marca o card como "assinado" quando o e-mail
+// OU o nome do lead bate. Use ?debug=1 para ver os assuntos casados e o que foi extraído.
 let _signedEmailsCache = { ts: 0, data: null };
 app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
-  if (_signedEmailsCache.data && (Date.now() - _signedEmailsCache.ts < 5 * 60 * 1000)) {
+  const debug = req.query && (req.query.debug === '1' || req.query.debug === 'true');
+  if (!debug && _signedEmailsCache.data && (Date.now() - _signedEmailsCache.ts < 5 * 60 * 1000)) {
     return res.json(_signedEmailsCache.data);
   }
   const emails = new Set();
+  const names = new Set();
+  const dbg = [];
   try {
     const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
     let ImapFlow, simpleParser;
@@ -768,15 +772,23 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
         const matchSubj = (s) => s.includes('contrato assinado pelo cliente');
         const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
         const ownDomain = (acc.email || '').split('@')[1] || '';
-        const addAll = (txt) => {
+        const collectEmails = (txt, sink) => {
           if (!txt) return;
           const m = String(txt).match(EMAIL_RE);
           if (m) m.forEach(e => {
             const lo = e.toLowerCase();
-            // ignora o próprio e-mail da empresa / mesmo domínio (não é cliente)
-            if (ownDomain && lo.endsWith('@' + ownDomain.toLowerCase())) return;
-            emails.add(lo);
+            if (ownDomain && lo.endsWith('@' + ownDomain.toLowerCase())) return; // ignora a própria empresa
+            emails.add(lo); if (sink) sink.push(lo);
           });
+        };
+        // Extrai o nome após "cliente:" no assunto (mantém a capitalização original).
+        const nameFromSubject = (rawSubj) => {
+          if (!rawSubj) return '';
+          const i = rawSubj.toLowerCase().indexOf('cliente:');
+          if (i === -1) return '';
+          let n = rawSubj.slice(i + 'cliente:'.length).trim();
+          n = n.replace(/["'<>]/g, '').replace(/\s+/g, ' ').trim();
+          return n.slice(0, 80);
         };
         // 1) UIDs candidatos: SEARCH SINCE; fallback nas últimas 300 mensagens.
         let uids = [];
@@ -788,31 +800,39 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
           for await (const m of client.fetch(start + ':*', { uid: true })) seqUids.push(m.uid);
           uids = seqUids;
         }
-        // 2) Filtra por assunto e extrai e-mails do corpo de cada mensagem casada.
+        // 2) Filtra por assunto, captura nome (assunto) e e-mails (assunto + corpo).
         for (const uid of uids) {
           let env = null;
           try { env = await client.fetchOne(String(uid), { envelope: true, internalDate: true }, { uid: true }); } catch (e) { continue; }
-          const subj = ((env && env.envelope && env.envelope.subject) || '').toLowerCase();
-          if (!matchSubj(subj)) continue;
+          const rawSubj = (env && env.envelope && env.envelope.subject) || '';
+          if (!matchSubj(rawSubj.toLowerCase())) continue;
           const dt = (env && (env.internalDate || (env.envelope && env.envelope.date)));
           if (dt && new Date(dt) < since) continue;
-          addAll(subj);
+          const nm = nameFromSubject(rawSubj);
+          if (nm) names.add(nm);
+          const foundHere = [];
+          collectEmails(rawSubj, foundHere);
           try {
             const full = await client.fetchOne(String(uid), { source: true }, { uid: true });
             if (full && full.source) {
               const p = await simpleParser(full.source);
-              addAll(p.subject); addAll(p.text);
-              if (p.html) addAll(String(p.html).replace(/<[^>]+>/g, ' '));
+              collectEmails(p.subject, foundHere); collectEmails(p.text, foundHere);
+              if (p.html) collectEmails(String(p.html).replace(/<[^>]+>/g, ' '), foundHere);
             }
           } catch (e) { /* segue */ }
+          if (debug) dbg.push({ subject: rawSubj, name: nm, emails: foundHere, date: dt });
         }
       } finally { lock.release(); }
       try { await client.logout(); } catch (e) {}
+    } else if (debug) {
+      dbg.push({ note: 'Sem conta de e-mail conectada ou imapflow ausente', hasAcc: !!acc });
     }
   } catch (err) {
     console.error('signed-emails error:', err && err.message);
+    if (debug) dbg.push({ error: err && err.message });
   }
-  const payload = { emails: Array.from(emails) };
+  const payload = { emails: Array.from(emails), names: Array.from(names) };
+  if (debug) { payload.matched = dbg; payload.matchedCount = dbg.length; return res.json(payload); }
   _signedEmailsCache = { ts: Date.now(), data: payload };
   res.json(payload);
 });
