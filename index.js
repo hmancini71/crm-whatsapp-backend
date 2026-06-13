@@ -511,7 +511,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { name, phone, value, tags, comments, priority, lastClientReply } = req.body;
+  const { name, phone, email, value, tags, comments, priority, lastClientReply } = req.body;
   
   try {
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
@@ -536,6 +536,10 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
           await runQuery("UPDATE conversations SET phone = ? WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone, '+',''), ' ',''), '-',''), '(','') LIKE ?", [phone, `%${oldClean.slice(-8)}%`]);
         }
       }
+    }
+    if (email !== undefined) {
+      updates.push("email = ?");
+      params.push(email);
     }
     if (value !== undefined) {
       updates.push("value = ?");
