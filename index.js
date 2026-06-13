@@ -833,7 +833,38 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
     console.error('signed-emails error:', err && err.message);
     if (debug) dbg.push({ error: err && err.message });
   }
-  const payload = { emails: Array.from(emails), names: Array.from(names) };
+
+  // Marca os leads como assinados NO BANCO (persistente; nunca desmarca). Assim o selo "✔ Assinado"
+  // volta junto com o lead em todo refresh, sem depender de cache do navegador.
+  let marked = 0;
+  try {
+    if (emails.size || names.size) {
+      const STOP = { msn:1, sr:1, sra:1, dr:1, dra:1, snr:1, cliente:1, contrato:1, assinado:1, de:1, da:1, do:1, dos:1, das:1, e:1 };
+      const toks = (s) => String(s == null ? '' : s)
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
+        .split(' ').filter(t => t.length >= 3 && !STOP[t]);
+      const nameSets = Array.from(names).map(toks).filter(a => a.length);
+      const leads = await allRows("SELECT id, name, email, contract_signed FROM leads WHERE archived = 0");
+      for (const l of (leads || [])) {
+        if (l.contract_signed) continue;
+        const em = (l.email || '').trim().toLowerCase();
+        let hit = !!(em && emails.has(em));
+        if (!hit) {
+          const lt = toks(l.name);
+          if (lt.length) {
+            for (const st of nameSets) {
+              let shared = 0; for (const t of lt) if (st.indexOf(t) !== -1) shared++;
+              if (shared >= 2 || (lt.length === 1 && shared === 1 && lt[0].length >= 4)) { hit = true; break; }
+            }
+          }
+        }
+        if (hit) { await runQuery("UPDATE leads SET contract_signed = 1 WHERE id = ?", [l.id]); marked++; }
+      }
+    }
+  } catch (e) { console.error('signed-emails mark error:', e && e.message); }
+
+  const payload = { emails: Array.from(emails), names: Array.from(names), marked };
   if (debug) { payload.matched = dbg; payload.matchedCount = dbg.length; payload.scanOk = scanOk; return res.json(payload); }
   if (scanOk) {
     // Varredura OK: atualiza o cache (une com o último bom p/ nunca encolher por uma leitura parcial do IMAP).

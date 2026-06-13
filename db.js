@@ -238,6 +238,16 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: add 'contract_signed' (1 = cliente assinou o contrato; detectado por e-mail).
+  // Estado PERSISTENTE no lead → o selo "✔ Assinado" aparece em todo refresh, sem depender de cache volátil.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'contract_signed')) {
+      db.run("ALTER TABLE leads ADD COLUMN contract_signed INTEGER DEFAULT 0", (alterErr) => {
+        if (alterErr) console.error("Failed to add contract_signed column to leads:", alterErr);
+      });
+    }
+  });
+
   // Safe migration: add 'tracking' (rastreamento de marketing: UTMs, gclid, fbclid)
   db.all("PRAGMA table_info(leads)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'tracking')) {
