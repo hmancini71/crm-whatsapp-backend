@@ -1698,6 +1698,26 @@ app.get('/api/contracts', authenticateToken, async (req, res) => {
   }
 });
 
+// 19c. Detalhe de UM contrato (para o "Visualizar" do CRM, sem abrir a página de assinatura).
+app.get('/api/contracts/:id', authenticateToken, async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  if (!id) return res.status(400).json({ error: 'ID obrigatório' });
+  try {
+    const token = await ds160AdminToken();
+    const cr = await fetch(DS160_BASE + '/contracts.php?id=' + encodeURIComponent(id), {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    const c = await cr.json().catch(() => null);
+    if (!cr.ok || !c || c.error) return res.status(502).json({ error: (c && c.error) || 'Contrato não encontrado.' });
+    // remove assinaturas base64 (pesadas e desnecessárias no resumo)
+    delete c.client_signature; delete c.admin_signature;
+    // monta URL do PDF assinado (quando concluído) e do anexo do cliente
+    const pdfUrl = (c.status === 'completed') ? (DS160_BASE + '/uploads/contracts/' + encodeURIComponent(id) + '/contrato_assinado_' + encodeURIComponent(id) + '.pdf') : null;
+    const attachmentUrl = c.client_attachment_path ? (DS160_BASE.replace(/\/api$/, '') + '/' + String(c.client_attachment_path).replace(/^\/+/, '')) : null;
+    res.json({ ...c, pdfUrl, attachmentUrl });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
   const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
