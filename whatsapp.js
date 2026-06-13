@@ -26,6 +26,32 @@ const sessionQrs = {};
 const MEDIA_DIR = path.join(__dirname, 'media');
 try { fs.mkdirSync(MEDIA_DIR, { recursive: true }); } catch (e) { /* ignore */ }
 
+// Fotos de perfil do WhatsApp (avatares). Baixadas via Baileys e guardadas localmente.
+const https = require('https');
+const AVATAR_DIR = path.join(MEDIA_DIR, 'avatars');
+try { fs.mkdirSync(AVATAR_DIR, { recursive: true }); } catch (e) { /* ignore */ }
+function avatarFileForJid(jid) { return path.join(AVATAR_DIR, String(jid || '').replace(/[^a-zA-Z0-9._-]/g, '_') + '.jpg'); }
+// Busca a foto de perfil do contato e salva em disco. Reusa por 7 dias. Tolerante a falhas
+// (privacidade do contato / sem foto / jid @lid → simplesmente não salva e o card usa as iniciais).
+async function fetchAndStoreAvatar(sock, jid) {
+  try {
+    if (!sock || !jid) return false;
+    const file = avatarFileForJid(jid);
+    try { const st = fs.statSync(file); if (Date.now() - st.mtimeMs < 7 * 86400000) return true; } catch (e) {}
+    let url = null;
+    try { url = await sock.profilePictureUrl(jid, 'image'); } catch (e) { url = null; }
+    if (!url) return false;
+    return await new Promise((resolve) => {
+      https.get(url, (res) => {
+        if (res.statusCode !== 200) { res.resume(); return resolve(false); }
+        const chunks = [];
+        res.on('data', d => chunks.push(d));
+        res.on('end', () => { try { fs.writeFileSync(file, Buffer.concat(chunks)); resolve(true); } catch (e) { resolve(false); } });
+      }).on('error', () => resolve(false));
+    });
+  } catch (e) { return false; }
+}
+
 // Transcode any browser-recorded audio (webm/ogg/mp4) into Opus/OGG for WhatsApp PTT
 function transcodeToOpusOgg(inputBuffer) {
   return new Promise((resolve, reject) => {
@@ -479,6 +505,8 @@ async function connectWhatsApp(id, isReconnect = false) {
         } else {
           console.log(`[WhatsApp ${id}] Received message from existing lead: ${lead.name}`);
         }
+        // Foto de perfil do contato (não-bloqueante; reusa por 7 dias)
+        fetchAndStoreAvatar(sock, fromJid).catch(() => {});
         // Carimba lastClientReply para QUALQUER mensagem recebida do cliente
         // (novo, restaurado OU existente) — assim a bolinha de tempo aparece já
         // na 1ª mensagem, não só a partir da segunda.
@@ -758,5 +786,8 @@ module.exports = {
   initSessions,
   sessions,
   sessionQrs,
-  MEDIA_DIR
+  MEDIA_DIR,
+  AVATAR_DIR,
+  avatarFileForJid,
+  fetchAndStoreAvatar
 };

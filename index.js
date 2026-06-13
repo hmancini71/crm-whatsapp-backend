@@ -17,7 +17,8 @@ const {
   initSessions,
   sessionQrs,
   sessions,
-  MEDIA_DIR, sendWhatsAppMedia } = require('./whatsapp');
+  MEDIA_DIR, sendWhatsAppMedia,
+  avatarFileForJid, fetchAndStoreAvatar } = require('./whatsapp');
 
 // Redirect console logs to an in-memory buffer
 const logBuffer = [];
@@ -1017,6 +1018,32 @@ app.get('/api/media/:msgId', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Foto de perfil do WhatsApp (avatar) do contato. Token via query (para usar em <img src>).
+// Se ainda não baixou, tenta baixar na hora usando qualquer sessão conectada.
+app.get('/api/avatar', async (req, res) => {
+  const token = (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]) || req.query.token;
+  if (!token) return res.status(401).end();
+  try { jwt.verify(token, JWT_SECRET); } catch (e) { return res.status(403).end(); }
+  try {
+    let jid = (req.query.jid || '').trim();
+    const phone = (req.query.phone || '').replace(/\D/g, '');
+    if (!jid && phone.length >= 8) {
+      const row = await getRow("SELECT whatsapp_jid FROM conversations WHERE whatsapp_jid IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", [`%${phone.slice(-8)}%`]);
+      if (row && row.whatsapp_jid) jid = row.whatsapp_jid;
+    }
+    if (!jid) return res.status(404).end();
+    const file = avatarFileForJid(jid);
+    if (!fs.existsSync(file)) {
+      const sock = Object.values(sessions || {}).find(s => s);
+      if (sock) { try { await fetchAndStoreAvatar(sock, jid); } catch (e) {} }
+    }
+    if (!fs.existsSync(file)) return res.status(404).end();
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    fs.createReadStream(file).pipe(res);
+  } catch (err) { res.status(500).end(); }
 });
 
 // 9d. Leads Routes: Find or create a conversation for a lead (open chat from lead modal)
