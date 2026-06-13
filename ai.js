@@ -11,12 +11,78 @@ const DEFAULTS = {
   gemini_key: '',
   model: 'gemini-2.0-flash',
   novo_enabled: false,
-  novo_instructions: 'Você é o atendente virtual da Eccere / Vale Visto (consultoria de vistos e cidadania). ' +
-    'Cumprimente o cliente pelo nome se souber, agradeça o contato e colete com gentileza: ' +
-    '1) nome completo; 2) qual serviço/tipo de visto procura; 3) prazo ou urgência. ' +
-    'Faça UMA pergunta por mensagem, seja breve e cordial. NUNCA invente preços, prazos ou requisitos — ' +
-    'diga que um consultor confirmará os detalhes. Quando já tiver nome e serviço, agradeça e avise que ' +
-    'um consultor dará sequência ao atendimento.',
+  novo_instructions: `Você é o Jorge, atendente virtual da Vale Visto (consultoria de vistos e cidadania) que tem a persona de um especialista em vendas de serviços de imigração. Cumprimente o cliente pelo nome se souber, agradeça o contato, faça uma apresentação curta sobre a Vale Visto e colete com gentileza: 1) nome completo; 2) qual serviço/tipo de visto procura.
+Faça as perguntas que forem necessárias para classificar o pedido em algumas das opções a seguir:
+A01 - 1 visto americano B1B2
+A02 - renov visto amer B1B2 -repres
+A03 - renov visto amer B1B2 +repres
+A04 - passap + 1 visto amer B1/B2
+A05 - passap + ren visto amer B1B2 +repres
+A06 - passap + ren visto amer B1B2 -repres
+A07 - visto americano F1 e/ou F2
+A08 - passap + 1 visto amer F1 e/ou F2
+A09 - Visto trânsito C1
+A10 - visto K (noiva)
+A11 - visto amer C1/D
+A12 - visto amer B1 in lieu
+A13 - visto amer J1
+A14 - Visto L1/L2
+A15 - visto amer B1 - empregada
+A16 - visto amer O
+A17 - visto amer R Religioso
+A18 - visto EB2
+A19 - ITIN
+A20 - green card
+A22 - ESTA
+A23 - renov passap americano
+A24 - FOIA
+A25 - agend exame green card
+A26 - FBI Background Check
+A27 - Representação
+A28 - EB2NIW
+A29 - Serviços de sistema do consulado
+A30 - extensão/ mudança de status
+A31 - EB1
+A32 - Waiver
+B01 - Visto de estudo brasileiro
+C01 - visto canadense Est
+C02 - visto canadense Tur
+C03 - visto trabalho canada
+C04 - ETA
+M01 - visto mexicano
+M02 - visto brasileiro
+M03 - visto chinês
+M04 - visto australiano
+M05 - visto de estudo Japão
+M06 - AIRE
+M07 - Visto autônomo brasileiro
+M08 - segunda via certidão japonesa
+M09 - Agend pass italiano
+M10 - Visto Espanhol
+M11 - Visto RD Congo
+M12 - Passaporte alemão
+M13 - cpf para estrangeiro
+M14 - visto trabalho Itália
+P01 - visto procura trabalho portugal
+P02 - visto D4 estudo portugal
+P03 - visto D1 (trabalho com contrato) Portugal
+P04 - visto D3 Português
+P05 - visto português D7
+P06 - visto nômade digital Portugal
+P07 - NIF/ NISS
+P08 - Passap português / cartão cidadão
+P09 - cidadania port
+P10 - Visto turismo português
+PA - passaporte
+Se houver ambiguidade na informação, pergunte para esclarecer (exemplo, o cliente fala que quer visto americano mas não diz se é primeiro visto ou renovação).
+Após identificar qual o serviço, você deve colocar a tag do serviço no card.
+Após identificar o serviço, pergunte sobre prazo ou urgência. Faça UMA pergunta por mensagem, seja breve e cordial. NUNCA invente preços, prazos ou requisitos — diga que um consultor trabalha de segunda a sexta das 9h às 18h e ele confirmará os detalhes. Quando já tiver nome e serviço, agradeça e avise que um consultor especializado dará sequência ao atendimento.
+Apenas conclua (transfira o card) depois de obter o nome E o serviço desejado pelo cliente.
+Informações sobre a Vale Visto (use para a apresentação e para responder dúvidas, sem inventar):
+A Vale Visto Imigração é uma empresa especializada em assessoria para obtenção de vistos e residência para os Estados Unidos, Brasil, Canadá, Portugal, México, China e muitos outros locais, além de cidadania portuguesa. Com mais de uma década de experiência, é líder em consultoria de visto e imigração, com o maior índice de aprovação do mercado. Cuidamos do preenchimento técnico dos formulários, agendamento das entrevistas no consulado e facilitamos o pagamento da taxa consular (inclusive parcelamento no cartão Visa/Mastercard). Atendemos todo o Brasil, presencialmente e online.
+Escritórios: (1) Rua José Maria Whitaker 887, sala 1, Vila Mariana, São Paulo (a 200 m do Centro de Atendimento de Vistos do Consulado Americano); (2) Shopping Oriente, Rua Andorra 500, São José dos Campos/SP (estacionamento gratuito).
+Horário de funcionamento: segunda a sexta das 9h às 18h e aos sábados das 9h às 13h.
+E-mail: contato@valevisto.com.br | WhatsApp (somente mensagens): (12) 98181-8964 | Telefone (somente ligações): (12) 98248-3094, (11) 96502-2030, (12) 99136-0550.`,
   fu_enabled: false,
   fu_instructions: 'Escreva uma mensagem CURTA e gentil de follow-up retomando a última conversa: ' +
     'pergunte se o cliente ainda tem interesse e se ficou alguma dúvida. Não seja insistente, ' +
@@ -24,6 +90,37 @@ const DEFAULTS = {
   fu_hours: 24,
   fu_max: 2
 };
+
+// Catálogo de serviços/vistos. A IA DEVE escolher um código exato daqui antes de transferir o lead.
+const SERVICE_TAGS = [
+  "A01 - 1 vista americana B1B2", "A02 - renov vista amer B1B2 -reprov", "A03 - renov vista amer B1B2 +reprov",
+  "A04 - passap + 1 vista amer B1/B2", "A05 - passap + ren vista amer B1B2 +reprov", "A06 - passap + ren vista amer B1B2 -reprov",
+  "A07 - vista americana F1 e/ou F2", "A08 - passap + 1 vista amer F1 e/ou F2", "A09 - Vista trânsito C1",
+  "A10 - vista K (noiva)", "A11 - vista amer C1/D", "A12 - vista amer B1 in lieu", "A13 - vista amer J1",
+  "A14 - Vista L1/L2", "A15 - vista amer B1 - empregada", "A16 - vista amer O", "A17 - vista amer R Religioso",
+  "A18 - vista EB2", "A19 - ITIN", "A20 - green card", "A22 - ESTA", "A23 - renov passap americano", "A24 - FOIA",
+  "A25 - agend exame green card", "A26 - FBI Background Check", "A27 - Representação", "A28 - EB2NIW",
+  "A29 - Serviço p/ desistência de consulado", "A30 - extensão/ mudança de status", "A31 - EB1", "A32 - Waiver",
+  "B01 - Vista de estudo brasileiro",
+  "C01 - vista canadense Ext", "C02 - vista canadense Tur", "C03 - vista trabalho canada", "C04 - ETA",
+  "M01 - vista mexicano", "M02 - vista brasileiro", "M03 - vista chinês", "M04 - vista australiano",
+  "M05 - vista de estudo Japão", "M06 - AIRE", "M07 - Vista autônomo brasileiro", "M08 - segunda via certidão japonesa",
+  "M09 - Agend pass italiano", "M10 - Vista Espanhol", "M11 - Vista RD Congo", "M12 - Passaporte alemão",
+  "M13 - cpf para estrangeiro", "M14 - vista trabalho Itália",
+  "P01 - vista procura trabalho portugal", "P02 - vista D4 estudo portugal", "P03 - vista D1 (trabalho com contrato) P",
+  "P04 - vista D3 Português", "P05 - vista português D7", "P06 - vista nômade digital Portugal", "P07 - NIF / NISS",
+  "P08 - Passap português / cartão cidadão", "P09 - cidadania part", "P10 - Vista turismo português", "PA - passaporte"
+];
+
+// Valida/normaliza a tag escolhida pela IA: aceita string exata do catálogo OU só o código (ex.: "A01").
+function normalizeServiceTag(t) {
+  if (!t) return '';
+  const s = String(t).trim();
+  if (SERVICE_TAGS.includes(s)) return s;
+  const code = s.split(/[\s-]/)[0].toUpperCase();
+  const byCode = SERVICE_TAGS.find(tag => tag.toUpperCase().startsWith(code + ' '));
+  return byCode || '';
+}
 
 async function getAiSettings() {
   try {
@@ -95,7 +192,8 @@ async function buildContents(convoId, limit) {
   return contents;
 }
 
-// 1ª interação (Novo Leads): devolve { reply, dados_coletados } ou null se IA desligada
+// 1ª interação (Novo Leads): devolve { reply, visa_tag, dados_coletados } ou null se IA desligada.
+// O lead só é transferido (pelo chamador) quando dados_coletados=true E visa_tag for um código válido.
 async function getNovoLeadReply(convoId, leadName) {
   const cfg = await getAiSettings();
   if (!cfg.enabled || !cfg.novo_enabled || !cfg.gemini_key) return null;
@@ -103,33 +201,29 @@ async function getNovoLeadReply(convoId, leadName) {
   if (!contents.length) return null;
   const system = cfg.novo_instructions +
     '\n\nContexto: o lead chama-se "' + (leadName || 'desconhecido') + '" e está na etapa "Novo Leads" do CRM.' +
-    '\nResponda SEMPRE em JSON válido neste formato exato: ' +
-    '{"reply": "texto da mensagem ao cliente", "dados_coletados": true ou false}. ' +
-    '"dados_coletados" deve ser true SOMENTE quando você já souber o nome do cliente E o serviço de interesse.';
+    '\n\n[FORMATO DE SAÍDA OBRIGATÓRIO] Responda SEMPRE em JSON válido EXATO, sem nada fora do JSON: ' +
+    '{"reply": "texto da mensagem ao cliente", "visa_tag": "código exato da tabela do enunciado (ex.: A01) ou string vazia se ainda não identificou", "dados_coletados": true ou false}. ' +
+    'Regra de transferência: "dados_coletados" só pode ser true quando você já souber o NOME do cliente E tiver escolhido um "visa_tag" específico da tabela (sem ambiguidade). ' +
+    'Enquanto o serviço estiver ambíguo, mantenha visa_tag vazio e dados_coletados=false e faça mais UMA pergunta.';
   const raw = await callGemini(cfg, system, contents, true);
-  // Tenta parsear diretamente
-  try {
-    const j = JSON.parse(raw);
-    if (j && j.reply) return { reply: String(j.reply).slice(0, 1500), dados_coletados: !!j.dados_coletados };
-  } catch (e) { /* segue para extração robusta */ }
-  // Gemini às vezes adiciona texto extra fora do JSON — extrai só o bloco { }
-  const jsonMatch = raw.match(/\{[\s\S]*?\}/);
-  if (jsonMatch) {
-    try {
-      const j2 = JSON.parse(jsonMatch[0]);
-      if (j2 && j2.reply) return { reply: String(j2.reply).slice(0, 1500), dados_coletados: !!j2.dados_coletados };
-    } catch (e2) { /* continua */ }
+  // Parsing robusto: tenta JSON direto, depois bloco { }, depois sem markdown.
+  const tryParse = (s) => { try { return JSON.parse(s); } catch (e) { return null; } };
+  let j = tryParse(raw);
+  if (!j) { const m = raw.match(/\{[\s\S]*\}/); if (m) j = tryParse(m[0]); }
+  if (!j) { j = tryParse(raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
+  if (j && j.reply) {
+    const tag = normalizeServiceTag(j.visa_tag);
+    return {
+      reply: String(j.reply).slice(0, 1500),
+      visa_tag: tag,
+      // só conclui se houver tag válida (regra: não transfere sem identificar o visto)
+      dados_coletados: !!j.dados_coletados && !!tag
+    };
   }
-  // Remove blocos de código markdown e tenta de novo
-  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  try {
-    const j3 = JSON.parse(cleaned);
-    if (j3 && j3.reply) return { reply: String(j3.reply).slice(0, 1500), dados_coletados: !!j3.dados_coletados };
-  } catch (e3) { /* continua */ }
-  // Se parece JSON mas não conseguimos parsear, NÃO envia o JSON bruto ao cliente
+  // Se parece JSON mas não parseou, NÃO envia o JSON bruto ao cliente
   if (raw.trim().startsWith('{')) return null;
-  // Se é texto simples (sem JSON), usa como resposta
-  return { reply: String(raw).trim().slice(0, 1500), dados_coletados: false };
+  // Texto simples (sem JSON) → usa como resposta, sem concluir
+  return { reply: String(raw).trim().slice(0, 1500), visa_tag: '', dados_coletados: false };
 }
 
 // Follow-up (Tratamento inicial, colunas 2-3): devolve texto ou null

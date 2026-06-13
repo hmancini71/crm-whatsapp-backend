@@ -503,25 +503,39 @@ async function connectWhatsApp(id, isReconnect = false) {
           if (aiLead) {
             const ai = await getNovoLeadReply(convoId, aiLead.name);
             if (ai && ai.reply) {
-              const sentAi = await sock.sendMessage(fromJid, { text: ai.reply });
+              // Fora do horário? Seg–Sex 9h–18h, Sáb 9h–13h, Dom fechado (fuso de São Paulo).
+              let outOfHours = false;
+              try {
+                const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+                const wd = p.find(x => x.type === 'weekday').value;
+                const h = parseInt(p.find(x => x.type === 'hour').value, 10);
+                const open = (['Mon','Tue','Wed','Thu','Fri'].includes(wd) && h >= 9 && h < 18) || (wd === 'Sat' && h >= 9 && h < 13);
+                outOfHours = !open;
+              } catch (e) {}
+              // Ao concluir (handoff) e fora do horário, acrescenta o aviso de horário + retorno.
+              let replyText = ai.reply;
+              if (ai.dados_coletados && ai.visa_tag && outOfHours) {
+                replyText += '\n\n⏰ Nosso horário de atendimento é de segunda a sexta, das 9h às 18h, e aos sábados, das 9h às 13h. No momento estamos fora do horário, mas em breve um de nossos consultores dará continuidade ao seu atendimento. 🙏';
+              }
+              const sentAi = await sock.sendMessage(fromJid, { text: replyText });
               const aiMsgId = (sentAi && sentAi.key && sentAi.key.id) || ('m_' + Math.random().toString(36).substr(2, 9));
               _aiSentIds.add(aiMsgId);
               if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }
               const tAi = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
               await runQuery(
                 "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                [aiMsgId, convoId, 'me', ai.reply, tAi, Date.now()]
+                [aiMsgId, convoId, 'me', replyText, tAi, Date.now()]
               );
               await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convoId]);
               // IA respondeu → zera o controle de tempo (fomos os últimos a falar)
               await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [aiLead.id]);
-              if (ai.dados_coletados) {
-                // A IA concluiu a 1ª conversa: move p/ Tratamento inicial e marca "Novo lead"
-                // (vai para a 1ª coluna). A marca é removida quando um HUMANO responder.
-                await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead' WHERE id = ? AND stage = 'novo'", [aiLead.id]);
-                console.log(`[IA] "${aiLead.name}": tratamento concluído pela IA → movido para Tratamento inicial (tag "Novo lead" aplicada).`);
+              if (ai.dados_coletados && ai.visa_tag) {
+                // SÓ transfere após identificar o serviço: grava a TAG do serviço, marca "Novo lead"
+                // e move p/ o Tratamento inicial (1ª coluna). "Novo lead" sai quando um humano responder.
+                await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead', tags = ? WHERE id = ? AND stage = 'novo'", [JSON.stringify([ai.visa_tag]), aiLead.id]);
+                console.log(`[IA] "${aiLead.name}": serviço identificado (${ai.visa_tag}) → Tratamento inicial + tag "Novo lead".`);
               } else {
-                console.log(`[IA] "${aiLead.name}": IA respondeu (coleta de dados em andamento).`);
+                console.log(`[IA] "${aiLead.name}": IA respondeu (ainda coletando nome/serviço).`);
               }
             }
           }
