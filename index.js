@@ -1651,6 +1651,53 @@ app.post('/api/ds160/send-form', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// 19b. Lista de CONTRATOS do sistema VALE VISTO (gerencia_ds-160) — proxy server-a-server.
+// Faz login_admin e busca contracts.php. A senha de admin NÃO trafega pelo navegador.
+let _contractsCache = { ts: 0, data: null };
+async function ds160AdminToken() {
+  const lr = await fetch(DS160_BASE + '/auth.php?action=login_admin', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: DS160_ADMIN_USER, password: DS160_ADMIN_PASS })
+  });
+  const lj = await lr.json().catch(() => ({}));
+  if (!lr.ok || !lj.token) throw new Error('Falha ao autenticar no sistema de contratos.');
+  return lj.token;
+}
+app.get('/api/contracts', authenticateToken, async (req, res) => {
+  // cache de 30s (evita re-login a cada abertura/poll)
+  if (_contractsCache.data && (Date.now() - _contractsCache.ts < 30 * 1000)) {
+    return res.json(_contractsCache.data);
+  }
+  try {
+    const token = await ds160AdminToken();
+    const cr = await fetch(DS160_BASE + '/contracts.php', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    const cj = await cr.json().catch(() => null);
+    if (!cr.ok || !Array.isArray(cj)) {
+      return res.status(502).json({ error: (cj && cj.error) || 'Falha ao buscar contratos.' });
+    }
+    // devolve só os campos usados pela tabela (sem assinaturas/base64)
+    const list = cj.map(c => ({
+      id: c.id,
+      closedNumber: c.closed_number != null ? Number(c.closed_number) : null,
+      clientName: c.client_name || '',
+      clientEmail: c.client_email || '',
+      status: c.status || 'pending_client',
+      createdAt: c.created_at || null,
+      clientSignedAt: c.client_signed_at || null,
+      adminSignedAt: c.admin_signed_at || null,
+      price: c.price || ''
+    }));
+    _contractsCache = { ts: Date.now(), data: list };
+    res.json(list);
+  } catch (e) {
+    // em falha, devolve o último resultado bom se houver
+    if (_contractsCache.data) return res.json(_contractsCache.data);
+    res.status(502).json({ error: e.message });
+  }
+});
+
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
   const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
