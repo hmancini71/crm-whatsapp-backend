@@ -432,6 +432,17 @@ app.get('/api/instagram/diag', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Auto-teste do caminho receptor (webhook → banco → guia Meta), sem depender da Meta entregar.
+// Injeta uma "mensagem" de Instagram fictícia. Se ela aparecer na guia Meta, o receptor está OK
+// e o que falta é a Meta ENTREGAR (config do app/modo de desenvolvimento).
+app.get('/api/instagram/selftest', async (req, res) => {
+  if ((req.query && req.query.k) !== 'eccere_diag_2026') return res.status(403).json({ error: 'forbidden' });
+  try {
+    await storeIgMessage('selftest_' + Date.now(), '🔧 Mensagem de teste do diagnóstico — pode apagar.', 'them', 'Teste Diagnóstico', 'st_' + Date.now());
+    res.json({ success: true, info: 'Injetado. Veja na guia Meta do CRM.' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Desconecta o Instagram (remove o token guardado)
 app.post('/api/instagram/disconnect', authenticateToken, async (req, res) => {
   try {
