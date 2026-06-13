@@ -1393,6 +1393,33 @@ app.post('/api/settings/business-hours', authenticateToken, async (req, res) => 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Respostas rápidas por /atalho (lista de { code, context, message }). Leitura p/ todos; gravação só admin.
+app.get('/api/settings/quick-replies', authenticateToken, async (req, res) => {
+  try {
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'quick_replies'");
+    let arr = [];
+    if (row && row.value) { try { arr = JSON.parse(row.value); } catch (e) { arr = []; } }
+    res.json(Array.isArray(arr) ? arr : []);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/settings/quick-replies', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
+  }
+  try {
+    const arr = Array.isArray(req.body) ? req.body : ((req.body && req.body.items) || []);
+    const clean = arr
+      .filter(x => x && (x.code || x.message))
+      .map(x => ({ code: String(x.code || '').trim(), context: String(x.context || ''), message: String(x.message || '') }));
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES ('quick_replies', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [JSON.stringify(clean)]
+    );
+    res.json({ success: true, count: clean.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
   const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
