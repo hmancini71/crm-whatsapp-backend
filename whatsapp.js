@@ -496,9 +496,10 @@ async function connectWhatsApp(id, isReconnect = false) {
             [leadId, name, "", fromJid.endsWith('@lid') ? "" : formattedPhone, "", 0, "novo", "Venda", id, "Rafael Andrade", JSON.stringify([]), createdAt, 0, fromJid, ourNumber]
           );
         } else if (lead.archived === 1) {
-          // Lead arquivado ("bloqueado") voltou a falar → restaura E manda para "Novo Leads".
-          console.log(`[WhatsApp ${id}] Archived lead ${lead.name} sent a new message. Restoring to 'novo'.`);
-          await runQuery("UPDATE leads SET archived = 0, stage = 'novo' WHERE id = ?", [lead.id]);
+          // Lead arquivado ("bloqueado") voltou a falar → restaura. Vai para "Novo Leads",
+          // MAS preserva estágios terminais (convertida/declinado nunca viram 'novo').
+          console.log(`[WhatsApp ${id}] Archived lead ${lead.name} sent a new message. Restoring.`);
+          await runQuery("UPDATE leads SET archived = 0, stage = CASE WHEN stage IN ('convertida','declinado') THEN stage ELSE 'novo' END WHERE id = ?", [lead.id]);
           // Restore their conversation too
           const cleanPhone = phone.replace(/\D/g, '');
           if (cleanPhone.length >= 8) {

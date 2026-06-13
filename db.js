@@ -281,7 +281,9 @@ db.serialize(() => {
     // Migrate existing leads to fit the new stage IDs:
     db.run("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
     db.run("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
-    db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'declinado')");
+    // ATENÇÃO: 'convertida' PRECISA estar nesta lista. Sem ela, todo restart do backend
+    // resetava os leads de "Venda convertida" para 'novo' (eles sumiam da coluna). BUG corrigido.
+    db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado')");
   });
 
   // Safe migration: add 'type' column to messages (text | audio | image | other)
