@@ -481,8 +481,8 @@ app.patch('/api/leads/:id/restore', authenticateToken, async (req, res) => {
 // 4. Leads Routes: Patch Stage
 app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { stage } = req.body;
-  
+  const { stage, force } = req.body;
+
   if (!stage) {
     return res.status(400).json({ error: "Estágio é obrigatório" });
   }
@@ -491,8 +491,9 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     const cur = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     if (!cur) return res.status(404).json({ error: "Lead não encontrado" });
     // Estágios TERMINAIS: uma vez em "Venda convertida" ou "Lead declinou/cancelado",
-    // o lead NÃO muda mais de etapa (protege o controle do que vendeu / declinou).
-    if ((cur.stage === 'convertida' || cur.stage === 'declinado') && stage !== cur.stage) {
+    // o lead NÃO muda mais de etapa por processos automáticos (drag, reconcile, etc.).
+    // EXCEÇÃO: force=true (ação deliberada do operador via combo "Editar Lead").
+    if (!force && (cur.stage === 'convertida' || cur.stage === 'declinado') && stage !== cur.stage) {
       console.log(`[stage] BLOQUEADO: "${cur.name}" está em '${cur.stage}' (terminal) — mudança p/ '${stage}' ignorada.`);
       return res.json({ ...cur, tags: cur.tags ? JSON.parse(cur.tags) : [], _locked: true });
     }
