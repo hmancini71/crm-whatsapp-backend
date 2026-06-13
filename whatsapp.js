@@ -516,8 +516,10 @@ async function connectWhatsApp(id, isReconnect = false) {
               // IA respondeu → zera o controle de tempo (fomos os últimos a falar)
               await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [aiLead.id]);
               if (ai.dados_coletados) {
-                await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'followup' WHERE id = ? AND stage = 'novo'", [aiLead.id]);
-                console.log(`[IA] "${aiLead.name}": tratamento concluído pela IA → movido para Tratamento inicial (tag Follow-up aplicada).`);
+                // A IA concluiu a 1ª conversa: move p/ Tratamento inicial e marca "Novo lead"
+                // (vai para a 1ª coluna). A marca é removida quando um HUMANO responder.
+                await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead' WHERE id = ? AND stage = 'novo'", [aiLead.id]);
+                console.log(`[IA] "${aiLead.name}": tratamento concluído pela IA → movido para Tratamento inicial (tag "Novo lead" aplicada).`);
               } else {
                 console.log(`[IA] "${aiLead.name}": IA respondeu (coleta de dados em andamento).`);
               }
@@ -538,10 +540,14 @@ async function connectWhatsApp(id, isReconnect = false) {
             if (bh && bh.message && text && String(text).trim() === String(bh.message).trim()) isAutoReply = true;
           } catch (e) {}
           if (!isAutoReply && !_aiSentIds.has(msg.key.id)) {
-            // Novos Leads: ao responder (pelo celular OU pelo CRM), move para "Tratamento inicial".
+            // Mensagem de um HUMANO (não auto-resposta, não IA).
             // Casa por jid E por telefone normalizado (8 últimos dígitos), robusto a formatação.
             const tail = sn.replace(/\D/g, '').slice(-8);
-            await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?))", [fromJid, `%${tail}%`]);
+            const matchSql = "(whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?))";
+            // Novos Leads: ao responder (pelo celular OU pelo CRM), move para "Tratamento inicial".
+            await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'novo' AND " + matchSql, [fromJid, `%${tail}%`]);
+            // 1ª interação humana remove a tag "Novo lead" (some da 1ª coluna do Tratamento).
+            await runQuery("UPDATE leads SET priority = '' WHERE priority = 'novolead' AND " + matchSql, [fromJid, `%${tail}%`]);
           }
         } // fim if (!isMine)
       }
