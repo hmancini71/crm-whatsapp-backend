@@ -248,6 +248,15 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: add 'payment_proof' (caminho do comprovante de pagamento anexado ao lead).
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'payment_proof')) {
+      db.run("ALTER TABLE leads ADD COLUMN payment_proof TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) console.error("Failed to add payment_proof column to leads:", alterErr);
+      });
+    }
+  });
+
   // Safe migration: add 'tracking' (rastreamento de marketing: UTMs, gclid, fbclid)
   db.all("PRAGMA table_info(leads)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'tracking')) {

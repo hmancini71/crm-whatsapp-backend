@@ -1259,6 +1259,59 @@ app.get('/api/avatar', async (req, res) => {
   } catch (err) { res.status(500).end(); }
 });
 
+// Comprovante de pagamento do lead (anexo que persiste de Follow-up até Venda convertida).
+// Upload em base64 (JSON), salvo no MEDIA_DIR; o caminho fica em leads.payment_proof.
+app.post('/api/leads/:id/payment-proof', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { filename, content, contentType } = req.body || {};
+    if (!content) return res.status(400).json({ error: 'Arquivo ausente' });
+    const lead = await getRow("SELECT id, payment_proof FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    const buf = Buffer.from(String(content).replace(/^data:[^;]+;base64,/, ''), 'base64');
+    if (!buf.length) return res.status(400).json({ error: 'Arquivo vazio' });
+    if (buf.length > 12 * 1024 * 1024) return res.status(400).json({ error: 'Arquivo acima de 12 MB' });
+    let ext = (String(filename || '').match(/\.([a-z0-9]{2,5})$/i) || ['', ''])[1].toLowerCase();
+    if (!['jpg', 'jpeg', 'png', 'webp', 'gif', 'pdf'].includes(ext)) {
+      const ctMap = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'application/pdf': 'pdf' };
+      ext = ctMap[String(contentType || '').toLowerCase()] || 'bin';
+    }
+    if (lead.payment_proof) { try { const old = path.join(MEDIA_DIR, path.basename(lead.payment_proof)); if (fs.existsSync(old)) fs.unlinkSync(old); } catch (e) {} }
+    const fname = 'proof_' + id + '_' + Date.now() + '.' + ext;
+    fs.writeFileSync(path.join(MEDIA_DIR, fname), buf);
+    await runQuery("UPDATE leads SET payment_proof = ? WHERE id = ?", [fname, id]);
+    res.json({ success: true, payment_proof: fname });
+  } catch (e) { console.error('[payment-proof upload]', e && e.message); res.status(500).json({ error: e.message }); }
+});
+
+// Serve o comprovante (token via header OU ?token= para usar em <img>/nova aba).
+app.get('/api/leads/:id/payment-proof', async (req, res) => {
+  const token = (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]) || req.query.token;
+  if (!token) return res.status(401).end();
+  try { jwt.verify(token, JWT_SECRET); } catch (e) { return res.status(403).end(); }
+  try {
+    const lead = await getRow("SELECT payment_proof FROM leads WHERE id = ?", [req.params.id]);
+    if (!lead || !lead.payment_proof) return res.status(404).end();
+    const file = path.join(MEDIA_DIR, path.basename(lead.payment_proof));
+    if (!fs.existsSync(file)) return res.status(404).end();
+    const ext = (lead.payment_proof.match(/\.([a-z0-9]+)$/i) || ['', ''])[1].toLowerCase();
+    const ctMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', pdf: 'application/pdf' };
+    res.setHeader('Content-Type', ctMap[ext] || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs.createReadStream(file).pipe(res);
+  } catch (e) { res.status(500).end(); }
+});
+
+// Remove o comprovante de pagamento do lead.
+app.delete('/api/leads/:id/payment-proof', authenticateToken, async (req, res) => {
+  try {
+    const lead = await getRow("SELECT payment_proof FROM leads WHERE id = ?", [req.params.id]);
+    if (lead && lead.payment_proof) { try { const f = path.join(MEDIA_DIR, path.basename(lead.payment_proof)); if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} }
+    await runQuery("UPDATE leads SET payment_proof = NULL WHERE id = ?", [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // 9d. Leads Routes: Find or create a conversation for a lead (open chat from lead modal)
 app.post('/api/leads/:id/open-conversation', authenticateToken, async (req, res) => {
   const { id } = req.params;
