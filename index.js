@@ -1774,6 +1774,91 @@ app.post('/api/ds160/send-form', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// E-mail de preparação para a entrevista (1º visto): relação de vínculos + lista de documentos.
+// Enviado pela conta de e-mail conectada no CRM (SMTP), ao e-mail do lead.
+function buildPrepDocsEmail(firstName) {
+  const ola = firstName ? ('Olá, <strong>' + firstName.replace(/[<>&]/g, '') + '</strong>,') : 'Olá,';
+  const li = (t) => '<li style="margin-bottom:6px;">' + t + '</li>';
+  return `<html><head><meta charset="utf-8"><style>
+    body{font-family:Arial,sans-serif;color:#334155;line-height:1.6;}
+    .container{max-width:640px;margin:0 auto;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;}
+    .header{background:#1e293b;color:#fff;padding:18px;text-align:center;}
+    .content{padding:20px 22px;}
+    h3{color:#b91c1c;font-size:15px;margin:18px 0 6px;}
+    .tip{background:#f1f5f9;border-left:4px solid #2563eb;padding:10px 14px;border-radius:6px;margin:14px 0;font-size:13px;}
+    ul{margin:6px 0 0;padding-left:20px;font-size:13.5px;}
+    .footer{font-size:12px;color:#64748b;border-top:1px solid #e2e8f0;padding:14px 22px;}
+  </style></head><body><div class="container">
+    <div class="header"><h2 style="margin:0;color:#fff;">Vale Visto — Preparação para a Entrevista</h2>
+      <div style="font-size:13px;opacity:.85;margin-top:4px;">Visto Americano — Relação de vínculos e documentos</div></div>
+    <div class="content">
+      <p>${ola}</p>
+      <p>Estamos chegando em uma etapa importante: a <strong>entrevista no Consulado Americano</strong>. Para aumentar suas chances de aprovação, é fundamental comprovar seus <strong>vínculos com o Brasil</strong> (familiares, profissionais e patrimoniais). Abaixo está a relação de documentos <strong>aceitos</strong> pelo Consulado.</p>
+      <div class="tip"><strong>Não é obrigatório</strong> ter todos. Separe os que você possui e leve no dia da entrevista — o agente consular pode solicitá-los para comprovação.<br><strong>Todos os documentos devem ser ORIGINAIS.</strong></div>
+      <h3>Documentos pessoais e de vínculos</h3>
+      <ul>
+        ${li('<strong>Bens</strong> (casa, apartamento, sítio, fazenda, chácara ou terreno): leve a <strong>escritura</strong> (ideal) ou o contrato de compra; se financiado, o contrato de financiamento.')}
+        ${li('<strong>Carteira de Trabalho</strong> (caso haja registro vigente).')}
+        ${li('<strong>3 extratos bancários</strong> dos últimos 90 dias (3 meses).')}
+        ${li('<strong>Declaração de Imposto de Renda</strong> atual.')}
+        ${li('Se for <strong>a trabalho</strong>: carta em papel timbrado da empresa informando reuniões/palestras/treinamentos nos EUA (temos o modelo).')}
+        ${li('<strong>Autônomos</strong>: carta de prestação de serviços com firma reconhecida (temos o modelo), ou papel timbrado da empresa contratante, ou contrato de trabalho.')}
+        ${li('<strong>Profissionais com conselho</strong> (médicos, advogados, dentistas, veterinários, enfermeiros, corretores etc.): carteirinha do conselho (CRM, OAB, CRMV, COREN, CRECI...).')}
+        ${li('<strong>Certidão de casamento</strong> (se casado).')}
+        ${li('<strong>Certidão de união estável</strong> (apenas união estável pública feita em cartório).')}
+        ${li('<strong>Certidão de nascimento dos filhos</strong> que ficarão no Brasil.')}
+        ${li('<strong>Documento do carro</strong> em seu nome (CRV).')}
+        ${li('<strong>Atestado de matrícula</strong> e carteirinha (se estiver cursando).')}
+        ${li('<strong>Diploma</strong> da faculdade (se formado).')}
+        ${li('<strong>Carta do custeador</strong> (apenas se a viagem for paga por alguém que não seja pais ou cônjuge).')}
+        ${li('<strong>Cópia colorida do visto americano</strong> dos acompanhantes de viagem (se possuírem).')}
+        ${li('<strong>Cópia colorida de documentos de parentes nos EUA</strong> (passaporte americano, green card ou visto vigente, se houver).')}
+      </ul>
+      <p style="font-size:13px;">Se for a um <strong>evento específico</strong> (feira, palestra, workshop, competição): leve a carta-convite da organização ou algo que comprove o evento (folder, página do site impressa).</p>
+      <h3>Se você possui empresa</h3>
+      <p style="font-size:13px;margin:0 0 4px;">Demonstre que a empresa se movimenta (leve o que tiver):</p>
+      <ul>
+        ${li('Declaração de Imposto de Renda Pessoa Jurídica.')}
+        ${li('Notas fiscais emitidas (algumas antigas e as 10 últimas).')}
+        ${li('Livro/ficha de registro de funcionários (se houver).')}
+        ${li('Extratos bancários PJ dos últimos 90 dias.')}
+        ${li('Contratos de prestação de serviço (se for o caso).')}
+        ${li('Outras comprovações de movimentação (fotos de mídias sociais, site etc.).')}
+        ${li('CNPJ (emitido no site da Receita Federal) e Contrato Social.')}
+      </ul>
+      <h3>Estudantes</h3>
+      <ul>${li('Documento que comprove a frequência na instituição declarada (declaração de escolaridade, comprovante de matrícula, carteirinha escolar identificada etc.).')}</ul>
+      <div class="tip">Dica: organize tudo em uma <strong>pasta transparente e incolor</strong> — assim o agente consular vê que você está bem documentado.</div>
+      <p style="font-size:13px;">Ficou com alguma dúvida? Fale com um de nossos profissionais. <strong>Não vá com dúvidas para a entrevista</strong> — cada detalhe pode fazer a diferença.</p>
+    </div>
+    <div class="footer">Vale Visto — Assessoria e Documentação. Este e-mail é informativo e destinado à preparação da sua entrevista.</div>
+  </div></body></html>`;
+}
+app.post('/api/prep/send-docs', authenticateToken, async (req, res) => {
+  try {
+    const { leadId, email } = req.body || {};
+    if (!leadId) return res.status(400).json({ error: 'leadId obrigatório' });
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [leadId]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    const clientEmail = String(email || lead.email || '').trim();
+    if (!clientEmail) return res.json({ needEmail: true });
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    if (!acc) return res.status(400).json({ error: 'Nenhum e-mail conectado no CRM (Configurações → Conexões).' });
+    const firstName = String(lead.name || '').trim().split(/\s+/)[0] || '';
+    const transporter = nodemailer.createTransport({
+      host: acc.host, port: acc.port, secure: !!acc.secure,
+      auth: { user: acc.email, pass: acc.password }, tls: { rejectUnauthorized: false }
+    });
+    await transporter.sendMail({
+      from: acc.email, to: clientEmail,
+      subject: 'Vale Visto - Documentos e vínculos para a sua entrevista (Visto Americano)',
+      html: buildPrepDocsEmail(firstName)
+    });
+    if (!lead.email && clientEmail) { try { await runQuery("UPDATE leads SET email = ? WHERE id = ?", [clientEmail, leadId]); } catch (e) {} }
+    res.json({ success: true, email: clientEmail });
+  } catch (e) { console.error('[prep/send-docs]', e && e.message); res.status(500).json({ error: (e && e.message) || 'Falha ao enviar' }); }
+});
+
 // 19b. Lista de CONTRATOS do sistema VALE VISTO (gerencia_ds-160) — proxy server-a-server.
 // Faz login_admin e busca contracts.php. A senha de admin NÃO trafega pelo navegador.
 let _contractsCache = { ts: 0, data: null };
