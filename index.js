@@ -1201,6 +1201,32 @@ app.post('/api/conversations/:id/archive', authenticateToken, async (req, res) =
   }
 });
 
+// Migra a conversa para outra linha de WhatsApp (as próximas mensagens saem por ela).
+app.patch('/api/conversations/:id/account', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { account } = req.body || {};
+  if (!account) return res.status(400).json({ error: "account obrigatório" });
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
+    const acc = await getRow("SELECT id, number FROM whatsapp_accounts WHERE id = ?", [account]);
+    if (!acc) return res.status(400).json({ error: "Linha de WhatsApp inválida" });
+    await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [account, id]);
+    // Mantém o(s) lead(s) correspondente(s) em sincronia (linha de atendimento exibida no card).
+    const newNumber = acc.number || null;
+    if (convo.whatsapp_jid) {
+      await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE whatsapp_jid = ?", [account, newNumber, convo.whatsapp_jid]);
+    }
+    const cleanP = (convo.phone || '').replace(/\D/g, '');
+    if (cleanP.length >= 8) {
+      await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [account, newNumber, `%${cleanP.slice(-8)}%`]);
+    }
+    res.json({ success: true, account, number: newNumber });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 9c. Media Routes: Serve a message's audio/media file.
 // Auth via Authorization header OR ?token= (needed so <audio src> can load it).
 app.get('/api/media/:msgId', async (req, res) => {
