@@ -1870,18 +1870,21 @@ app.post('/api/prep/send-docs', authenticateToken, async (req, res) => {
     if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
     const clientEmail = String(email || lead.email || '').trim();
     if (!clientEmail) return res.json({ needEmail: true });
-    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
-    if (!acc) return res.status(400).json({ error: 'Nenhum e-mail conectado no CRM (Configurações → Conexões).' });
     const firstName = String(lead.name || '').trim().split(/\s+/)[0] || '';
-    const transporter = nodemailer.createTransport({
-      host: acc.host, port: acc.port, secure: !!acc.secure,
-      auth: { user: acc.email, pass: acc.password }, tls: { rejectUnauthorized: false }
+    // Envia pelo MESMO caminho dos contratos (mail() local do servidor da Vale Visto, que ENTREGA
+    // no Gmail/Hotmail). O SMTP autenticado de fora é aceito mas descartado pelos destinos.
+    const token = await ds160AdminToken();
+    const er = await fetch(DS160_BASE + '/send_email.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({
+        to: clientEmail,
+        subject: 'Vale Visto - Documentos e vínculos para a sua entrevista (Visto Americano)',
+        html: buildPrepDocsEmail(firstName)
+      })
     });
-    await transporter.sendMail({
-      from: acc.email, to: clientEmail,
-      subject: 'Vale Visto - Documentos e vínculos para a sua entrevista (Visto Americano)',
-      html: buildPrepDocsEmail(firstName)
-    });
+    const ej = await er.json().catch(() => ({}));
+    if (!er.ok || !ej.success) return res.status(502).json({ error: (ej && ej.error) || 'Falha ao enviar o e-mail.' });
     if (!lead.email && clientEmail) { try { await runQuery("UPDATE leads SET email = ? WHERE id = ?", [clientEmail, leadId]); } catch (e) {} }
     res.json({ success: true, email: clientEmail });
   } catch (e) { console.error('[prep/send-docs]', e && e.message); res.status(500).json({ error: (e && e.message) || 'Falha ao enviar' }); }
