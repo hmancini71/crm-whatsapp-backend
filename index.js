@@ -443,6 +443,21 @@ app.get('/api/instagram/selftest', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Lista as conversas recentes do Instagram no banco (protegido por chave) — para confirmar
+// de fora se uma mensagem real chegou via webhook, sem precisar de login no CRM.
+app.get('/api/instagram/recent', async (req, res) => {
+  if ((req.query && req.query.k) !== 'eccere_diag_2026') return res.status(403).json({ error: 'forbidden' });
+  try {
+    const convos = await allRows("SELECT id, name, lastTime, unread FROM conversations WHERE account = 'ig' ORDER BY id DESC LIMIT 8");
+    const out = [];
+    for (const c of (convos || [])) {
+      const last = await getRow("SELECT `from`, text, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [c.id]);
+      out.push({ name: c.name, lastTime: c.lastTime, unread: c.unread, lastFrom: last && last.from, lastText: last && (last.text || '').slice(0, 80), lastTs: last && last.timestamp });
+    }
+    res.json({ count: out.length, conversas: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Desconecta o Instagram (remove o token guardado)
 app.post('/api/instagram/disconnect', authenticateToken, async (req, res) => {
   try {
