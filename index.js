@@ -1596,6 +1596,34 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
   }
 });
 
+// Diagnóstico de envio SMTP (chave fixa, sem login). Mostra a conta conectada e, com ?send=1,
+// faz um envio de teste e devolve a resposta CRUA do servidor (accepted/rejected/response).
+app.get('/api/email/diag', async (req, res) => {
+  if ((req.query && req.query.k) !== 'eccere_diag_2026') return res.status(403).json({ error: 'forbidden' });
+  try {
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    const out = { account: acc ? { email: acc.email, host: acc.host, port: acc.port, secure: !!acc.secure, status: acc.status } : null };
+    if ((req.query.send === '1') && acc) {
+      const to = String(req.query.to || acc.email);
+      const transporter = nodemailer.createTransport({
+        host: acc.host, port: acc.port, secure: !!acc.secure,
+        auth: { user: acc.email, pass: acc.password }, tls: { rejectUnauthorized: false }
+      });
+      try {
+        await transporter.verify();
+        out.verify = 'ok';
+      } catch (e) { out.verify = 'falhou: ' + (e && e.message); }
+      try {
+        const info = await transporter.sendMail({ from: acc.email, to, subject: 'CRM diag de entrega', text: 'Diagnóstico de envio do CRM. Pode ignorar.' });
+        out.send = { ok: true, to, accepted: info.accepted, rejected: info.rejected, response: info.response, messageId: info.messageId, envelope: info.envelope };
+      } catch (e) {
+        out.send = { ok: false, to, error: e && e.message, code: e && e.code, command: e && e.command, responseCode: e && e.responseCode, response: e && e.response };
+      }
+    }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // 18b. Email Routes: Disconnect
 app.post('/api/email/disconnect', authenticateToken, async (req, res) => {
   try {
