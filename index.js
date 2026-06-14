@@ -563,6 +563,7 @@ app.patch('/api/leads/:id/archive', authenticateToken, async (req, res) => {
       await runQuery("UPDATE conversations SET archived = 1 WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone, '+',''), ' ',''), '-',''), '(','') LIKE ?", [`%${phone.slice(-8)}%`]);
     }
 
+    sendWebhook('lead.archived', { ...lead, tags: lead.tags ? JSON.parse(lead.tags) : [], archived: 1 });
     res.json({ success: true, id });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -585,6 +586,7 @@ app.patch('/api/leads/:id/restore', authenticateToken, async (req, res) => {
     }
 
     const restored = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    sendWebhook('lead.restored', { ...restored, tags: restored.tags ? JSON.parse(restored.tags) : [] });
     res.json({
       ...restored,
       tags: restored.tags ? JSON.parse(restored.tags) : []
@@ -685,6 +687,7 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
     }
 
     const updatedLead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    sendWebhook('lead.updated', { ...updatedLead, tags: updatedLead.tags ? JSON.parse(updatedLead.tags) : [] });
     res.json({
       ...updatedLead,
       tags: updatedLead.tags ? JSON.parse(updatedLead.tags) : []
@@ -975,7 +978,11 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
             }
           }
         }
-        if (hit) { await runQuery("UPDATE leads SET contract_signed = 1 WHERE id = ?", [l.id]); marked++; }
+        if (hit) {
+          await runQuery("UPDATE leads SET contract_signed = 1 WHERE id = ?", [l.id]);
+          marked++;
+          try { const full = await getRow("SELECT * FROM leads WHERE id = ?", [l.id]); if (full) sendWebhook('lead.contract_signed', { ...full, tags: full.tags ? JSON.parse(full.tags) : [] }); } catch (e) {}
+        }
       }
     }
   } catch (e) { console.error('signed-emails mark error:', e && e.message); }
@@ -2041,7 +2048,7 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
     const tags = b.service ? [String(b.service)] : [];
     await runQuery(
       "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority, tracking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, String(b.name || b.email || b.phone).slice(0, 200), '', String(b.phone || ''), String(b.email || ''), Number(b.value) || 0,
+      [id, String(b.name || b.email || b.phone).slice(0, 200), String(b.company || '').slice(0, 200), String(b.phone || ''), String(b.email || ''), Number(b.value) || 0,
        'novo', String(b.source || b.utm_source || 'Marketing').slice(0, 80), '', 'Marketing', JSON.stringify(tags), createdAt, 0, '', JSON.stringify(tracking)]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
