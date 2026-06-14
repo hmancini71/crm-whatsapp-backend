@@ -404,60 +404,6 @@ app.get('/api/instagram/status', authenticateToken, async (req, res) => {
   } catch (e) { res.json({ connected: false }); }
 });
 
-// Diagnóstico SEM login (protegido por chave fixa) — só devolve booleanos de status, nunca o token.
-// Permite checar de fora se é token expirado ou webhook não inscrito.
-app.get('/api/instagram/diag', async (req, res) => {
-  if ((req.query && req.query.k) !== 'eccere_diag_2026') return res.status(403).json({ error: 'forbidden' });
-  try {
-    const row = await getRow("SELECT username, access_token, connected_at FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
-    if (!row) return res.json({ connected: false });
-    const out = { connected: true, username: row.username, connected_at: row.connected_at };
-    if (row.connected_at) out.days_since = Math.floor((Date.now() - new Date(row.connected_at).getTime()) / 86400000);
-    try {
-      const r = await fetch('https://graph.instagram.com/me?fields=user_id,username&access_token=' + encodeURIComponent(row.access_token));
-      const d = await r.json().catch(() => ({}));
-      out.token_valid = !!(d && d.user_id);
-      if (d && d.error) out.token_error = d.error.message || 'token inválido';
-    } catch (e) { out.token_valid = false; out.token_error = e.message; }
-    try {
-      const s = await fetch('https://graph.instagram.com/v21.0/me/subscribed_apps?access_token=' + encodeURIComponent(row.access_token));
-      const sd = await s.json().catch(() => ({}));
-      const apps = (sd && sd.data) || [];
-      const fields = apps.length ? (apps[0].subscribed_fields || []) : [];
-      out.webhook_subscribed = Array.isArray(fields) && fields.indexOf('messages') !== -1;
-      out.webhook_fields = fields;
-      if (sd && sd.error) out.webhook_error = sd.error.message;
-    } catch (e) { out.webhook_subscribed = false; out.webhook_error = e.message; }
-    res.json(out);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Auto-teste do caminho receptor (webhook → banco → guia Meta), sem depender da Meta entregar.
-// Injeta uma "mensagem" de Instagram fictícia. Se ela aparecer na guia Meta, o receptor está OK
-// e o que falta é a Meta ENTREGAR (config do app/modo de desenvolvimento).
-app.get('/api/instagram/selftest', async (req, res) => {
-  if ((req.query && req.query.k) !== 'eccere_diag_2026') return res.status(403).json({ error: 'forbidden' });
-  try {
-    await storeIgMessage('selftest_' + Date.now(), '🔧 Mensagem de teste do diagnóstico — pode apagar.', 'them', 'Teste Diagnóstico', 'st_' + Date.now());
-    res.json({ success: true, info: 'Injetado. Veja na guia Meta do CRM.' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Lista as conversas recentes do Instagram no banco (protegido por chave) — para confirmar
-// de fora se uma mensagem real chegou via webhook, sem precisar de login no CRM.
-app.get('/api/instagram/recent', async (req, res) => {
-  if ((req.query && req.query.k) !== 'eccere_diag_2026') return res.status(403).json({ error: 'forbidden' });
-  try {
-    const convos = await allRows("SELECT id, name, lastTime, unread FROM conversations WHERE account = 'ig' ORDER BY id DESC LIMIT 8");
-    const out = [];
-    for (const c of (convos || [])) {
-      const last = await getRow("SELECT `from`, text, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [c.id]);
-      out.push({ name: c.name, lastTime: c.lastTime, unread: c.unread, lastFrom: last && last.from, lastText: last && (last.text || '').slice(0, 80), lastTs: last && last.timestamp });
-    }
-    res.json({ count: out.length, conversas: out });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // Desconecta o Instagram (remove o token guardado)
 app.post('/api/instagram/disconnect', authenticateToken, async (req, res) => {
   try {
@@ -1563,65 +1509,34 @@ app.get('/api/email/message/:uid', authenticateToken, async (req, res) => {
 app.post('/api/email/send', authenticateToken, async (req, res) => {
   const { to, cc, subject, text, html, attachments } = req.body;
   if (!to || !subject) return res.status(400).json({ error: "Destinatario e assunto sao obrigatorios" });
-  // Anexos: [{ filename, content(base64), contentType }]
-  let mailAttachments;
+  // Anexos: [{ filename, content(base64), contentType }] — checa o tamanho total (20 MB).
+  let cleanAtt = [];
   if (Array.isArray(attachments) && attachments.length) {
     let total = 0;
-    mailAttachments = [];
     for (const a of attachments) {
       if (!a || !a.content || !a.filename) continue;
-      const buf = Buffer.from(String(a.content), 'base64');
-      total += buf.length;
+      total += Buffer.byteLength(String(a.content), 'base64');
       if (total > 20 * 1024 * 1024) return res.status(400).json({ error: "Anexos acima de 20 MB no total" });
-      mailAttachments.push({ filename: String(a.filename), content: buf, contentType: a.contentType || undefined });
+      cleanAtt.push({ filename: String(a.filename), content: String(a.content), contentType: a.contentType || undefined });
     }
   }
   try {
-    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
-    if (!acc) return res.status(400).json({ error: "Nenhum e-mail conectado" });
-    const transporter = nodemailer.createTransport({
-      host: acc.host, port: acc.port, secure: !!acc.secure,
-      auth: { user: acc.email, pass: acc.password },
-      tls: { rejectUnauthorized: false }
+    // Envia pela MESMA rota dos contratos (mail() local do servidor da Vale Visto, que ENTREGA
+    // no Gmail/Hotmail). O SMTP autenticado de fora era aceito mas descartado pelos destinos.
+    const bodyHtml = html || (text ? ('<pre style="font-family:inherit;white-space:pre-wrap;">' + String(text).replace(/[<>&]/g, s => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[s])) + '</pre>') : ' ');
+    const token = await ds160AdminToken();
+    const er = await fetch(DS160_BASE + '/send_email.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ to, cc: cc || '', subject, html: bodyHtml, attachments: cleanAtt })
     });
-    await transporter.sendMail({
-      from: acc.email, to, cc: cc || undefined, subject,
-      text: text || undefined, html: html || undefined,
-      attachments: mailAttachments && mailAttachments.length ? mailAttachments : undefined
-    });
+    const ej = await er.json().catch(() => ({}));
+    if (!er.ok || !ej.success) return res.status(502).json({ error: (ej && ej.error) || "Falha ao enviar e-mail" });
     res.json({ success: true });
   } catch (err) {
     console.error("Email send error:", err && err.message);
     res.status(500).json({ error: (err && err.message) || "Falha ao enviar e-mail" });
   }
-});
-
-// Diagnóstico de envio SMTP (chave fixa, sem login). Mostra a conta conectada e, com ?send=1,
-// faz um envio de teste e devolve a resposta CRUA do servidor (accepted/rejected/response).
-app.get('/api/email/diag', async (req, res) => {
-  if ((req.query && req.query.k) !== 'eccere_diag_2026') return res.status(403).json({ error: 'forbidden' });
-  try {
-    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
-    const out = { account: acc ? { email: acc.email, host: acc.host, port: acc.port, secure: !!acc.secure, status: acc.status } : null };
-    if ((req.query.send === '1') && acc) {
-      const to = String(req.query.to || acc.email);
-      const transporter = nodemailer.createTransport({
-        host: acc.host, port: acc.port, secure: !!acc.secure,
-        auth: { user: acc.email, pass: acc.password }, tls: { rejectUnauthorized: false }
-      });
-      try {
-        await transporter.verify();
-        out.verify = 'ok';
-      } catch (e) { out.verify = 'falhou: ' + (e && e.message); }
-      try {
-        const info = await transporter.sendMail({ from: acc.email, to, subject: 'CRM diag de entrega', text: 'Diagnóstico de envio do CRM. Pode ignorar.' });
-        out.send = { ok: true, to, accepted: info.accepted, rejected: info.rejected, response: info.response, messageId: info.messageId, envelope: info.envelope };
-      } catch (e) {
-        out.send = { ok: false, to, error: e && e.message, code: e && e.code, command: e && e.command, responseCode: e && e.responseCode, response: e && e.response };
-      }
-    }
-    res.json(out);
-  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // 18b. Email Routes: Disconnect
