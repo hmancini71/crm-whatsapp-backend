@@ -14,6 +14,7 @@ const {
   disconnectWhatsApp,
   sendWhatsAppMessage,
   sendWhatsAppAudio,
+  processNovoBacklog,
   initSessions,
   sessionQrs,
   sessions,
@@ -2050,6 +2051,15 @@ app.post('/api/ai/test', authenticateToken, async (req, res) => {
     const out = await callGemini(cfg, 'Responda apenas: OK', [{ role: 'user', text: 'teste de conexão' }], false);
     res.json({ ok: true, resposta: String(out).slice(0, 100) });
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+// Dispara a IA para responder o BACKLOG de Novo Leads (cliente aguardando). Envia mensagens reais.
+app.post('/api/ai/process-novo-backlog', authenticateToken, async (req, res) => {
+  try {
+    const r = await processNovoBacklog(req.body && req.body.limit);
+    if (!r.ok) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ===== IA: protocolo de FOLLOW-UP (colunas 2-3 do Tratamento inicial) =====

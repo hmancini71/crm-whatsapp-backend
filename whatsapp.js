@@ -800,12 +800,78 @@ async function initSessions() {
   }
 }
 
+// Processa o BACKLOG: faz a IA responder os leads de "Novo Leads" cujo cliente está aguardando
+// (lastClientReply != NULL) — ex.: mensagens que chegaram enquanto a IA estava desligada.
+// Mesma lógica do fluxo em tempo real (responde, zera o tempo, e move ao concluir).
+async function processNovoBacklog(limit) {
+  const cfg = await getAiSettings();
+  if (!cfg || !cfg.enabled || !cfg.novo_enabled || !cfg.gemini_key) {
+    return { ok: false, reason: 'A IA dos Novo Leads está desligada (Configurações → IA).' };
+  }
+  const cap = Math.max(1, Math.min(50, Number(limit) || 25));
+  const leads = await allRows(
+    "SELECT * FROM leads WHERE archived = 0 AND stage = 'novo' AND lastClientReply IS NOT NULL ORDER BY lastClientReply ASC LIMIT ?",
+    [cap]
+  );
+  let sent = 0, moved = 0; const skipped = [];
+  for (const lead of leads) {
+    try {
+      const sn = (lead.phone || '').replace(/\D/g, '');
+      const convo = await getRow(
+        "SELECT * FROM conversations WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?) LIMIT 1",
+        [lead.whatsapp_jid, '%' + sn.slice(-8) + '%']
+      );
+      if (!convo) { skipped.push((lead.name || lead.id) + ' — sem conversa'); continue; }
+      const account = convo.account || lead.account;
+      const sock = sessions[account];
+      if (!sock) { skipped.push((lead.name || lead.id) + ' — linha desconectada'); continue; }
+      const jid = convo.whatsapp_jid ? convo.whatsapp_jid
+        : (String(convo.phone || '').includes('@') ? convo.phone : sanitizePhoneNumber(convo.phone) + '@s.whatsapp.net');
+      const ai = await getNovoLeadReply(convo.id, lead.name);
+      if (!ai || !ai.reply) { skipped.push((lead.name || lead.id) + ' — IA não retornou resposta'); continue; }
+      let outOfHours = false;
+      try {
+        const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+        const wd = p.find(x => x.type === 'weekday').value;
+        const h = parseInt(p.find(x => x.type === 'hour').value, 10);
+        const open = (['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(wd) && h >= 9 && h < 18) || (wd === 'Sat' && h >= 9 && h < 13);
+        outOfHours = !open;
+      } catch (e) {}
+      let replyText = ai.reply;
+      if (ai.dados_coletados && ai.visa_tag && outOfHours) {
+        replyText += '\n\n⏰ Nosso horário de atendimento é de segunda a sexta, das 9h às 18h, e aos sábados, das 9h às 13h. No momento estamos fora do horário, mas em breve um de nossos consultores dará continuidade ao seu atendimento. 🙏';
+      }
+      const sentAi = await sock.sendMessage(jid, { text: replyText });
+      const aiMsgId = (sentAi && sentAi.key && sentAi.key.id) || ('m_' + Math.random().toString(36).substr(2, 9));
+      _aiSentIds.add(aiMsgId);
+      if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }
+      const tAi = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      await runQuery(
+        "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, status) VALUES (?, ?, 'me', ?, ?, ?, 2)",
+        [aiMsgId, convo.id, replyText, tAi, Date.now()]
+      );
+      await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convo.id]);
+      await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [lead.id]);
+      sent++;
+      if (ai.dados_coletados && ai.visa_tag) {
+        await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead', tags = ? WHERE id = ? AND stage = 'novo'", [JSON.stringify([ai.visa_tag]), lead.id]);
+        moved++;
+      }
+      console.log(`[IA backlog] respondido: "${lead.name}"${(ai.dados_coletados && ai.visa_tag) ? ' (→ Tratamento)' : ''}.`);
+    } catch (e) {
+      skipped.push((lead.name || lead.id) + ' — erro: ' + (e && e.message));
+    }
+  }
+  return { ok: true, candidatos: leads.length, respondidos: sent, movidos: moved, pulados: skipped };
+}
+
 module.exports = {
   sendWhatsAppMedia,
   connectWhatsApp,
   disconnectWhatsApp,
   sendWhatsAppMessage,
   sendWhatsAppAudio,
+  processNovoBacklog,
   initSessions,
   sessions,
   sessionQrs,
