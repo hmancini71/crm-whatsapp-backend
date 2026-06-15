@@ -315,6 +315,16 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: add 'status' column to messages (status de entrega do WhatsApp p/ os ticks).
+  // 2 = enviado (1 tick), 3 = entregue (2 ticks), 4+ = lido (2 ticks azuis).
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'status')) {
+      db.run("ALTER TABLE messages ADD COLUMN status INTEGER DEFAULT 0", (alterErr) => {
+        if (alterErr) console.error("Failed to add status column to messages:", alterErr);
+      });
+    }
+  });
+
   // Safe migration: add 'mediaPath' column to messages (filesystem path for audio/media)
   db.all("PRAGMA table_info(messages)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'mediaPath')) {

@@ -1014,7 +1014,7 @@ app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
     }
 
     const messages = await allRows(
-      "SELECT id, \`from\`, text, time, type, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
+      "SELECT id, \`from\`, text, time, type, timestamp, status FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
       [id]
     );
 

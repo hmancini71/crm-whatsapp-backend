@@ -616,6 +616,23 @@ async function connectWhatsApp(id, isReconnect = false) {
     }
   });
 
+  // Status de entrega/leitura das NOSSAS mensagens (ticks). A Meta envia messages.update com
+  // update.status: 2=enviado(1 tick), 3=entregue(2 ticks), 4=lido(2 ticks azuis), 5=tocado.
+  // Como gravamos a mensagem com id = key.id, dá pra atualizar direto por id (só sobe, nunca desce).
+  sock.ev.on('messages.update', async (updates) => {
+    try {
+      for (const u of (updates || [])) {
+        const st = u && u.update && u.update.status;
+        const mid = u && u.key && u.key.id;
+        if (mid && typeof st === 'number' && st >= 2) {
+          await runQuery("UPDATE messages SET status = ? WHERE id = ? AND status < ?", [st, mid, st]);
+        }
+      }
+    } catch (err) {
+      console.error(`[WhatsApp ${id}] Error in messages.update handler:`, err);
+    }
+  });
+
   return {
     id,
     status: 'connecting',
@@ -671,11 +688,11 @@ async function sendWhatsAppMessage(accountId, convoId, text) {
   
   const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   const msgId = sent.key.id || 'm_' + Math.random().toString(36).substr(2, 9);
-  
-  // Insert into DB
+
+  // Insert into DB (status >= 2 = enviado/1 tick; messages.update sobe p/ entregue/lido)
   await runQuery(
-    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-    [msgId, convoId, 'me', text, timeStr, Date.now()]
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', text, timeStr, Date.now(), Math.max(2, (sent && sent.status) || 0)]
   );
 
   // Update conversation lastMessage
