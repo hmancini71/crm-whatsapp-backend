@@ -1062,6 +1062,13 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       if (cleanP.length >= 8) {
         await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'followup' WHERE stage = 'novo' AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
       }
+      // 1ª resposta humana (pela tela do CRM) também REMOVE a tag "Novo lead" — sai da 1ª coluna do Tratamento.
+      if (convo.whatsapp_jid) {
+        await runQuery("UPDATE leads SET priority = '' WHERE priority = 'novolead' AND whatsapp_jid = ?", [convo.whatsapp_jid]);
+      }
+      if (cleanP.length >= 8) {
+        await runQuery("UPDATE leads SET priority = '' WHERE priority = 'novolead' AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
+      }
     } catch (e) { /* ignore */ }
 
     // Instagram: envia pelo Direct e grava a mensagem
