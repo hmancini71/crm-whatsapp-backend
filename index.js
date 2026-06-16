@@ -2042,7 +2042,7 @@ app.post('/api/settings/ai', authenticateToken, async (req, res) => {
     ['gemini_key', 'model', 'novo_instructions', 'fu_instructions'].forEach(k => { if (b[k] !== undefined) cur[k] = String(b[k]); });
     ['enabled', 'novo_enabled', 'fu_enabled'].forEach(k => { if (b[k] !== undefined) cur[k] = !!b[k]; });
     if (b.fu_hours !== undefined) cur.fu_hours = Math.max(1, Math.min(168, Number(b.fu_hours) || 24));
-    if (b.fu_max !== undefined) cur.fu_max = Math.max(0, Math.min(10, Number(b.fu_max) || 2));
+    if (b.fu_max !== undefined) cur.fu_max = Math.max(0, Math.min(30, Number(b.fu_max) || 2));
     await saveAiSettings(cur);
     res.json(cur);
   } catch (e) { res.status(500).json({ error: e.message }); }
