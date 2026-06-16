@@ -266,6 +266,27 @@ db.serialize(() => {
     }
   });
 
+  // Log de cada disparo de follow-up automático (col 3-4 do Tratamento) — para o gráfico diário.
+  db.run(`CREATE TABLE IF NOT EXISTS followup_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    lead_id TEXT,
+    lead_name TEXT
+  )`, (e1) => {
+    if (e1) { console.error("Failed to create followup_log:", e1); return; }
+    db.run("CREATE INDEX IF NOT EXISTS idx_followup_log_ts ON followup_log(ts)");
+    // Backfill ÚNICO (só se a tabela estiver vazia): aproxima o histórico usando o ÚLTIMO
+    // disparo de cada lead (ai_fu_last). Contagens passadas são aproximadas; daqui pra frente
+    // cada disparo é registrado individualmente (exato).
+    db.get("SELECT COUNT(*) AS n FROM followup_log", (e2, row) => {
+      if (e2 || (row && row.n > 0)) return;
+      db.run("INSERT INTO followup_log (ts, lead_id, lead_name) SELECT ai_fu_last, id, name FROM leads WHERE ai_fu_last IS NOT NULL AND ai_fu_last > 0", (e3) => {
+        if (e3) console.error("followup_log backfill falhou:", e3);
+        else console.log("followup_log: backfill inicial (último disparo por lead) concluído.");
+      });
+    });
+  });
+
   // Safe migration: add 'tracking' (rastreamento de marketing: UTMs, gclid, fbclid)
   db.all("PRAGMA table_info(leads)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'tracking')) {

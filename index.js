@@ -2057,6 +2057,27 @@ app.post('/api/ai/test', authenticateToken, async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
 
+// Dashboard: follow-ups automáticos (col 3-4) disparados por dia nos últimos 7 dias (fuso Brasília).
+app.get('/api/dashboard/followups-weekly', authenticateToken, async (req, res) => {
+  try {
+    const DAY = 24 * 3600 * 1000;
+    const since = Date.now() - 7 * DAY;
+    const rows = await allRows("SELECT ts FROM followup_log WHERE ts >= ?", [since]);
+    // Bucket por dia em Brasília (UTC-3): desloca 3h e pega a data UTC → AAAA-MM-DD local.
+    const keyBr = (ms) => new Date(ms - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    const counts = {};
+    rows.forEach(r => { const k = keyBr(r.ts); counts[k] = (counts[k] || 0) + 1; });
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const k = keyBr(Date.now() - i * DAY);
+      const p = k.split('-');
+      days.push({ day: k, label: p[2] + '/' + p[1], count: counts[k] || 0 });
+    }
+    const total = days.reduce((s, d) => s + d.count, 0);
+    res.json({ days, total });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Dispara a IA para responder o BACKLOG de Novo Leads (cliente aguardando). Envia mensagens reais.
 app.post('/api/ai/process-novo-backlog', authenticateToken, async (req, res) => {
   try {
@@ -2105,7 +2126,9 @@ async function aiFollowUpSweep() {
         const texto = await getFollowUpReply(conv.id, l.name, tentativa);
         if (!texto) continue;
         await sendWhatsAppMessage(conv.account, conv.id, texto);
-        await runQuery("UPDATE leads SET ai_fu_count = ?, ai_fu_last = ? WHERE id = ?", [tentativa, Date.now(), l.id]);
+        const fuTs = Date.now();
+        await runQuery("UPDATE leads SET ai_fu_count = ?, ai_fu_last = ? WHERE id = ?", [tentativa, fuTs, l.id]);
+        try { await runQuery("INSERT INTO followup_log (ts, lead_id, lead_name) VALUES (?, ?, ?)", [fuTs, l.id, l.name]); } catch (e) {}
         processed++;
         console.log(`[IA follow-up] "${l.name}": tentativa ${tentativa} enviada (${processed}/${PER_RUN_CAP}).`);
         // intervalo humano entre os envios (5–13 s) para não parecer disparo em massa
