@@ -257,6 +257,15 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: add 'followup_date' (data de verificação do follow-up; só usada na col 2 do Tratamento).
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'followup_date')) {
+      db.run("ALTER TABLE leads ADD COLUMN followup_date TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) console.error("Failed to add followup_date column to leads:", alterErr);
+      });
+    }
+  });
+
   // Safe migration: add 'tracking' (rastreamento de marketing: UTMs, gclid, fbclid)
   db.all("PRAGMA table_info(leads)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'tracking')) {
