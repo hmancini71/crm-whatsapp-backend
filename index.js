@@ -2119,9 +2119,11 @@ async function aiFollowUpSweep() {
         );
         if (!conv || !conv.account) continue;
         const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [conv.id]);
-        if (!last || last.from !== 'me') continue;              // só quando NÓS falamos por último
-        if (Date.now() - (last.timestamp || 0) < horasMs) continue; // ainda dentro da janela
-        if ((l.ai_fu_last || 0) > (last.timestamp || 0)) continue;  // já fizemos follow-up desta pausa
+        if (!last || last.from !== 'me') continue;              // só quando NÓS falamos por último (cliente não respondeu)
+        if (Date.now() - (last.timestamp || 0) < horasMs) continue; // espaça os envios: ≥ fu_hours desde a última msg
+        // (removido o guard ai_fu_last > last.timestamp: como o próprio follow-up vira a última msg,
+        //  ele bloqueava permanentemente o 2º envio. A cadência já é controlada pela janela acima
+        //  + last.from==='me' + ai_fu_count < fu_max.)
         const tentativa = (l.ai_fu_count || 0) + 1;
         const texto = await getFollowUpReply(conv.id, l.name, tentativa);
         if (!texto) continue;
