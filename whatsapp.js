@@ -809,26 +809,32 @@ async function processNovoBacklog(limit) {
     return { ok: false, reason: 'A IA dos Novo Leads está desligada (Configurações → IA).' };
   }
   const cap = Math.max(1, Math.min(50, Number(limit) || 25));
-  const leads = await allRows(
-    "SELECT * FROM leads WHERE archived = 0 AND stage = 'novo' AND lastClientReply IS NOT NULL ORDER BY lastClientReply ASC LIMIT ?",
-    [cap]
-  );
-  let sent = 0, moved = 0; const skipped = [];
+  const leads = await allRows("SELECT * FROM leads WHERE archived = 0 AND stage = 'novo' ORDER BY createdAt ASC");
+  let sent = 0, moved = 0, done = 0; const skipped = [];
   for (const lead of leads) {
+    if (done >= cap) break;
     try {
+      // Casa a conversa por JID exato; só por telefone se houver telefone (>=8 dígitos).
+      // (Sem isso, lead sem telefone casava com LIKE '%' = qualquer conversa → resposta no contato errado.)
       const sn = (lead.phone || '').replace(/\D/g, '');
-      const convo = await getRow(
-        "SELECT * FROM conversations WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?) LIMIT 1",
-        [lead.whatsapp_jid, '%' + sn.slice(-8) + '%']
-      );
-      if (!convo) { skipped.push((lead.name || lead.id) + ' — sem conversa'); continue; }
+      let convo = null;
+      if (lead.whatsapp_jid) {
+        convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [lead.whatsapp_jid]);
+      }
+      if (!convo && sn.length >= 8) {
+        convo = await getRow("SELECT * FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + sn.slice(-8)]);
+      }
+      if (!convo) { continue; } // sem conversa identificável → não faz parte do backlog
+      // Só responde se o CLIENTE foi o último a falar (está realmente aguardando). Idempotente.
+      const lastMsg = await getRow("SELECT `from` FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
+      if (!lastMsg || lastMsg.from !== 'them') continue;
       const account = convo.account || lead.account;
       const sock = sessions[account];
-      if (!sock) { skipped.push((lead.name || lead.id) + ' — linha desconectada'); continue; }
+      if (!sock) { skipped.push((lead.name || lead.id) + ' — linha desconectada'); done++; continue; }
       const jid = convo.whatsapp_jid ? convo.whatsapp_jid
         : (String(convo.phone || '').includes('@') ? convo.phone : sanitizePhoneNumber(convo.phone) + '@s.whatsapp.net');
       const ai = await getNovoLeadReply(convo.id, lead.name);
-      if (!ai || !ai.reply) { skipped.push((lead.name || lead.id) + ' — IA não retornou resposta'); continue; }
+      if (!ai || !ai.reply) { skipped.push((lead.name || lead.id) + ' — IA não retornou resposta'); done++; continue; }
       let outOfHours = false;
       try {
         const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
@@ -852,7 +858,7 @@ async function processNovoBacklog(limit) {
       );
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convo.id]);
       await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [lead.id]);
-      sent++;
+      sent++; done++;
       if (ai.dados_coletados && ai.visa_tag) {
         await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead', tags = ? WHERE id = ? AND stage = 'novo'", [JSON.stringify([ai.visa_tag]), lead.id]);
         moved++;
