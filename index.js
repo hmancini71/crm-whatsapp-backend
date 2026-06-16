@@ -2155,13 +2155,24 @@ app.post('/api/settings/integrations', authenticateToken, async (req, res) => {
 app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
   try {
     const b = req.body || {};
-    if (!b.name && !b.phone && !b.email) return res.status(400).json({ error: 'Informe ao menos name, phone ou email' });
+    // Aceita os nomes do CRM E os dos formulários do Marco (contact_*). ADITIVO — nada que já
+    // existe deixa de funcionar; só amplia o que o endpoint entende.
+    const name = b.name || b.contact_name || '';
+    const phone = b.phone || b.contact_phone || '';
+    const email = b.email || b.contact_email || '';
+    const company = b.company || b.contact_company || '';
+    const notes = b.notes || b.comments || '';
+    const service = b.service || '';
+    if (!name && !phone && !email) {
+      return res.status(400).json({ error: 'Informe ao menos name/contact_name, phone/contact_phone ou email/contact_email' });
+    }
     const tracking = {};
-    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid', 'landing_page'].forEach(k => {
-      if (b[k]) tracking[k] = String(b[k]).slice(0, 300);
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid', 'landing_page',
+     'referrer', 'msclkid', 'device_type', 'title', 'destination', 'dpi_local', 'dpi_session'].forEach(k => {
+      if (b[k]) tracking[k] = String(b[k]).slice(0, 500);
     });
     tracking.received_at = new Date().toISOString();
-    const digits = String(b.phone || '').replace(/\D/g, '');
+    const digits = String(phone || '').replace(/\D/g, '');
     let existing = null;
     if (digits.length >= 8) {
       existing = await getRow(
@@ -2169,10 +2180,11 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
         ['%' + digits.slice(-8) + '%']
       );
     }
-    if (!existing && b.email) {
-      existing = await getRow("SELECT * FROM leads WHERE archived = 0 AND LOWER(email) = ?", [String(b.email).toLowerCase()]);
+    if (!existing && email) {
+      existing = await getRow("SELECT * FROM leads WHERE archived = 0 AND LOWER(email) = ?", [String(email).toLowerCase()]);
     }
     if (existing) {
+      // Lead JÁ existe: só carimba o rastreamento. NÃO sobrescreve nome/telefone/comentários do lead.
       await runQuery("UPDATE leads SET tracking = ? WHERE id = ?", [JSON.stringify(tracking), existing.id]);
       const upd = await getRow("SELECT * FROM leads WHERE id = ?", [existing.id]);
       sendWebhook('lead.updated', { ...upd, tags: upd.tags ? JSON.parse(upd.tags) : [], tracking });
@@ -2180,11 +2192,14 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
     }
     const id = 'l_' + Math.random().toString(36).substr(2, 9);
     const createdAt = new Date().toISOString().slice(0, 10);
-    const tags = b.service ? [String(b.service)] : [];
+    const tags = service ? [String(service)] : [];
+    // "notes" (mensagem do cliente) e "destination" vão para os comentários internos — só na CRIAÇÃO.
+    let comments = String(notes || '').slice(0, 2000);
+    if (b.destination) comments = (comments ? comments + '\n' : '') + 'Destino: ' + String(b.destination).slice(0, 120);
     await runQuery(
-      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority, tracking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, String(b.name || b.email || b.phone).slice(0, 200), String(b.company || '').slice(0, 200), String(b.phone || ''), String(b.email || ''), Number(b.value) || 0,
-       'novo', String(b.source || b.utm_source || 'Marketing').slice(0, 80), '', 'Marketing', JSON.stringify(tags), createdAt, 0, '', JSON.stringify(tracking)]
+      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority, tracking, comments) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, String(name || email || phone).slice(0, 200), String(company || '').slice(0, 200), String(phone || ''), String(email || ''), Number(b.value) || 0,
+       'novo', String(b.source || b.utm_source || b.title || 'Marketing').slice(0, 80), '', 'Marketing', JSON.stringify(tags), createdAt, 0, '', JSON.stringify(tracking), comments]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.created', { ...lead, tags, tracking });
