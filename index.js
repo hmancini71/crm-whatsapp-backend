@@ -925,7 +925,9 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
           if (lt.length) {
             for (const st of nameSets) {
               let shared = 0; for (const t of lt) if (st.indexOf(t) !== -1) shared++;
-              if (shared >= 2 || (lt.length === 1 && shared === 1 && lt[0].length >= 4)) { hit = true; break; }
+              // Exige nome+sobrenome batendo (>=2 tokens). NÃO casa por nome único (ex.: "Marcos",
+              // "Maria") porque nomes comuns geram falso positivo. Sem isso, casa só por e-mail.
+              if (shared >= 2) { hit = true; break; }
             }
           }
         }
@@ -2314,6 +2316,26 @@ app.listen(PORT, async () => {
     console.error("Error reconciling novo leads:", err);
   }
   setInterval(() => { reconcileNovoLeads().catch(() => {}); }, 15 * 60 * 1000);
+  // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
+  // Critério SEGURO: só desmarca quem tem nome de UM token e NÃO tem e-mail — esses só podem
+  // ter sido marcados pela regra frouxa (não dá pra ter casado por e-mail nem por 2 tokens).
+  try {
+    const STOP_S = { msn:1, sr:1, sra:1, dr:1, dra:1, snr:1, cliente:1, contrato:1, assinado:1, de:1, da:1, do:1, dos:1, das:1, e:1 };
+    const toksS = (s) => String(s == null ? '' : s)
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
+      .split(' ').filter(t => t.length >= 3 && !STOP_S[t]);
+    const signedLeads = await allRows("SELECT id, name, email FROM leads WHERE contract_signed = 1 AND (email IS NULL OR email = '')");
+    let cleared = 0;
+    for (const l of (signedLeads || [])) {
+      if (toksS(l.name).length <= 1) {
+        await runQuery("UPDATE leads SET contract_signed = 0 WHERE id = ?", [l.id]);
+        cleared++;
+        console.log(`[corrige assinado] desmarcado falso positivo: "${l.name}" (id ${l.id})`);
+      }
+    }
+    if (cleared) console.log(`[corrige assinado] ${cleared} flag(s) de "assinado" corrigido(s).`);
+  } catch (e) { console.error('[corrige assinado]', e && e.message); }
   // IA: follow-up das colunas 2-3 do Tratamento inicial (a cada 30 min; 1ª passada após 2 min)
   setTimeout(() => { aiFollowUpSweep().catch(() => {}); }, 2 * 60 * 1000);
   setInterval(() => { aiFollowUpSweep().catch(() => {}); }, 30 * 60 * 1000);
