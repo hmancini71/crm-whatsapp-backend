@@ -2080,7 +2080,12 @@ async function aiFollowUpSweep() {
     if (!leads.length) return;
     const convs = await allRows("SELECT id, account, phone, whatsapp_jid FROM conversations WHERE (archived IS NULL OR archived = 0)");
     const norm = (p) => String(p || '').replace(/\D/g, '');
+    // ANTI-SPAM: no máximo PER_RUN_CAP follow-ups por rodada (a cada 30 min) e com intervalo
+    // aleatório entre envios. Evita disparar 100+ mensagens de uma vez (risco de ban do WhatsApp).
+    const PER_RUN_CAP = 12;
+    let processed = 0;
     for (const l of leads) {
+      if (processed >= PER_RUN_CAP) { console.log(`[IA follow-up] limite da rodada (${PER_RUN_CAP}) atingido; o restante segue na próxima.`); break; }
       try {
         const lt = norm(l.phone).slice(-8);
         const conv = convs.find(c =>
@@ -2097,7 +2102,10 @@ async function aiFollowUpSweep() {
         if (!texto) continue;
         await sendWhatsAppMessage(conv.account, conv.id, texto);
         await runQuery("UPDATE leads SET ai_fu_count = ?, ai_fu_last = ? WHERE id = ?", [tentativa, Date.now(), l.id]);
-        console.log(`[IA follow-up] "${l.name}": tentativa ${tentativa} enviada.`);
+        processed++;
+        console.log(`[IA follow-up] "${l.name}": tentativa ${tentativa} enviada (${processed}/${PER_RUN_CAP}).`);
+        // intervalo humano entre os envios (5–13 s) para não parecer disparo em massa
+        await new Promise(r => setTimeout(r, 5000 + Math.floor(Math.random() * 8000)));
       } catch (e) { console.error('[IA follow-up]', l && l.name, e && e.message); }
     }
   } catch (e) { console.error('[IA follow-up sweep]', e && e.message); }
