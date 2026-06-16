@@ -100,7 +100,8 @@ app.post('/api/debug/fix-stages', async (req, res) => {
       { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
       { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
       { id: "convertida", title: "Venda convertida",        color: "#16a34a" },
-      { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" }
+      { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" },
+      { id: "clientes_antigos", title: "Clientes antigos",  color: "#6366f1" }
     ];
     await runQuery("DELETE FROM stages");
     for (const s of correctStages) {
@@ -108,7 +109,7 @@ app.post('/api/debug/fix-stages', async (req, res) => {
     }
     await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
     await runQuery("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
-    await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado')");
+    await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
     const stages = await allRows("SELECT * FROM stages");
     res.json({ success: true, stages });
   } catch (err) {
@@ -558,7 +559,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     // Estágios TERMINAIS: uma vez em "Venda convertida" ou "Lead declinou/cancelado",
     // o lead NÃO muda mais de etapa por processos automáticos (drag, reconcile, etc.).
     // EXCEÇÃO: force=true (ação deliberada do operador via combo "Editar Lead").
-    if (!force && (cur.stage === 'convertida' || cur.stage === 'declinado') && stage !== cur.stage) {
+    if (!force && (cur.stage === 'convertida' || cur.stage === 'declinado' || cur.stage === 'clientes_antigos') && stage !== cur.stage) {
       console.log(`[stage] BLOQUEADO: "${cur.name}" está em '${cur.stage}' (terminal) — mudança p/ '${stage}' ignorada.`);
       return res.json({ ...cur, tags: cur.tags ? JSON.parse(cur.tags) : [], _locked: true });
     }
@@ -655,7 +656,8 @@ const CORRECT_STAGES = [
   { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
   { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
   { id: "convertida", title: "Venda convertida",        color: "#16a34a" },
-  { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" }
+  { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" },
+  { id: "clientes_antigos", title: "Clientes antigos",  color: "#6366f1" }
 ];
 
 app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
@@ -673,7 +675,7 @@ app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
       // Migrate leads with old stage IDs
       await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
       await runQuery("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
-      await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado')");
+      await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
       stages = await allRows("SELECT * FROM stages");
     }
     res.json(stages);

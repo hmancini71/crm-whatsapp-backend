@@ -123,7 +123,8 @@ db.serialize(() => {
         ["proposta",       "Proposta enviada",         "#f59e0b"],
         ["followup",       "Follow-up pagamento",      "#ec4899"],
         ["convertida",     "Venda convertida",         "#16a34a"],
-        ["declinado",      "Lead declinou/cancelado",  "#ef4444"]
+        ["declinado",      "Lead declinou/cancelado",  "#ef4444"],
+        ["clientes_antigos", "Clientes antigos",       "#6366f1"]
       ];
       const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");
       initialStages.forEach(s => stmt.run(s));
@@ -330,9 +331,9 @@ db.serialize(() => {
     // Migrate existing leads to fit the new stage IDs:
     db.run("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
     db.run("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
-    // ATENÇÃO: 'convertida' PRECISA estar nesta lista. Sem ela, todo restart do backend
-    // resetava os leads de "Venda convertida" para 'novo' (eles sumiam da coluna). BUG corrigido.
-    db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado')");
+    // ATENÇÃO: 'convertida' e 'clientes_antigos' PRECISAM estar nesta lista. Sem elas, todo restart
+    // do backend resetava esses leads para 'novo' (sumiam da coluna). BUG corrigido.
+    db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
   });
 
   // Safe migration: add 'type' column to messages (text | audio | image | other)
