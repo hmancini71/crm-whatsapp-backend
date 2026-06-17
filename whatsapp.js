@@ -451,9 +451,11 @@ async function connectWhatsApp(id, isReconnect = false) {
           convoId = convo.id;
           console.log(`[WhatsApp ${id}] Existing conversation found: convoId=${convoId}`);
           // Update conversation
+          // Bolinha como no WhatsApp Web: conta SÓ mensagens do cliente e ZERA quando NÓS
+          // respondemos (qualquer mensagem nossa = conversa "lida"). Cliente → +1; nós → 0.
           await runQuery(
-            "UPDATE conversations SET lastTime = ?, unread = unread + ?, archived = 0 WHERE id = ?",
-            [timeStr, isMine ? 0 : 1, convoId]
+            "UPDATE conversations SET lastTime = ?, unread = " + (isMine ? "0" : "unread + 1") + ", archived = 0 WHERE id = ?",
+            [timeStr, convoId]
           );
         } else {
           // Generate new conversation id

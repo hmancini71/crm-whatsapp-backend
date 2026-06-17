@@ -278,7 +278,7 @@ async function storeIgMessage(senderId, text, from, name, msgId) {
   let convoId;
   if (convo) {
     convoId = convo.id;
-    await runQuery("UPDATE conversations SET lastTime = ?, unread = unread + ? WHERE id = ?", [timeStr, from === 'them' ? 1 : 0, convoId]);
+    await runQuery("UPDATE conversations SET lastTime = ?, unread = " + (from === 'them' ? "unread + 1" : "0") + " WHERE id = ?", [timeStr, convoId]);
   } else {
     convoId = 'c_' + Math.random().toString(36).substr(2, 9);
     const nm = name || 'Instagram';
@@ -1053,6 +1053,9 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     if (!convo) {
       return res.status(404).json({ error: "Conversa não encontrada" });
     }
+
+    // NÓS respondemos → conversa "lida": zera a bolinha (como no WhatsApp Web).
+    await runQuery("UPDATE conversations SET unread = 0 WHERE id = ?", [id]);
 
     // NÓS respondemos pelo CRM → zera o lastClientReply do lead correspondente
     // (o "controle de tempo" só aparece enquanto o cliente foi o último a falar).
@@ -2338,6 +2341,18 @@ app.listen(PORT, async () => {
     }
     if (cleared) console.log(`[corrige assinado] ${cleared} flag(s) de "assinado" corrigido(s).`);
   } catch (e) { console.error('[corrige assinado]', e && e.message); }
+  // Correção da bolinha (WhatsApp Web): zera o "não lidas" das conversas em que NÓS respondemos
+  // por último — alinha o histórico com a regra nova (daqui pra frente o reset é automático).
+  try {
+    await runQuery(
+      "UPDATE conversations SET unread = 0 WHERE unread > 0 AND id IN (" +
+      "SELECT m.conversationId FROM messages m " +
+      "JOIN (SELECT conversationId, MAX(timestamp) AS mx FROM messages GROUP BY conversationId) t " +
+      "ON t.conversationId = m.conversationId AND t.mx = m.timestamp " +
+      "WHERE m.\`from\` = 'me')"
+    );
+    console.log('[corrige bolinha] zeradas as conversas respondidas por último.');
+  } catch (e) { console.error('[corrige bolinha]', e && e.message); }
   // IA: follow-up das colunas 2-3 do Tratamento inicial (a cada 30 min; 1ª passada após 2 min)
   setTimeout(() => { aiFollowUpSweep().catch(() => {}); }, 2 * 60 * 1000);
   setInterval(() => { aiFollowUpSweep().catch(() => {}); }, 30 * 60 * 1000);
