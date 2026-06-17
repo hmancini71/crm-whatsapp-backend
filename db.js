@@ -236,6 +236,18 @@ db.serialize(() => {
     if (!err && cols) {
       if (!cols.find(c => c.name === 'ai_fu_count')) db.run("ALTER TABLE leads ADD COLUMN ai_fu_count INTEGER DEFAULT 0");
       if (!cols.find(c => c.name === 'ai_fu_last')) db.run("ALTER TABLE leads ADD COLUMN ai_fu_last INTEGER DEFAULT 0");
+      // "Não é demanda" PERSISTENTE: guarda o timestamp (ms) da última mensagem do cliente
+      // que foi marcada como "não é demanda". O controle de tempo só reaparece se o cliente
+      // mandar uma mensagem MAIS NOVA que esse marcador. Sobrevive a reconciliações/reinícios.
+      if (!cols.find(c => c.name === 'not_demand_ts')) db.run("ALTER TABLE leads ADD COLUMN not_demand_ts INTEGER DEFAULT 0");
+    }
+  });
+
+  // Safe migration: marca mensagens enviadas pela IA (ai=1) para distinguir de respostas humanas.
+  // Usado para limpar a tag "Novo lead" só quando um HUMANO realmente atendeu.
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'ai')) {
+      db.run("ALTER TABLE messages ADD COLUMN ai INTEGER DEFAULT 0");
     }
   });
 

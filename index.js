@@ -504,14 +504,19 @@ app.post('/api/instagram/backfill-profiles', authenticateToken, async (req, res)
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// Envia uma mensagem de Direct pelo Instagram usando o token guardado
-async function sendIgMessage(recipientId, text) {
+// Envia uma mensagem de Direct pelo Instagram usando o token guardado.
+// opts.humanAgent = true → inclui a tag HUMAN_AGENT (janela de 7 dias). Só funciona se o
+// recurso "Human Agent" estiver aprovado para o app no painel da Meta; caso contrário a Meta
+// recusa e tratamos no chamador.
+async function sendIgMessage(recipientId, text, opts) {
   const conn = await getRow("SELECT * FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
   if (!conn || !conn.access_token) throw new Error('Instagram nao conectado');
+  const payload = { recipient: { id: recipientId }, message: { text: text } };
+  if (opts && opts.humanAgent) { payload.messaging_type = 'MESSAGE_TAG'; payload.tag = 'HUMAN_AGENT'; }
   const resp = await fetch('https://graph.instagram.com/v21.0/me/messages?access_token=' + encodeURIComponent(conn.access_token), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ recipient: { id: recipientId }, message: { text: text } })
+    body: JSON.stringify(payload)
   });
   const d = await resp.json();
   if (d.error) throw new Error((d.error && d.error.message) || 'Falha ao enviar Direct');
@@ -1197,16 +1202,28 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       try {
         await sendIgMessage(recipientId, text);
       } catch (e) {
-        const raw = String(e && e.message || '');
-        // A causa mais comum: fora da janela de 24h do Instagram (só dá pra responder
-        // até 24h após a última mensagem da pessoa). Traduz para algo claro.
-        let friendly = 'Falha ao enviar no Instagram: ' + raw;
-        if (/24|outside|window|allowed|messaging window/i.test(raw)) {
-          friendly = 'O Instagram só permite responder até 24h após a última mensagem da pessoa. Esta conversa está fora dessa janela — peça que ela envie uma nova mensagem para reabrir o contato.';
-        } else if (/token|expired|session|OAuth|permission|#10|#200/i.test(raw)) {
-          friendly = 'Não foi possível enviar: a conexão do Instagram pode ter expirado ou faltam permissões. Reconecte o Instagram em Configurações → Conexões. (' + raw + ')';
+        let raw = String(e && e.message || '');
+        const isWindow = /24|outside|window|allowed|messaging window/i.test(raw);
+        // Fora da janela de 24h: tenta novamente com a tag HUMAN_AGENT (janela de 7 dias).
+        // Só terá efeito se o recurso "Human Agent" estiver aprovado para o app na Meta.
+        if (isWindow) {
+          try {
+            await sendIgMessage(recipientId, text, { humanAgent: true });
+            // sucesso no retry → cai fora do catch seguindo o fluxo normal de gravação
+            raw = '';
+          } catch (e2) {
+            raw = String(e2 && e2.message || raw);
+          }
         }
-        return res.status(502).json({ error: friendly });
+        if (raw) {
+          let friendly = 'Falha ao enviar no Instagram: ' + raw;
+          if (/24|outside|window|allowed|messaging window/i.test(raw)) {
+            friendly = 'O Instagram só permite responder até 24h após a última mensagem da pessoa (ou 7 dias com o recurso "Human Agent" aprovado pela Meta). Esta conversa está fora dessa janela — peça que ela envie uma nova mensagem para reabrir o contato.';
+          } else if (/token|expired|session|OAuth|permission|#10|#200/i.test(raw)) {
+            friendly = 'Não foi possível enviar: a conexão do Instagram pode ter expirado ou faltam permissões. Reconecte o Instagram em Configurações → Conexões. (' + raw + ')';
+          }
+          return res.status(502).json({ error: friendly });
+        }
       }
       await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)", [msgId, id, 'me', text, timeStr, Date.now()]);
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
@@ -2242,41 +2259,83 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
 });
 
 // Start Express Server
-// Reconciliação única do "controle de tempo": para cada lead com o ponto aceso
-// (lastClientReply != NULL), olha a ÚLTIMA mensagem da conversa; se foi nossa
-// ('me'), zera o lastClientReply (limpa vermelhos antigos onde já respondemos).
+// Acha a conversa de um lead de forma robusta: por whatsapp_jid e, em fallback,
+// pelos 8 últimos dígitos do telefone normalizado (resistente a formatação).
+async function findConvoForLead(l) {
+  let convo = null;
+  if (l.whatsapp_jid) {
+    convo = await getRow("SELECT id FROM conversations WHERE whatsapp_jid = ?", [l.whatsapp_jid]);
+  }
+  if (!convo && l.phone) {
+    const p = String(l.phone).replace(/\D/g, '');
+    if (p.length >= 8) {
+      convo = await getRow("SELECT id FROM conversations WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${p.slice(-8)}%`]);
+    }
+  }
+  return convo;
+}
+
+// Reconciliação do "controle de tempo" (bolinha) e da tag "Novo lead", baseada SEMPRE na
+// última mensagem real de cada conversa — é a fonte única da verdade. Roda no boot e a cada 60s,
+// então o estado se autocorrige independentemente de a mensagem ter vindo pelo CRM, pelo celular
+// ou pela IA (não depende de o "casamento" por telefone ter acertado na hora do envio).
+//
+// Regras:
+//  • Cliente aguardando (bolinha acesa) SOMENTE se a última msg é do cliente ('them') E é MAIS NOVA
+//    que o marcador "não é demanda" (not_demand_ts). Caso contrário, zera lastClientReply.
+//  • Tag "Novo lead" (priority='novolead') é removida quando existe QUALQUER mensagem nossa de um
+//    HUMANO (from='me' E ai=0) na conversa — ou seja, alguém de fato atendeu. Mensagens da IA
+//    (ai=1) NÃO contam, então o card recém-transferido pela IA continua na 1ª coluna até o humano falar.
 async function reconcileReplyDots() {
   try {
-    // Reconcilia a bolinha de tempo de TODOS os leads ativos com base na última
-    // mensagem real de cada conversa: cliente foi o último → carimba com a data
-    // dela; nós fomos os últimos → zera. Cobre novos, restaurados e antigos.
-    const leads = await allRows("SELECT id, whatsapp_jid, phone FROM leads WHERE archived = 0");
+    const leads = await allRows("SELECT id, whatsapp_jid, phone, priority, not_demand_ts FROM leads WHERE archived = 0");
     for (const l of leads) {
-      let convo = null;
-      if (l.whatsapp_jid) {
-        convo = await getRow("SELECT id FROM conversations WHERE whatsapp_jid = ?", [l.whatsapp_jid]);
-      }
-      if (!convo && l.phone) {
-        const p = l.phone.replace(/\D/g, '');
-        if (p.length >= 8) {
-          convo = await getRow("SELECT id FROM conversations WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${p.slice(-8)}%`]);
-        }
-      }
+      const convo = await findConvoForLead(l);
       if (!convo) continue;
       const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
       if (!last) continue;
-      if (last.from === 'me') {
-        await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [l.id]);
-      } else {
-        const iso = last.timestamp ? new Date(Number(last.timestamp)).toISOString() : new Date().toISOString();
+
+      const lastTs = Number(last.timestamp) || 0;
+      const ndTs = Number(l.not_demand_ts) || 0;
+      const awaiting = (last.from === 'them') && (lastTs > ndTs);
+      if (awaiting) {
+        const iso = lastTs ? new Date(lastTs).toISOString() : new Date().toISOString();
         await runQuery("UPDATE leads SET lastClientReply = ? WHERE id = ?", [iso, l.id]);
+      } else {
+        await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [l.id]);
+      }
+
+      // Limpa "Novo lead" se um humano já respondeu nesta conversa.
+      if (l.priority === 'novolead') {
+        const human = await getRow("SELECT id FROM messages WHERE conversationId = ? AND `from` = 'me' AND COALESCE(ai,0) = 0 LIMIT 1", [convo.id]);
+        if (human) await runQuery("UPDATE leads SET priority = '' WHERE id = ? AND priority = 'novolead'", [l.id]);
       }
     }
-    console.log("reconcileReplyDots: pontos de tempo reconciliados (todos os leads).");
   } catch (e) {
     console.error("reconcileReplyDots error:", e && e.message);
   }
 }
+// Autocorreção contínua: a cada 60s (além da chamada no boot).
+setInterval(() => { reconcileReplyDots().catch(() => {}); }, 60 * 1000);
+
+// "A última mensagem do cliente não é uma demanda": marca de forma PERSISTENTE até quando
+// o controle de tempo deve ficar zerado (= timestamp da última msg do cliente). Só volta a
+// acender se o cliente mandar uma mensagem MAIS NOVA. Sobrevive a reconciliações/reinícios.
+app.post('/api/leads/:id/not-demand', authenticateToken, async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  try {
+    const lead = await getRow("SELECT id, whatsapp_jid, phone FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    let ts = Date.now();
+    const convo = await findConvoForLead(lead);
+    if (convo) {
+      const last = await getRow("SELECT timestamp FROM messages WHERE conversationId = ? AND `from` = 'them' ORDER BY timestamp DESC LIMIT 1", [convo.id]);
+      if (last && Number(last.timestamp)) ts = Number(last.timestamp);
+    }
+    await runQuery("UPDATE leads SET not_demand_ts = ?, lastClientReply = NULL WHERE id = ?", [ts, id]);
+    res.json({ success: true, not_demand_ts: ts });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ===== IA (Gemini): configurações + teste =====
 app.get('/api/settings/ai', authenticateToken, async (req, res) => {

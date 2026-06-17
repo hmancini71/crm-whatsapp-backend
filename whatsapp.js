@@ -571,7 +571,7 @@ async function connectWhatsApp(id, isReconnect = false) {
               if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }
               const tAi = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
               await runQuery(
-                "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, ai) VALUES (?, ?, ?, ?, ?, ?, 1)",
                 [aiMsgId, convoId, 'me', replyText, tAi, Date.now()]
               );
               await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convoId]);
@@ -592,7 +592,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           // NÓS respondemos (mensagem de saída): zera o lastClientReply para o
           // "controle de tempo" sumir — ele só vale enquanto o CLIENTE foi o último.
           const sn = fromJid.split('@')[0];
-          await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [fromJid, `%${sn}%`]);
+          const snTail = sn.replace(/\D/g, '').slice(-8);
+          await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?)", [fromJid, `%${snTail}%`]);
           // A auto-resposta de fora do horário NÃO conta como atendimento:
           // não pode mover o lead de "Novo Leads" para "Tratamento inicial".
           let isAutoReply = false;
@@ -855,7 +856,7 @@ async function processNovoBacklog(limit) {
       if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }
       const tAi = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       await runQuery(
-        "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, status) VALUES (?, ?, 'me', ?, ?, ?, 2)",
+        "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, status, ai) VALUES (?, ?, 'me', ?, ?, ?, 2, 1)",
         [aiMsgId, convo.id, replyText, tAi, Date.now()]
       );
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convo.id]);
