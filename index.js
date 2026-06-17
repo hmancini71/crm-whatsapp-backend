@@ -2627,10 +2627,11 @@ async function reconcileNovoLeads() {
         (lt.length === 8 && norm(c.phone).slice(-8) === lt)
       );
       if (!conv) continue;
-      const mine = await allRows("SELECT id, text FROM messages WHERE conversationId = ? AND `from` = 'me'", [conv.id]);
+      const mine = await allRows("SELECT id, text, ai FROM messages WHERE conversationId = ? AND `from` = 'me'", [conv.id]);
       const respondeu = mine.some(m => {
         const txt = String((m && m.text) || '').trim();
         const mid = String((m && m.id) || '');
+        if (m && (m.ai === 1 || m.ai === '1')) return false; // mensagem da IA NÃO conta (ela ainda está perguntando o serviço)
         if (autoMsg && txt === autoMsg) return false; // auto-resposta fora de horário
         if (mid.startsWith('m_')) return false;       // ID interno = auto-reply ou IA
         if (txt.startsWith('{')) return false;         // JSON bruto enviado por erro da IA
