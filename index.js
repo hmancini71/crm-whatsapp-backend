@@ -272,21 +272,64 @@ app.get('/api/instagram/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
+// Busca o perfil público (nome + foto) de quem enviou o Direct, via Instagram Graph API.
+// Campos disponíveis para usuários que mandaram mensagem: name, username, profile_pic.
+async function fetchIgProfile(sid, token) {
+  try {
+    const r = await fetch('https://graph.instagram.com/v21.0/' + encodeURIComponent(sid) +
+      '?fields=name,username,profile_pic&access_token=' + encodeURIComponent(token));
+    const d = await r.json().catch(() => ({}));
+    if (d && !d.error) {
+      return { name: d.name || d.username || '', username: d.username || '', profilePic: d.profile_pic || '' };
+    }
+    if (d && d.error) console.error('[IG profile] erro:', JSON.stringify(d.error));
+  } catch (e) { console.error('[IG profile] falha:', e && e.message); }
+  return null;
+}
+
 // Grava uma mensagem/comentário do Instagram como conversa (account = 'ig')
 async function storeIgMessage(senderId, text, from, name, msgId) {
   const jid = 'ig:' + senderId;
   const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   let convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ?", [jid]);
   let convoId;
+
+  // Resolve nome + foto reais do remetente quando ainda estão genéricos/ausentes.
+  let resolvedName = name || '';
+  let resolvedAvatar = '';
+  const isGeneric = (n) => !n || n === 'Instagram' || n === 'Instagram lead';
+  const hasPhoto = convo && /^https?:/i.test(convo.avatar || '');
+  if (from === 'them' && (!convo || (isGeneric(convo.name) && !resolvedName) || !hasPhoto)) {
+    try {
+      const conn = await getRow("SELECT access_token FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+      if (conn && conn.access_token) {
+        const prof = await fetchIgProfile(senderId, conn.access_token);
+        if (prof) {
+          if (!resolvedName) resolvedName = prof.name;
+          resolvedAvatar = prof.profilePic || '';
+        }
+      }
+    } catch (e) {}
+  }
+
   if (convo) {
     convoId = convo.id;
+    // Atualiza nome/foto da conversa e do lead quando descobrimos dados melhores.
+    if (resolvedName && isGeneric(convo.name)) {
+      await runQuery("UPDATE conversations SET name = ? WHERE id = ?", [resolvedName, convoId]);
+      await runQuery("UPDATE leads SET name = ? WHERE whatsapp_jid = ? AND (name IS NULL OR name = '' OR name = 'Instagram' OR name = 'Instagram lead')", [resolvedName, jid]);
+    }
+    if (resolvedAvatar && !hasPhoto) {
+      await runQuery("UPDATE conversations SET avatar = ? WHERE id = ?", [resolvedAvatar, convoId]);
+    }
     await runQuery("UPDATE conversations SET lastTime = ?, unread = " + (from === 'them' ? "unread + 1" : "0") + " WHERE id = ?", [timeStr, convoId]);
   } else {
     convoId = 'c_' + Math.random().toString(36).substr(2, 9);
-    const nm = name || 'Instagram';
+    const nm = resolvedName || name || 'Instagram';
+    const av = resolvedAvatar || nm.slice(0, 2).toUpperCase();
     await runQuery(
       "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [convoId, 'ig', nm, '', nm.slice(0, 2).toUpperCase(), timeStr, from === 'them' ? 1 : 0, 0, jid]
+      [convoId, 'ig', nm, '', av, timeStr, from === 'them' ? 1 : 0, 0, jid]
     );
   }
   const mid = msgId || ('m_' + Math.random().toString(36).substr(2, 9));
@@ -427,6 +470,38 @@ app.post('/api/instagram/subscribe', authenticateToken, async (req, res) => {
     if (d && d.error) return res.status(502).json({ error: d.error.message || 'Falha ao inscrever o webhook' });
     res.json({ success: !!d.success || true, result: d });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Backfill único: preenche nome + foto das conversas de Instagram já existentes que ainda
+// estão genéricas ("Instagram" / sem foto). Admin dispara uma vez pela tela de Conexões.
+app.post('/api/instagram/backfill-profiles', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  try {
+    const conn = await getRow("SELECT access_token FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+    if (!conn || !conn.access_token) return res.status(400).json({ error: 'Instagram não conectado. Conecte o Instagram primeiro.' });
+    const rows = await allRows("SELECT id, name, avatar, whatsapp_jid FROM conversations WHERE account = 'ig' AND whatsapp_jid LIKE 'ig:%'");
+    let scanned = 0, updated = 0, failed = 0;
+    for (const c of (rows || [])) {
+      scanned++;
+      const isGeneric = !c.name || c.name === 'Instagram' || c.name === 'Instagram lead';
+      const hasPhoto = /^https?:/i.test(c.avatar || '');
+      if (!isGeneric && hasPhoto) continue; // já tem nome e foto
+      const sid = String(c.whatsapp_jid || '').replace(/^ig:/, '');
+      if (!sid || sid.indexOf('cmt_') === 0) continue; // comentários não têm perfil de DM
+      const prof = await fetchIgProfile(sid, conn.access_token);
+      if (!prof) { failed++; continue; }
+      const newName = (isGeneric && prof.name) ? prof.name : null;
+      const newAvatar = (!hasPhoto && prof.profilePic) ? prof.profilePic : null;
+      if (newName) {
+        await runQuery("UPDATE conversations SET name = ? WHERE id = ?", [newName, c.id]);
+        await runQuery("UPDATE leads SET name = ? WHERE whatsapp_jid = ? AND (name IS NULL OR name = '' OR name = 'Instagram' OR name = 'Instagram lead')", [newName, c.whatsapp_jid]);
+      }
+      if (newAvatar) await runQuery("UPDATE conversations SET avatar = ? WHERE id = ?", [newAvatar, c.id]);
+      if (newName || newAvatar) updated++;
+      await new Promise(r => setTimeout(r, 250)); // gentil com o rate limit da Graph API
+    }
+    res.json({ success: true, scanned, updated, failed });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // Envia uma mensagem de Direct pelo Instagram usando o token guardado
@@ -1122,7 +1197,16 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       try {
         await sendIgMessage(recipientId, text);
       } catch (e) {
-        return res.status(502).json({ error: 'Falha ao enviar no Instagram: ' + e.message });
+        const raw = String(e && e.message || '');
+        // A causa mais comum: fora da janela de 24h do Instagram (só dá pra responder
+        // até 24h após a última mensagem da pessoa). Traduz para algo claro.
+        let friendly = 'Falha ao enviar no Instagram: ' + raw;
+        if (/24|outside|window|allowed|messaging window/i.test(raw)) {
+          friendly = 'O Instagram só permite responder até 24h após a última mensagem da pessoa. Esta conversa está fora dessa janela — peça que ela envie uma nova mensagem para reabrir o contato.';
+        } else if (/token|expired|session|OAuth|permission|#10|#200/i.test(raw)) {
+          friendly = 'Não foi possível enviar: a conexão do Instagram pode ter expirado ou faltam permissões. Reconecte o Instagram em Configurações → Conexões. (' + raw + ')';
+        }
+        return res.status(502).json({ error: friendly });
       }
       await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)", [msgId, id, 'me', text, timeStr, Date.now()]);
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
@@ -1323,6 +1407,23 @@ app.get('/api/avatar', async (req, res) => {
       if (row && row.whatsapp_jid) jid = row.whatsapp_jid;
     }
     if (!jid) return res.status(404).end();
+    // Instagram: a "foto" é o profile_pic da Graph API guardado em conversations.avatar.
+    // Fazemos proxy (a URL do CDN da Meta expira), com cache curto.
+    if (jid.indexOf('ig:') === 0) {
+      const c = await getRow("SELECT avatar FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [jid]);
+      if (c && /^https?:/i.test(c.avatar || '')) {
+        try {
+          const r = await fetch(c.avatar);
+          if (r.ok) {
+            res.setHeader('Content-Type', r.headers.get('content-type') || 'image/jpeg');
+            res.setHeader('Cache-Control', 'public, max-age=3600');
+            const buf = Buffer.from(await r.arrayBuffer());
+            return res.end(buf);
+          }
+        } catch (e) {}
+      }
+      return res.status(404).end();
+    }
     const file = avatarFileForJid(jid);
     if (!fs.existsSync(file)) {
       const sock = Object.values(sessions || {}).find(s => s);
