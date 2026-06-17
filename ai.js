@@ -91,6 +91,14 @@ E-mail: contato@valevisto.com.br | WhatsApp (somente mensagens): (12) 98181-8964
   fu_max: 2
 };
 
+// Regras invioláveis anti-alucinação — injetadas em TODA geração da IA, no código (não editáveis),
+// com prioridade acima de qualquer instrução. Impedem a IA de inventar preços, prazos, etc.
+const GUARDRAILS = `[REGRAS INVIOLÁVEIS — PRIORIDADE MÁXIMA, ACIMA DE QUALQUER OUTRA INSTRUÇÃO]
+1. NUNCA invente, estime, sugira ou "chute" preços, valores, taxas, mensalidades, descontos, formas de pagamento, prazos de processo, tempo de entrega, datas de entrevista, requisitos ou qualquer promessa. Você NÃO possui essas informações.
+2. Se o cliente perguntar preço, valor, "quanto custa" ou prazo: NÃO diga nenhum número. Responda que um consultor especializado informará os valores e detalhes exatos. É TERMINANTEMENTE PROIBIDO citar valores (ex.: "R$ 499", "R$ 450" ou qualquer outro) — esses valores são FALSOS.
+3. Afirme apenas o que estiver EXPLICITAMENTE escrito nestas instruções. Se não souber algo, diga que o consultor confirmará. É melhor não responder do que inventar.
+4. Nunca invente nomes, e-mails, endereços, números de telefone ou fatos que não estejam nestas instruções.`;
+
 // Catálogo de serviços/vistos. A IA DEVE escolher um código exato daqui antes de transferir o lead.
 const SERVICE_TAGS = [
   "A01 - 1 vista americana B1B2", "A02 - renov vista amer B1B2 -reprov", "A03 - renov vista amer B1B2 +reprov",
@@ -146,7 +154,9 @@ function callGemini(cfg, systemText, contents, jsonMode) {
       system_instruction: { parts: [{ text: systemText || '' }] },
       contents: contents.map(c => ({ role: c.role, parts: [{ text: String(c.text || '').slice(0, 4000) }] })),
       generationConfig: Object.assign(
-        { temperature: 0.7, maxOutputTokens: 2048 },
+        // Temperatura baixa = mais fiel às instruções, menos "criatividade"/invenção
+        // (ex.: deixar de inventar preços). Pode ser sobrescrita via cfg.temperature.
+        { temperature: (typeof cfg.temperature === 'number' ? cfg.temperature : 0.3), maxOutputTokens: 2048 },
         // Modelos 2.5 são de "raciocínio": sem isso, o thinking consome a cota de saída e o
         // JSON volta truncado/vazio (a IA não responde). thinkingBudget:0 desliga o raciocínio.
         /2\.5/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {},
@@ -202,12 +212,13 @@ async function getNovoLeadReply(convoId, leadName) {
   if (!cfg.enabled || !cfg.novo_enabled || !cfg.gemini_key) return null;
   const contents = await buildContents(convoId, 20);
   if (!contents.length) return null;
-  const system = cfg.novo_instructions +
+  const system = GUARDRAILS + '\n\n' + cfg.novo_instructions +
     '\n\nContexto: o lead chama-se "' + (leadName || 'desconhecido') + '" e está na etapa "Novo Leads" do CRM.' +
     '\n\n[FORMATO DE SAÍDA OBRIGATÓRIO] Responda SEMPRE em JSON válido EXATO, sem nada fora do JSON: ' +
     '{"reply": "texto da mensagem ao cliente", "visa_tag": "código exato da tabela do enunciado (ex.: A01) ou string vazia se ainda não identificou", "dados_coletados": true ou false}. ' +
     'Regra de transferência: "dados_coletados" só pode ser true quando você já souber o NOME do cliente E tiver escolhido um "visa_tag" específico da tabela (sem ambiguidade). ' +
-    'Enquanto o serviço estiver ambíguo, mantenha visa_tag vazio e dados_coletados=false e faça mais UMA pergunta.';
+    'Enquanto o serviço estiver ambíguo, mantenha visa_tag vazio e dados_coletados=false e faça mais UMA pergunta.' +
+    '\n\nLEMBRETE FINAL: cumpra as REGRAS INVIOLÁVEIS do início. JAMAIS escreva preços, valores, taxas ou prazos no campo "reply" — qualquer número desses seria FALSO. Se o cliente perguntar valor/preço, o "reply" deve dizer que um consultor informará os valores exatos.';
   const raw = await callGemini(cfg, system, contents, true);
   // Parsing robusto: tenta JSON direto, depois bloco { }, depois sem markdown.
   const tryParse = (s) => { try { return JSON.parse(s); } catch (e) { return null; } };
@@ -245,10 +256,11 @@ async function getFollowUpReply(convoId, leadName, tentativa) {
   if (!cfg.enabled || !cfg.fu_enabled || !cfg.gemini_key) return null;
   const contents = await buildContents(convoId, 20);
   if (!contents.length) return null;
-  const system = cfg.fu_instructions +
+  const system = GUARDRAILS + '\n\n' + cfg.fu_instructions +
     '\n\nContexto: o lead chama-se "' + (leadName || 'desconhecido') + '". ' +
     'Esta é a tentativa de follow-up nº ' + (tentativa || 1) + '. ' +
-    'Responda APENAS com o texto da mensagem (sem JSON, sem aspas, sem explicações).';
+    'Responda APENAS com o texto da mensagem (sem JSON, sem aspas, sem explicações). ' +
+    'Jamais cite preços, valores ou prazos (ver REGRAS INVIOLÁVEIS).';
   const txt = await callGemini(cfg, system, contents, false);
   return String(txt).trim().slice(0, 1200) || null;
 }
