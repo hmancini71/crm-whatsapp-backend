@@ -2020,6 +2020,43 @@ app.get('/api/contracts/:id', authenticateToken, async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// 19d. Cancelar contrato a partir do CRM (proxy → contracts.php?action=cancel). Só Administrador.
+app.post('/api/contracts/:id/cancel', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  const id = String(req.params.id || '').trim();
+  if (!id) return res.status(400).json({ error: 'ID obrigatório' });
+  try {
+    const token = await ds160AdminToken();
+    const cr = await fetch(DS160_BASE + '/contracts.php?action=cancel', {
+      method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const cj = await cr.json().catch(() => null);
+    if (!cr.ok || !cj || !cj.success) return res.status(502).json({ error: (cj && cj.error) || 'Falha ao cancelar.' });
+    _contractsCache = { ts: 0, data: null };
+    res.json(cj);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// 19e. Homologar/assinar contrato pela Vale Visto a partir do CRM (proxy → action=admin_sign). Só Admin.
+app.post('/api/contracts/:id/admin-sign', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  const id = String(req.params.id || '').trim();
+  const adminSignature = (req.body && req.body.adminSignature) || '';
+  if (!id || !adminSignature) return res.status(400).json({ error: 'ID e assinatura obrigatórios' });
+  try {
+    const token = await ds160AdminToken();
+    const cr = await fetch(DS160_BASE + '/contracts.php?action=admin_sign', {
+      method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, adminSignature })
+    });
+    const cj = await cr.json().catch(() => null);
+    if (!cr.ok || !cj || !cj.success) return res.status(502).json({ error: (cj && cj.error) || 'Falha ao assinar.' });
+    _contractsCache = { ts: 0, data: null };
+    res.json(cj);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
   const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
