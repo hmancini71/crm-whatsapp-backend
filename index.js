@@ -2122,6 +2122,17 @@ app.get('/api/contracts', authenticateToken, async (req, res) => {
   }
 });
 
+// 19c-0. Modelos de contrato reutilizáveis (lista) — proxy. DEFINIDO ANTES de /:id para não ser sombreado.
+app.get('/api/contracts/templates', authenticateToken, async (req, res) => {
+  try {
+    const token = await ds160AdminToken();
+    const cr = await fetch(DS160_BASE + '/templates.php', { headers: { 'Authorization': 'Bearer ' + token } });
+    const cj = await cr.json().catch(() => null);
+    if (!cr.ok || !Array.isArray(cj)) return res.status(502).json({ error: (cj && cj.error) || 'Falha ao buscar modelos.' });
+    res.json(cj.map(t => ({ id: t.id, title: t.title || '', content: t.content || '' })));
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // 19c. Detalhe de UM contrato (para o "Visualizar" do CRM, sem abrir a página de assinatura).
 app.get('/api/contracts/:id', authenticateToken, async (req, res) => {
   const id = String(req.params.id || '').trim();
@@ -2139,6 +2150,24 @@ app.get('/api/contracts/:id', authenticateToken, async (req, res) => {
     const pdfUrl = (c.status === 'completed') ? (DS160_BASE + '/uploads/contracts/' + encodeURIComponent(id) + '/contrato_assinado_' + encodeURIComponent(id) + '.pdf') : null;
     const attachmentUrl = c.client_attachment_path ? (DS160_BASE.replace(/\/api$/, '') + '/' + String(c.client_attachment_path).replace(/^\/+/, '')) : null;
     res.json({ ...c, pdfUrl, attachmentUrl });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// 19c-bis. Salvar novo modelo de contrato — proxy. (O GET /contracts/templates é definido ANTES de /:id.)
+app.post('/api/contracts/templates', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  const title = (req.body && req.body.title || '').trim();
+  const content = (req.body && req.body.content || '').trim();
+  if (!title || !content) return res.status(400).json({ error: 'Título e conteúdo são obrigatórios' });
+  try {
+    const token = await ds160AdminToken();
+    const cr = await fetch(DS160_BASE + '/contracts.php?action=save_template', {
+      method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, content })
+    });
+    const cj = await cr.json().catch(() => null);
+    if (!cr.ok || !cj || !cj.success) return res.status(502).json({ error: (cj && cj.error) || 'Falha ao salvar modelo.' });
+    res.json(cj);
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
