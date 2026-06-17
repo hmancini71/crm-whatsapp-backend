@@ -524,20 +524,20 @@ async function connectWhatsApp(id, isReconnect = false) {
         if (ourNumber) {
           await runQuery("UPDATE leads SET recv_number = ? WHERE (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) AND (recv_number IS NULL OR recv_number = '')", [ourNumber, fromJid, `%${searchNumber}%`]);
         }
-        // Resposta automática fora do horário de expediente (se habilitada).
-        // PORÉM: se a IA vai atender este lead (em "Novo Leads" e IA ligada), é ELA quem fala
-        // (inclusive o aviso de fora do horário) — então NÃO dispara a auto-resposta antiga,
-        // para o cliente não receber mensagem duplicada.
-        let _aiWillHandle = false;
+        // Resposta automática fora do horário: vale APENAS para leads JÁ em atendimento
+        // (Tratamento inicial, Proposta enviada, Follow-up pagamento, Venda convertida,
+        // Lead declinou/cancelado e Clientes antigos). NÃO vale para "Novo Leads" — esses são
+        // atendidos pela IA (que já inclui o aviso de fora do horário quando conclui).
+        let _autoReplyOk = false;
         try {
-          const _aiCfg = await getAiSettings();
-          if (_aiCfg && _aiCfg.enabled && _aiCfg.novo_enabled && _aiCfg.gemini_key) {
-            const _sn = fromJid.split('@')[0];
-            const _nl = await getRow("SELECT id FROM leads WHERE archived = 0 AND stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) LIMIT 1", [fromJid, `%${_sn}%`]);
-            if (_nl) _aiWillHandle = true;
+          const _tail = (fromJid.split('@')[0] || '').replace(/\D/g, '').slice(-8);
+          let _lead = await getRow("SELECT stage FROM leads WHERE archived = 0 AND whatsapp_jid = ? LIMIT 1", [fromJid]);
+          if (!_lead && _tail.length >= 8) {
+            _lead = await getRow("SELECT stage FROM leads WHERE archived = 0 AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", [`%${_tail}%`]);
           }
+          if (_lead && _lead.stage && _lead.stage !== 'novo') _autoReplyOk = true;
         } catch (e) {}
-        if (!_aiWillHandle) await maybeAutoReply(sock, fromJid, convoId);
+        if (_autoReplyOk) await maybeAutoReply(sock, fromJid, convoId);
 
         // ===== IA (Gemini): 1ª interação nos leads em "Novo Leads" =====
         // Coleta dados do cliente conforme as instruções de Configurações; quando
