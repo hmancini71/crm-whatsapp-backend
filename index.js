@@ -1040,6 +1040,21 @@ app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// 8b. Marcar conversa como LIDA / NÃO LIDA (bolinha) — sinalização manual.
+app.post('/api/conversations/:id/read', authenticateToken, async (req, res) => {
+  try {
+    await runQuery("UPDATE conversations SET unread = 0 WHERE id = ?", [req.params.id]);
+    res.json({ success: true, unread: 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/conversations/:id/mark-unread', authenticateToken, async (req, res) => {
+  try {
+    await runQuery("UPDATE conversations SET unread = CASE WHEN unread > 0 THEN unread ELSE 1 END WHERE id = ?", [req.params.id]);
+    const c = await getRow("SELECT unread FROM conversations WHERE id = ?", [req.params.id]);
+    res.json({ success: true, unread: (c && c.unread) || 1 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // 9. Conversations Routes: Send Message
 app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) => {
   const { id } = req.params;
