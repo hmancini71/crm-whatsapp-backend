@@ -267,6 +267,15 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: tipo de WhatsApp por usuário (Pré/Pós/Ambos) — filtra o inbox do Vendedor.
+  db.all("PRAGMA table_info(users)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'wa_type')) {
+      db.run("ALTER TABLE users ADD COLUMN wa_type TEXT DEFAULT 'ambos'", (alterErr) => {
+        if (alterErr) console.error("Failed to add wa_type column to users:", alterErr);
+      });
+    }
+  });
+
   // Log de cada disparo de follow-up automático (col 3-4 do Tratamento) — para o gráfico diário.
   db.run(`CREATE TABLE IF NOT EXISTS followup_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

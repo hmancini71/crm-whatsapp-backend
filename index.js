@@ -204,16 +204,17 @@ function requireAdmin(req, res) {
 app.get('/api/users', authenticateToken, async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const users = await allRows("SELECT id, name, email, role, avatar FROM users ORDER BY name");
+    const users = await allRows("SELECT id, name, email, role, avatar, wa_type FROM users ORDER BY name");
     res.json(users);
   } catch (e) { res.status(500).json({ detail: String(e) }); }
 });
 
 app.post('/api/users', authenticateToken, async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const { name, email, password, role } = req.body;
+  const { name, email, password, role, wa_type } = req.body;
   if (!name || !email || !password) return res.status(400).json({ detail: "Nome, e-mail e senha são obrigatórios" });
   const r = (role === 'Vendedor') ? 'Vendedor' : 'Administrador';
+  const wt = ['pre', 'pos', 'ambos'].includes(wa_type) ? wa_type : 'ambos';
   const mail = String(email).trim().toLowerCase();
   try {
     const existing = await getRow("SELECT id FROM users WHERE email = ?", [mail]);
@@ -221,16 +222,16 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     const id = 'u_' + Math.random().toString(36).substr(2, 9);
     const hash = bcrypt.hashSync(String(password), 10);
     const avatar = String(name).trim().slice(0, 2).toUpperCase();
-    await runQuery("INSERT INTO users (id, email, password_hash, name, role, avatar) VALUES (?, ?, ?, ?, ?, ?)",
-      [id, mail, hash, String(name).trim(), r, avatar]);
-    res.json({ id, name: String(name).trim(), email: mail, role: r, avatar });
+    await runQuery("INSERT INTO users (id, email, password_hash, name, role, avatar, wa_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [id, mail, hash, String(name).trim(), r, avatar, wt]);
+    res.json({ id, name: String(name).trim(), email: mail, role: r, avatar, wa_type: wt });
   } catch (e) { res.status(500).json({ detail: String(e) }); }
 });
 
 app.patch('/api/users/:id', authenticateToken, async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const { id } = req.params;
-  const { name, role, password } = req.body;
+  const { name, role, password, wa_type } = req.body;
   try {
     const u = await getRow("SELECT * FROM users WHERE id = ?", [id]);
     if (!u) return res.status(404).json({ detail: "Usuário não encontrado" });
@@ -240,6 +241,7 @@ app.patch('/api/users/:id', authenticateToken, async (req, res) => {
       updates.push("avatar = ?"); params.push(String(name).trim().slice(0, 2).toUpperCase());
     }
     if (role !== undefined) { updates.push("role = ?"); params.push(role === 'Vendedor' ? 'Vendedor' : 'Administrador'); }
+    if (wa_type !== undefined) { updates.push("wa_type = ?"); params.push(['pre', 'pos', 'ambos'].includes(wa_type) ? wa_type : 'ambos'); }
     if (password) { updates.push("password_hash = ?"); params.push(bcrypt.hashSync(String(password), 10)); }
     if (updates.length) { params.push(id); await runQuery("UPDATE users SET " + updates.join(", ") + " WHERE id = ?", params); }
     res.json({ ok: true });
@@ -971,6 +973,20 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     } else {
       convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)" + ORDER);
     }
+
+    // Filtro por tipo de linha (Pré/Pós-venda) conforme o usuário logado. Administrador vê TUDO.
+    try {
+      if (req.user && req.user.role !== 'Administrador') {
+        const urow = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]);
+        const wt = (urow && urow.wa_type) || 'ambos';
+        if (wt === 'pre' || wt === 'pos') {
+          const strow = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
+          let map = {}; try { map = strow && strow.value ? JSON.parse(strow.value) : {}; } catch (e) {}
+          const allowed = new Set(Object.keys(map).filter(k => map[k] === wt));
+          convs = (convs || []).filter(c => allowed.has(c.account));
+        }
+      }
+    } catch (e) { /* em caso de falha, não filtra */ }
 
     // Attach last message for each conversation
     const detailedConvs = [];
