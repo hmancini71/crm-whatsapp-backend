@@ -240,6 +240,9 @@ db.serialize(() => {
       // que foi marcada como "não é demanda". O controle de tempo só reaparece se o cliente
       // mandar uma mensagem MAIS NOVA que esse marcador. Sobrevive a reconciliações/reinícios.
       if (!cols.find(c => c.name === 'not_demand_ts')) db.run("ALTER TABLE leads ADD COLUMN not_demand_ts INTEGER DEFAULT 0");
+      // Remoção MANUAL e persistente do selo "Assinado" (1 = removido à mão).
+      // Quando 1, o lead nunca é re-marcado como assinado pela varredura de e-mails.
+      if (!cols.find(c => c.name === 'signed_override')) db.run("ALTER TABLE leads ADD COLUMN signed_override INTEGER DEFAULT 0");
     }
   });
 

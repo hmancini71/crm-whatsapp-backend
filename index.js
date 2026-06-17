@@ -999,19 +999,23 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
         .toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
         .split(' ').filter(t => t.length >= 3 && !STOP[t]);
       const nameSets = Array.from(names).map(toks).filter(a => a.length);
-      const leads = await allRows("SELECT id, name, email, contract_signed FROM leads WHERE archived = 0");
+      const leads = await allRows("SELECT id, name, email, contract_signed, signed_override FROM leads WHERE archived = 0");
       for (const l of (leads || [])) {
         if (l.contract_signed) continue;
+        if (l.signed_override) continue; // selo removido manualmente → nunca re-marca
         const em = (l.email || '').trim().toLowerCase();
         let hit = !!(em && emails.has(em));
         if (!hit) {
           const lt = toks(l.name);
-          if (lt.length) {
+          // Matching por NOME só quando o conjunto de tokens é IGUAL ao do contrato assinado
+          // (mesmo nº de tokens e todos coincidindo) — ex.: "Maria Eduarda" NÃO casa com
+          // "Maria Eduarda Sousa". Evita falso positivo de nomes comuns. E-mail continua sendo
+          // o sinal forte. Casos legítimos sem e-mail podem ser confirmados manualmente.
+          if (lt.length >= 2) {
             for (const st of nameSets) {
-              let shared = 0; for (const t of lt) if (st.indexOf(t) !== -1) shared++;
-              // Exige nome+sobrenome batendo (>=2 tokens). NÃO casa por nome único (ex.: "Marcos",
-              // "Maria") porque nomes comuns geram falso positivo. Sem isso, casa só por e-mail.
-              if (shared >= 2) { hit = true; break; }
+              if (st.length !== lt.length) continue;
+              let all = true; for (const t of lt) { if (st.indexOf(t) === -1) { all = false; break; } }
+              if (all) { hit = true; break; }
             }
           }
         }
@@ -2334,6 +2338,18 @@ app.post('/api/leads/:id/not-demand', authenticateToken, async (req, res) => {
     }
     await runQuery("UPDATE leads SET not_demand_ts = ?, lastClientReply = NULL WHERE id = ?", [ts, id]);
     res.json({ success: true, not_demand_ts: ts });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Remover o selo "Assinado" de forma PERSISTENTE (falso positivo). Marca signed_override = 1
+// para que a varredura de e-mails nunca re-marque este lead como assinado.
+app.post('/api/leads/:id/unsign', authenticateToken, async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  try {
+    const lead = await getRow("SELECT id FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    await runQuery("UPDATE leads SET contract_signed = 0, signed_override = 1 WHERE id = ?", [id]);
+    res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
