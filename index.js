@@ -2057,6 +2057,60 @@ app.post('/api/contracts/:id/admin-sign', authenticateToken, async (req, res) =>
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// 19f. Criar contrato/proposta a partir do CRM (proxy → contracts.php?action=create). Só Administrador.
+// Recebe os campos do formulário embutido da guia "Contratos" e monta o payload no mesmo
+// formato usado pelo painel gerencia_ds-160. Quando o texto não vem preenchido, busca o
+// modelo padrão (T-DEFAULT) no servidor — assim o contrato sai com o mesmo texto legal do painel.
+async function ds160DefaultTemplate(token) {
+  try {
+    const r = await fetch(DS160_BASE + '/templates.php?id=T-DEFAULT', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    const j = await r.json().catch(() => null);
+    if (r.ok && j && j.content) return j.content;
+  } catch (e) {}
+  return '';
+}
+app.post('/api/contracts', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  const b = req.body || {};
+  const clientName = String(b.clientName || '').trim();
+  const clientEmail = String(b.clientEmail || '').trim();
+  if (!clientName || !clientEmail) return res.status(400).json({ error: 'Nome e e-mail do cliente são obrigatórios.' });
+
+  const applicantsRange = String(b.applicantsRange || '1').trim();
+  const basePrice = Number(b.basePrice) || 0;
+  const paymentTerms = String(b.paymentTerms || 'À vista via PIX').trim();
+  const customClauses = String(b.customClauses || '').trim();
+
+  // Serviços opcionais (mesmos rótulos do painel)
+  const optionalServices = [];
+  if (b.optionalSp) optionalServices.push({ label: 'Representação em São Paulo para renovação visto americano', price: Number(b.optionalSpPrice) || 0 });
+  if (b.optionalPassport) optionalServices.push({ label: 'Solicitação de passaporte brasileiro', price: Number(b.optionalPassportPrice) || 0 });
+
+  try {
+    const token = await ds160AdminToken();
+    let contractText = String(b.contractText || '').trim();
+    if (!contractText) contractText = await ds160DefaultTemplate(token);
+
+    const cr = await fetch(DS160_BASE + '/contracts.php?action=create', {
+      method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientName,
+        clientEmail,
+        contractText,
+        paymentTerms,
+        price: String(basePrice),
+        servicesScope: { applicantsRange, basePrice, optionalServices, customClauses }
+      })
+    });
+    const cj = await cr.json().catch(() => null);
+    if (!cr.ok || !cj || !cj.success) return res.status(502).json({ error: (cj && cj.error) || 'Falha ao criar contrato.' });
+    _contractsCache = { ts: 0, data: null }; // invalida cache para a lista atualizar
+    res.json(cj); // { success, id }
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
   const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
