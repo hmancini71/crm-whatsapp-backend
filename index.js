@@ -1743,6 +1743,25 @@ app.post('/api/settings/business-hours', authenticateToken, async (req, res) => 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// 19d. Settings: tipo de cada linha de WhatsApp — Pré-venda / Pós-venda (mapa { accountId: 'pre'|'pos' }).
+app.get('/api/settings/wa-sale-types', authenticateToken, async (req, res) => {
+  try {
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
+    if (row && row.value) { try { return res.json(JSON.parse(row.value)); } catch (e) { return res.json({}); } }
+    res.json({});
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/settings/wa-sale-types', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
+  try {
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES ('wa_sale_types', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [JSON.stringify(req.body || {})]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Respostas rápidas por /atalho (lista de { code, context, message }). Leitura p/ todos; gravação só admin.
 app.get('/api/settings/quick-replies', authenticateToken, async (req, res) => {
   try {
