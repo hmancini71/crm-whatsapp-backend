@@ -2628,6 +2628,40 @@ app.get('/api/integrations/leads', checkApiKey, async (req, res) => {
 // Reconciliação: leads parados em "Novo Leads" cuja conversa JÁ tem resposta nossa
 // (fora a auto-resposta) migram para "Tratamento inicial". Cobre trocas feitas antes
 // da regra existir e qualquer mensagem que tenha escapado do gatilho em tempo real.
+// Dedup de leads "fantasma": arquiva (NÃO apaga — reversível) leads SEM telefone, SEM tag de serviço
+// e SEM data de follow-up, quando existe OUTRO lead não-arquivado do MESMO nome QUE TEM telefone.
+// É o caso do mesmo cliente registrado 2x (duas identidades @lid / duas linhas). Não toca em "Novo
+// Leads" (a IA ainda está tratando), nem em estágios terminais. Se a pessoa voltar a escrever, o
+// próprio handler de mensagem desarquiva o lead — então é seguro e autocorrigível.
+async function archiveGhostDuplicates() {
+  try {
+    const ghosts = await allRows(
+      "SELECT id, name FROM leads WHERE archived = 0 " +
+      "AND (phone IS NULL OR TRIM(phone) = '') " +
+      "AND (tags IS NULL OR tags = '' OR tags = '[]') " +
+      "AND (followup_date IS NULL OR followup_date = '') " +
+      "AND (contract_signed IS NULL OR contract_signed = 0) " +
+      "AND stage NOT IN ('novo','convertida','declinado','clientes_antigos')"
+    );
+    let archived = 0;
+    for (const g of ghosts) {
+      const nm = String(g.name || '').trim();
+      if (!nm) continue;
+      const real = await getRow(
+        "SELECT id FROM leads WHERE archived = 0 AND id != ? AND LOWER(TRIM(name)) = LOWER(?) " +
+        "AND phone IS NOT NULL AND LENGTH(REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','')) >= 8 LIMIT 1",
+        [g.id, nm]
+      );
+      if (real) {
+        await runQuery("UPDATE leads SET archived = 1 WHERE id = ?", [g.id]);
+        archived++;
+        console.log(`[dedup fantasma] arquivado "${g.name}" (${g.id}) — duplicata sem telefone de um lead real do mesmo nome.`);
+      }
+    }
+    if (archived) console.log(`[dedup fantasma] total: ${archived} lead(s) fantasma arquivado(s).`);
+  } catch (e) { console.error('[dedup fantasma]', e && e.message); }
+}
+
 async function reconcileNovoLeads() {
   try {
     let autoMsg = null;
@@ -2689,6 +2723,9 @@ app.listen(PORT, async () => {
     console.error("Error reconciling novo leads:", err);
   }
   setInterval(() => { reconcileNovoLeads().catch(() => {}); }, 15 * 60 * 1000);
+  // Dedup de leads fantasma (duplicatas sem telefone do mesmo nome) — no boot e a cada 30 min.
+  try { await archiveGhostDuplicates(); } catch (e) { console.error('[dedup fantasma boot]', e && e.message); }
+  setInterval(() => { archiveGhostDuplicates().catch(() => {}); }, 30 * 60 * 1000);
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
   // Critério SEGURO: só desmarca quem tem nome de UM token e NÃO tem e-mail — esses só podem
   // ter sido marcados pela regra frouxa (não dá pra ter casado por e-mail nem por 2 tokens).
