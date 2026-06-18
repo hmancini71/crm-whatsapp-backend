@@ -312,6 +312,17 @@ db.serialize(() => {
     });
   });
 
+  // Log dos bloqueios do filtro anti-invenção da IA (preço/@/link) — para o resumo diário.
+  db.run(`CREATE TABLE IF NOT EXISTS ai_guardrail_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    kind TEXT,
+    sample TEXT
+  )`, (e) => {
+    if (e) { console.error("Failed to create ai_guardrail_log:", e); return; }
+    db.run("CREATE INDEX IF NOT EXISTS idx_ai_guardrail_log_ts ON ai_guardrail_log(ts)");
+  });
+
   // Safe migration: add 'tracking' (rastreamento de marketing: UTMs, gclid, fbclid)
   db.all("PRAGMA table_info(leads)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'tracking')) {

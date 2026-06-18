@@ -225,6 +225,7 @@ function sanitizeAiReply(reply) {
   }
   if (bad) {
     console.warn('[IA guardrail] resposta BLOQUEADA (possível ' + bad + ' inventado): ' + t.slice(0, 220));
+    try { runQuery("INSERT INTO ai_guardrail_log (ts, kind, sample) VALUES (?, ?, ?)", [Date.now(), bad, t.slice(0, 220)]).catch(() => {}); } catch (e) {}
     return { safe: 'Para te passar essa informação com precisão, vou pedir para um consultor especializado confirmar com você. Posso te ajudar em mais alguma coisa? 🙏', blocked: bad };
   }
   return { safe: t, blocked: null };
