@@ -97,7 +97,8 @@ const GUARDRAILS = `[REGRAS INVIOLÁVEIS — PRIORIDADE MÁXIMA, ACIMA DE QUALQU
 1. NUNCA invente, estime, sugira ou "chute" preços, valores, taxas, mensalidades, descontos, formas de pagamento, prazos de processo, tempo de entrega, datas de entrevista, requisitos ou qualquer promessa. Você NÃO possui essas informações.
 2. Se o cliente perguntar preço, valor, "quanto custa" ou prazo: NÃO diga nenhum número. Responda que um consultor especializado informará os valores e detalhes exatos. É TERMINANTEMENTE PROIBIDO citar valores (ex.: "R$ 499", "R$ 450" ou qualquer outro) — esses valores são FALSOS.
 3. Afirme apenas o que estiver EXPLICITAMENTE escrito nestas instruções. Se não souber algo, diga que o consultor confirmará. É melhor não responder do que inventar.
-4. Nunca invente nomes, e-mails, endereços, números de telefone ou fatos que não estejam nestas instruções.`;
+4. Nunca invente nomes, e-mails, endereços, números de telefone ou fatos que não estejam nestas instruções.
+5. Nunca invente perfis de REDES SOCIAIS nem qualquer canal de contato: Instagram, @usuário, Facebook, TikTok, YouTube, links, sites ou URLs. Só cite um perfil/@/link se ele estiver LITERALMENTE escrito nestas instruções. Se o cliente pedir o Instagram (ou outra rede/site) e ele NÃO constar aqui, é PROIBIDO inventar um @ ou endereço — responda que um consultor vai te passar os canais oficiais. Jamais afirme "temos Instagram" citando um @ que você não viu nestas instruções.`;
 
 // Catálogo de serviços/vistos. A IA DEVE escolher um código exato daqui antes de transferir o lead.
 const SERVICE_TAGS = [
@@ -205,6 +206,30 @@ async function buildContents(convoId, limit) {
   return contents;
 }
 
+// Rede de segurança determinística: varre o TEXTO que a IA quer enviar e BLOQUEIA os casos mais
+// arriscados de informação inventada — preço/valor em dinheiro, @ de rede social que não seja
+// @valevisto, e links/sites que não sejam da Vale Visto. Se detectar, substitui por uma resposta
+// segura (encaminha ao consultor) e registra no log para revisão. Não substitui o prompt — é uma
+// camada extra: mesmo que o modelo escorregue, o dado inventado NÃO chega ao cliente.
+function sanitizeAiReply(reply) {
+  const t = String(reply || '');
+  let bad = null;
+  if (/R\$\s*\d/.test(t) || /\b\d{1,4}([.,]\d{2})?\s*reais\b/i.test(t) || /\b\d{1,4}\s*(?:d[óo]lares|usd)\b/i.test(t)) bad = 'preço/valor';
+  if (!bad) {
+    const handles = t.match(/@[a-z0-9._]{2,}/ig) || [];
+    if (handles.some(h => !/valevisto/i.test(h))) bad = 'rede social';
+  }
+  if (!bad) {
+    const urls = t.match(/(?:https?:\/\/|www\.)[^\s]+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|br|net|org|io|co)\b(?:\/[^\s]*)?/ig) || [];
+    if (urls.some(u => !/valevisto/i.test(u))) bad = 'link/site';
+  }
+  if (bad) {
+    console.warn('[IA guardrail] resposta BLOQUEADA (possível ' + bad + ' inventado): ' + t.slice(0, 220));
+    return { safe: 'Para te passar essa informação com precisão, vou pedir para um consultor especializado confirmar com você. Posso te ajudar em mais alguma coisa? 🙏', blocked: bad };
+  }
+  return { safe: t, blocked: null };
+}
+
 // 1ª interação (Novo Leads): devolve { reply, visa_tag, dados_coletados } ou null se IA desligada.
 // O lead só é transferido (pelo chamador) quando dados_coletados=true E visa_tag for um código válido.
 async function getNovoLeadReply(convoId, leadName) {
@@ -227,11 +252,12 @@ async function getNovoLeadReply(convoId, leadName) {
   if (!j) { j = tryParse(raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
   if (j && j.reply) {
     const tag = normalizeServiceTag(j.visa_tag);
+    const san = sanitizeAiReply(String(j.reply).slice(0, 1500));
     return {
-      reply: String(j.reply).slice(0, 1500),
+      reply: san.safe,
       visa_tag: tag,
-      // só conclui se houver tag válida (regra: não transfere sem identificar o visto)
-      dados_coletados: !!j.dados_coletados && !!tag
+      // só conclui se houver tag válida E a resposta não tiver sido bloqueada pelo filtro.
+      dados_coletados: !san.blocked && !!j.dados_coletados && !!tag
     };
   }
   // Fallback: extrai o texto do "reply" mesmo de JSON sujo/truncado (sem parsear o objeto inteiro),
@@ -241,13 +267,13 @@ async function getNovoLeadReply(convoId, leadName) {
     if (rm && rm[1].trim()) {
       const txt = rm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
       const tm = raw.match(/"visa_tag"\s*:\s*"([^"]*)"/);
-      return { reply: txt.slice(0, 1500), visa_tag: normalizeServiceTag(tm ? tm[1] : ''), dados_coletados: false };
+      return { reply: sanitizeAiReply(txt.slice(0, 1500)).safe, visa_tag: normalizeServiceTag(tm ? tm[1] : ''), dados_coletados: false };
     }
   }
   // Se parece JSON (mesmo truncado tipo {"reply":) mas não deu pra extrair, NÃO envia o cru ao cliente.
   if (raw.trim().startsWith('{') || raw.includes('"reply"')) return null;
   // Texto simples (sem JSON) → usa como resposta, sem concluir
-  return { reply: String(raw).trim().slice(0, 1500), visa_tag: '', dados_coletados: false };
+  return { reply: sanitizeAiReply(String(raw).trim().slice(0, 1500)).safe, visa_tag: '', dados_coletados: false };
 }
 
 // Follow-up (Tratamento inicial, colunas 2-3): devolve texto ou null
@@ -262,7 +288,9 @@ async function getFollowUpReply(convoId, leadName, tentativa) {
     'Responda APENAS com o texto da mensagem (sem JSON, sem aspas, sem explicações). ' +
     'Jamais cite preços, valores ou prazos (ver REGRAS INVIOLÁVEIS).';
   const txt = await callGemini(cfg, system, contents, false);
-  return String(txt).trim().slice(0, 1200) || null;
+  const san = sanitizeAiReply(String(txt).trim().slice(0, 1200));
+  // No follow-up, se a resposta cair no filtro (preço/@/link inventado), NÃO envia nada nesta rodada.
+  return san.blocked ? null : (san.safe || null);
 }
 
 module.exports = { getAiSettings, saveAiSettings, callGemini, getNovoLeadReply, getFollowUpReply, AI_DEFAULTS: DEFAULTS };
