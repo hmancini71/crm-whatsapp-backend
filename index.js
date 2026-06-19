@@ -1,3 +1,8 @@
+// Fuso horário OBRIGATÓRIO do Brasil (GMT-3) para TODO o backend — antes de qualquer uso de Date.
+// Assim, toda hora/data gerada no servidor (horas das mensagens, logs, agregações) fica em Brasília,
+// independentemente do fuso do servidor (Hetzner costuma ser UTC).
+process.env.TZ = 'America/Sao_Paulo';
+
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
