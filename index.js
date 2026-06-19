@@ -2703,6 +2703,33 @@ async function archiveGhostDuplicates() {
   } catch (e) { console.error('[dedup fantasma]', e && e.message); }
 }
 
+// PONTUAL (uma única vez, guardado por flag em app_settings): aplica a tag de serviço padrão
+// "A01 - 1 visto amer B1B2" a TODOS os leads ativos que estão SEM tag de serviço. Pedido pontual
+// do Henry em 2026-06-19. NÃO se repete — mesmo em deploys/restarts futuros (flag svc_tag_backfill_v1).
+async function backfillServiceTagOnce() {
+  try {
+    const FLAG = 'svc_tag_backfill_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return; // já executou — não repete
+    const TAG = 'A01 - 1 visto amer B1B2';
+    const rows = await allRows("SELECT id, tags FROM leads WHERE archived = 0");
+    let n = 0;
+    for (const r of rows) {
+      let t = [];
+      try { t = r.tags ? JSON.parse(r.tags) : []; } catch (e) { t = []; }
+      const hasSvc = Array.isArray(t) && t.length && String(t[0] || '').trim() !== '';
+      if (hasSvc) continue;
+      await runQuery("UPDATE leads SET tags = ? WHERE id = ?", [JSON.stringify([TAG]), r.id]);
+      n++;
+    }
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [FLAG, new Date().toISOString()]
+    );
+    console.log(`[backfill tag serviço] aplicada "${TAG}" a ${n} lead(s) sem tag. Flag ${FLAG} marcada — não repete.`);
+  } catch (e) { console.error('[backfill tag serviço]', e && e.message); }
+}
+
 async function reconcileNovoLeads() {
   try {
     let autoMsg = null;
@@ -2767,6 +2794,8 @@ app.listen(PORT, async () => {
   // Dedup de leads fantasma (duplicatas sem telefone do mesmo nome) — no boot e a cada 30 min.
   try { await archiveGhostDuplicates(); } catch (e) { console.error('[dedup fantasma boot]', e && e.message); }
   setInterval(() => { archiveGhostDuplicates().catch(() => {}); }, 30 * 60 * 1000);
+  // PONTUAL: aplica a tag de serviço padrão aos leads sem tag (uma única vez; flag impede repetir).
+  try { await backfillServiceTagOnce(); } catch (e) { console.error('[backfill tag serviço boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
   // Critério SEGURO: só desmarca quem tem nome de UM token e NÃO tem e-mail — esses só podem
   // ter sido marcados pela regra frouxa (não dá pra ter casado por e-mail nem por 2 tokens).
