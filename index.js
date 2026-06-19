@@ -2271,6 +2271,10 @@ app.post('/api/contracts', authenticateToken, async (req, res) => {
 app.post('/api/leads', authenticateToken, async (req, res) => {
   const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: "Nome é obrigatório" });
+  // Regra: todo lead precisa de telefone OU e-mail (necessário p/ casar com a conversa e o rastreamento).
+  const _hasPhone = String(phone || '').replace(/\D/g, '').length >= 8;
+  const _hasEmail = /.+@.+\..+/.test(String(email || '').trim());
+  if (!_hasPhone && !_hasEmail) return res.status(400).json({ error: "Informe telefone OU e-mail (todo lead precisa de pelo menos um)." });
   try {
     const id = 'l_' + Math.random().toString(36).substr(2, 9);
     const createdAt = new Date().toISOString().slice(0, 10);
@@ -2556,6 +2560,17 @@ app.post('/api/settings/integrations', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Deriva o CANAL de origem a partir do rastreamento: "Google Ads", "Meta Ads", "Orgânico" ou a
+// própria fonte (capitalizada) quando for outra origem paga conhecida pela utm_source.
+function deriveChannel(tk) {
+  const src = String(tk.utm_source || '').toLowerCase();
+  const med = String(tk.utm_medium || '').toLowerCase();
+  if (tk.gclid || /google|adwords|gads/.test(src)) return 'Google Ads';
+  if (tk.fbclid || /facebook|meta|instagram|\bfb\b|\big\b/.test(src) || /facebook|meta|instagram/.test(med)) return 'Meta Ads';
+  if (src && src !== 'direct' && src !== '(direct)') return src.charAt(0).toUpperCase() + src.slice(1);
+  return 'Orgânico';
+}
+
 // API de ENTRADA: recebe leads/rastreamento do marketing digital.
 // Body: { name, phone, email, value, service, source, utm_source, utm_medium,
 //         utm_campaign, utm_term, utm_content, gclid, fbclid, landing_page }
@@ -2575,10 +2590,13 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
       return res.status(400).json({ error: 'Informe ao menos name/contact_name, phone/contact_phone ou email/contact_email' });
     }
     const tracking = {};
-    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid', 'landing_page',
-     'referrer', 'msclkid', 'device_type', 'title', 'destination', 'dpi_local', 'dpi_session'].forEach(k => {
-      if (b[k]) tracking[k] = String(b[k]).slice(0, 500);
+    // Captura TODOS os parâmetros utm_* (inclusive utm_id, utm_adset, utm_ad, utm_placement, utm_keyword,
+    // etc.) + os campos de rastreamento conhecidos. Assim nada de UTM é descartado (ROI granular).
+    const KNOWN_TRACK = ['gclid', 'fbclid', 'landing_page', 'referrer', 'msclkid', 'device_type', 'title', 'destination', 'dpi_local', 'dpi_session'];
+    Object.keys(b).forEach(k => {
+      if ((/^utm_/i.test(k) || KNOWN_TRACK.includes(k)) && b[k]) tracking[k] = String(b[k]).slice(0, 500);
     });
+    tracking.channel = deriveChannel(tracking); // "Google Ads" / "Meta Ads" / "Orgânico" / <fonte>
     tracking.received_at = new Date().toISOString();
     const digits = String(phone || '').replace(/\D/g, '');
     let existing = null;
