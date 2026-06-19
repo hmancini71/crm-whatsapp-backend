@@ -787,6 +787,29 @@ function last7DaysSP() {
   }
   return out;
 }
+// Intervalo de dias (Brasília) de fromIso..toIso (YYYY-MM-DD), inclusivo. Sem from/to => últimos
+// `defDays` dias (padrão 15). Limita a 92 dias. Cada item: { iso, label "dd/mm/aa (wd)", value:0 }.
+function daysRangeSP(fromIso, toIso, defDays) {
+  const isISO = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+  const today = _spDateFmt.format(new Date());
+  const end = isISO(toIso) ? toIso : today;
+  const eMsRaw = Date.parse(end + 'T00:00:00Z');
+  let start = isISO(fromIso)
+    ? fromIso
+    : new Date(eMsRaw - (Math.max(1, defDays || 15) - 1) * 86400000).toISOString().slice(0, 10);
+  let sMs = Date.parse(start + 'T00:00:00Z'), eMs = eMsRaw;
+  if (isNaN(sMs) || isNaN(eMs)) { sMs = Date.parse(today + 'T00:00:00Z'); eMs = sMs; }
+  if (sMs > eMs) { const t = sMs; sMs = eMs; eMs = t; }
+  if ((eMs - sMs) / 86400000 > 92) sMs = eMs - 92 * 86400000;
+  const out = [];
+  for (let ms = sMs; ms <= eMs; ms += 86400000) {
+    const iso = new Date(ms).toISOString().slice(0, 10);
+    const wd = _spWdFmt.format(new Date(ms + 12 * 3600 * 1000)).replace(/\.$/, '').toLowerCase();
+    const parts = iso.split('-');
+    out.push({ iso, label: `${parts[2]}/${parts[1]}/${parts[0].slice(2)} (${wd})`, value: 0 });
+  }
+  return out;
+}
 
 // 6. Dashboard Route (counts only active/non-archived leads)
 app.get('/api/dashboard', authenticateToken, async (req, res) => {
@@ -814,9 +837,9 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     // WhatsApp accounts status
     const whatsappAccounts = await allRows("SELECT id, label, number, color, status, unread FROM whatsapp_accounts");
 
-    // Novos leads REAIS por dia (últimos 7 dias, fuso de São Paulo).
+    // Novos leads REAIS por dia no período (from/to; padrão últimos 15 dias, fuso de São Paulo).
     const weeklyLeads = [];
-    for (const dia of last7DaysSP()) {
+    for (const dia of daysRangeSP(req.query.from, req.query.to, 15)) {
       const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ?", [dia.iso]);
       weeklyLeads.push({ day: dia.label, value: (r && r.count) || 0 });
     }
@@ -843,12 +866,13 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
 });
 
 // 6b. Dashboard: contratos assinados por dia (e-mails "Contrato Assinado pelo Cliente:")
-let _signedCache = { ts: 0, data: null };
+let _signedCache = { key: '', ts: 0, data: null };
 app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) => {
-  // monta os 7 dias (mesma ordem/rótulo do weeklyLeads, fuso de São Paulo)
-  const days = last7DaysSP();
-  // cache de 5 min (IMAP é lento; o front consulta com frequência)
-  if (_signedCache.data && (Date.now() - _signedCache.ts < 5 * 60 * 1000)) {
+  // monta os dias do período (from/to; padrão 15 dias, fuso de São Paulo)
+  const days = daysRangeSP(req.query.from, req.query.to, 15);
+  const cacheKey = (req.query.from || '') + '|' + (req.query.to || '');
+  // cache de 5 min POR período (IMAP é lento; o front consulta com frequência)
+  if (_signedCache.data && _signedCache.key === cacheKey && (Date.now() - _signedCache.ts < 5 * 60 * 1000)) {
     return res.json(_signedCache.data);
   }
   try {
@@ -863,12 +887,13 @@ app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) =
       await client.connect();
       const lock = await client.getMailboxLock('INBOX');
       try {
-        const since = new Date(); since.setDate(since.getDate() - 7); since.setHours(0, 0, 0, 0);
+        // Início do 1º dia do período (em UTC, com folga de 1 dia para o filtro IMAP SINCE).
+        const since = new Date(Date.parse(days[0].iso + 'T00:00:00Z') - 24 * 3600 * 1000);
         // Conta "Contrato Assinado pelo Cliente:".
         const matchSubj = (s) => s.includes('contrato assinado pelo cliente');
-        // Estratégia robusta: tenta SEARCH SINCE (todas as msgs dos últimos 7 dias);
+        // Estratégia robusta: tenta SEARCH SINCE (todas as msgs do período);
         // se falhar/vier vazio, faz fallback nas últimas 300 mensagens da caixa.
-        // Em ambos os casos, o que conta é o filtro de ASSUNTO + janela de 7 dias.
+        // Em ambos os casos, o que conta é o filtro de ASSUNTO + janela do período.
         let iter = null;
         try {
           const uids = await client.search({ since }, { uid: true });
@@ -897,7 +922,7 @@ app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) =
     console.error('signed-contracts error:', err && err.message);
   }
   const payload = { days: days.map(d => ({ day: d.label, value: d.value })) };
-  _signedCache = { ts: Date.now(), data: payload };
+  _signedCache = { key: cacheKey, ts: Date.now(), data: payload };
   res.json(payload);
 });
 
@@ -2422,19 +2447,16 @@ app.post('/api/ai/test', authenticateToken, async (req, res) => {
 // Dashboard: follow-ups automáticos (col 3-4) disparados por dia nos últimos 7 dias (fuso Brasília).
 app.get('/api/dashboard/followups-weekly', authenticateToken, async (req, res) => {
   try {
-    const DAY = 24 * 3600 * 1000;
-    const since = Date.now() - 7 * DAY;
-    const rows = await allRows("SELECT ts FROM followup_log WHERE ts >= ?", [since]);
+    const range = daysRangeSP(req.query.from, req.query.to, 15);
+    // Janela em ms: do início do 1º dia ao fim do último dia, em Brasília (UTC-3).
+    const sinceMs = Date.parse(range[0].iso + 'T00:00:00Z') + 3 * 3600 * 1000;
+    const untilMs = Date.parse(range[range.length - 1].iso + 'T00:00:00Z') + 3 * 3600 * 1000 + 24 * 3600 * 1000;
+    const rows = await allRows("SELECT ts FROM followup_log WHERE ts >= ? AND ts < ?", [sinceMs, untilMs]);
     // Bucket por dia em Brasília (UTC-3): desloca 3h e pega a data UTC → AAAA-MM-DD local.
     const keyBr = (ms) => new Date(ms - 3 * 3600 * 1000).toISOString().slice(0, 10);
     const counts = {};
     rows.forEach(r => { const k = keyBr(r.ts); counts[k] = (counts[k] || 0) + 1; });
-    const days = [];
-    for (let i = 6; i >= 0; i--) {
-      const k = keyBr(Date.now() - i * DAY);
-      const p = k.split('-');
-      days.push({ day: k, label: p[2] + '/' + p[1], count: counts[k] || 0 });
-    }
+    const days = range.map(d => { const p = d.iso.split('-'); return { day: d.iso, label: p[2] + '/' + p[1], count: counts[d.iso] || 0 }; });
     const total = days.reduce((s, d) => s + d.count, 0);
     res.json({ days, total });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2443,20 +2465,16 @@ app.get('/api/dashboard/followups-weekly', authenticateToken, async (req, res) =
 // Dashboard: bloqueios do filtro anti-invenção da IA por dia (últimos 7 dias, Brasília) + por tipo + amostras.
 app.get('/api/dashboard/guardrail-weekly', authenticateToken, async (req, res) => {
   try {
-    const DAY = 24 * 3600 * 1000;
-    const since = Date.now() - 7 * DAY;
-    const rows = await allRows("SELECT ts, kind FROM ai_guardrail_log WHERE ts >= ?", [since]);
+    const range = daysRangeSP(req.query.from, req.query.to, 15);
+    const sinceMs = Date.parse(range[0].iso + 'T00:00:00Z') + 3 * 3600 * 1000;
+    const untilMs = Date.parse(range[range.length - 1].iso + 'T00:00:00Z') + 3 * 3600 * 1000 + 24 * 3600 * 1000;
+    const rows = await allRows("SELECT ts, kind FROM ai_guardrail_log WHERE ts >= ? AND ts < ?", [sinceMs, untilMs]);
     const keyBr = (ms) => new Date(ms - 3 * 3600 * 1000).toISOString().slice(0, 10);
     const counts = {}, byKind = {};
     rows.forEach(r => { const k = keyBr(r.ts); counts[k] = (counts[k] || 0) + 1; byKind[r.kind || '?'] = (byKind[r.kind || '?'] || 0) + 1; });
-    const days = [];
-    for (let i = 6; i >= 0; i--) {
-      const k = keyBr(Date.now() - i * DAY);
-      const p = k.split('-');
-      days.push({ day: k, label: p[2] + '/' + p[1], count: counts[k] || 0 });
-    }
+    const days = range.map(d => { const p = d.iso.split('-'); return { day: d.iso, label: p[2] + '/' + p[1], count: counts[d.iso] || 0 }; });
     const total = days.reduce((s, d) => s + d.count, 0);
-    const recentes = await allRows("SELECT ts, kind, sample FROM ai_guardrail_log ORDER BY ts DESC LIMIT 6");
+    const recentes = await allRows("SELECT ts, kind, sample FROM ai_guardrail_log WHERE ts >= ? AND ts < ? ORDER BY ts DESC LIMIT 6", [sinceMs, untilMs]);
     res.json({ days, total, byKind, recentes });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
