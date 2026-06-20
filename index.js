@@ -838,11 +838,37 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const whatsappAccounts = await allRows("SELECT id, label, number, color, status, unread FROM whatsapp_accounts");
 
     // Novos leads REAIS por dia no período (from/to; padrão últimos 15 dias, fuso de São Paulo).
+    const _range = daysRangeSP(req.query.from, req.query.to, 15);
     const weeklyLeads = [];
-    for (const dia of daysRangeSP(req.query.from, req.query.to, 15)) {
+    for (const dia of _range) {
       const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ?", [dia.iso]);
       weeklyLeads.push({ day: dia.label, value: (r && r.count) || 0 });
     }
+
+    // Leads por CANAL de origem por dia (MESMA base do weeklyLeads → o total por dia BATE com
+    // "Leads na Semana"). Canal derivado de lead.tracking; sem rastreamento = "Sem classificação".
+    const _byDay = {};
+    _range.forEach(d => { _byDay[d.iso] = { day: d.label, ga: 0, meta: 0, org: 0, semclass: 0, total: 0 }; });
+    const _allInRange = await allRows(
+      "SELECT createdAt, tracking FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?",
+      [_range[0].iso, _range[_range.length - 1].iso]
+    );
+    _allInRange.forEach(l => {
+      const k = String(l.createdAt || '').slice(0, 10);
+      const slot = _byDay[k]; if (!slot) return;
+      let cat = 'semclass';
+      if (l.tracking) {
+        try {
+          const tk = JSON.parse(l.tracking);
+          if (tk && typeof tk === 'object' && Object.keys(tk).length) {
+            const ch = deriveChannel(tk);
+            cat = (ch === 'Google Ads') ? 'ga' : (ch === 'Meta Ads') ? 'meta' : 'org';
+          }
+        } catch (e) {}
+      }
+      slot[cat]++; slot.total++;
+    });
+    const weeklyByChannel = _range.map(d => _byDay[d.iso]);
 
     res.json({
       metrics: {
@@ -857,6 +883,7 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
       },
       leadsBySource,
       weeklyLeads,
+      weeklyByChannel,
       recentActivity: [],
       whatsappAccounts
     });
