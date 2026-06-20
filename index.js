@@ -1299,6 +1299,73 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
   }
 });
 
+// 9a-bis. Inicia a conversa de WhatsApp de um lead que ainda NÃO tem conversa e envia a 1ª mensagem.
+// O front detecta automaticamente (sem botão extra): quando não há conversa, manda o texto por aqui.
+// Cria a conversa na linha escolhida (account) e dispara a mensagem real. Requer a linha conectada.
+app.post('/api/leads/:leadId/start-conversation', authenticateToken, async (req, res) => {
+  const { leadId } = req.params;
+  const account = String((req.body && req.body.account) || '').trim();
+  const text = String((req.body && req.body.text) || '').trim();
+  if (!text) return res.status(400).json({ error: 'Texto é obrigatório' });
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [leadId]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+    const jidLead = lead.whatsapp_jid || '';
+    const digits = String(lead.phone || '').replace(/\D/g, '');
+    if (!jidLead && digits.length < 8) {
+      return res.status(400).json({ error: 'Este lead não tem WhatsApp (telefone) para iniciar conversa.' });
+    }
+
+    // Linha de envio: a escolhida; senão a do lead; senão a 1ª sessão conectada.
+    const isOpen = (a) => sessions[a] && sessions[a].ws && sessions[a].ws.isOpen;
+    let accountId = account || lead.account || '';
+    if (!isOpen(accountId)) {
+      const connected = Object.keys(sessions).find(isOpen);
+      if (connected) accountId = connected;
+    }
+    if (!isOpen(accountId)) {
+      return res.status(409).json({ error: 'A linha de WhatsApp escolhida não está conectada. Conecte-a em Conexões e tente de novo.' });
+    }
+
+    // Já existe conversa? (por jid ou últimos 8 dígitos) → reaproveita em vez de duplicar.
+    const last8 = digits.slice(-8);
+    const all = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)");
+    let convo = all.find(c =>
+      (jidLead && c.whatsapp_jid === jidLead) ||
+      (last8.length === 8 && String(c.phone || '').replace(/\D/g, '').slice(-8) === last8) ||
+      (last8.length === 8 && String(c.whatsapp_jid || '').split('@')[0].replace(/\D/g, '').slice(-8) === last8)
+    ) || null;
+
+    if (!convo) {
+      const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
+      const nm = lead.name || (digits || 'Lead');
+      const av = String(nm).slice(0, 2).toUpperCase();
+      const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+      await runQuery(
+        "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [convoId, accountId, nm, String(lead.phone || ''), av, timeStr, 0, 0, jidLead || null, 0]
+      );
+      convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
+    }
+
+    // Envia a 1ª mensagem real pelo WhatsApp (mesma rotina do envio normal).
+    const messageObj = await sendWhatsAppMessage(accountId, convo.id, text);
+
+    // 1ª resposta humana: tira de "Novo lead" e move 'novo' → 'tratamento' (igual ao responder).
+    try {
+      await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'followup' WHERE id = ? AND stage = 'novo'", [lead.id]);
+      await runQuery("UPDATE leads SET priority = '' WHERE id = ? AND priority = 'novolead'", [lead.id]);
+      await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [lead.id]);
+    } catch (e) { /* ignore */ }
+
+    res.json({ conversation: { ...convo, account: accountId }, message: messageObj });
+  } catch (err) {
+    console.error('start-conversation error:', err && err.message);
+    res.status(500).json({ error: (err && err.message) || 'Falha ao iniciar conversa.' });
+  }
+});
+
 // 9b. Conversations Routes: Send Voice Note (audio, base64 in body)
 app.post('/api/conversations/:id/audio', authenticateToken, async (req, res) => {
   const { id } = req.params;
