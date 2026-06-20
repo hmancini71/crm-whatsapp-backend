@@ -2846,6 +2846,22 @@ async function backfillServiceTagOnce() {
   } catch (e) { console.error('[backfill tag serviço]', e && e.message); }
 }
 
+// Define wa5 e wa6 como PÓS-VENDA por padrão (são celulares de pós-venda). Faz MERGE: só preenche o
+// tipo quando ainda não houver um definido para a linha — não sobrescreve o que o Henry já configurou.
+async function ensurePosVendaDefaults() {
+  try {
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
+    let m = {}; try { m = row && row.value ? JSON.parse(row.value) : {}; } catch (e) { m = {}; }
+    let changed = false;
+    if (!m.wa5) { m.wa5 = 'pos'; changed = true; }
+    if (!m.wa6) { m.wa6 = 'pos'; changed = true; }
+    if (changed) {
+      await runQuery("INSERT INTO app_settings (key, value) VALUES ('wa_sale_types', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(m)]);
+      console.log('[wa pós-venda] wa5/wa6 definidos como pós-venda por padrão.');
+    }
+  } catch (e) { console.error('[wa pós-venda default]', e && e.message); }
+}
+
 async function reconcileNovoLeads() {
   try {
     let autoMsg = null;
@@ -2912,6 +2928,8 @@ app.listen(PORT, async () => {
   setInterval(() => { archiveGhostDuplicates().catch(() => {}); }, 30 * 60 * 1000);
   // PONTUAL: aplica a tag de serviço padrão aos leads sem tag (uma única vez; flag impede repetir).
   try { await backfillServiceTagOnce(); } catch (e) { console.error('[backfill tag serviço boot]', e && e.message); }
+  // wa5/wa6 = pós-venda por padrão (não sobrescreve configuração existente).
+  try { await ensurePosVendaDefaults(); } catch (e) { console.error('[wa pós-venda boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
   // Critério SEGURO: só desmarca quem tem nome de UM token e NÃO tem e-mail — esses só podem
   // ter sido marcados pela regra frouxa (não dá pra ter casado por e-mail nem por 2 tokens).
