@@ -2395,6 +2395,20 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
   const _hasEmail = /.+@.+\..+/.test(String(email || '').trim());
   if (!_hasPhone && !_hasEmail) return res.status(400).json({ error: "Informe telefone OU e-mail (todo lead precisa de pelo menos um)." });
   try {
+    // NUNCA DUPLICAR: se já existir um lead ATIVO com o mesmo telefone (últimos 8 dígitos) OU o mesmo
+    // e-mail, devolve o existente em vez de criar outro card.
+    const _last8 = String(phone || '').replace(/\D/g, '').slice(-8);
+    const _em = String(email || '').trim().toLowerCase();
+    let dup = null;
+    if (_last8.length === 8) {
+      dup = await getRow("SELECT * FROM leads WHERE archived = 0 AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", [`%${_last8}%`]);
+    }
+    if (!dup && _em) {
+      dup = await getRow("SELECT * FROM leads WHERE archived = 0 AND email IS NOT NULL AND LOWER(TRIM(email)) = ? LIMIT 1", [_em]);
+    }
+    if (dup) {
+      return res.json({ ...dup, tags: dup.tags ? JSON.parse(dup.tags) : [], existed: true });
+    }
     const id = 'l_' + Math.random().toString(36).substr(2, 9);
     const createdAt = new Date().toISOString().slice(0, 10);
     const safeTags = Array.isArray(tags) ? tags.filter(t => typeof t === 'string' && t) : [];

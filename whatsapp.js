@@ -484,7 +484,17 @@ async function connectWhatsApp(id, isReconnect = false) {
         try { if (sock.user && sock.user.id) ourNumber = '+' + sock.user.id.split(':')[0].split('@')[0]; } catch (e) {}
         // Check if phone matches any lead (active OR archived); if archived, restore it
         const searchNumber = fromJid.split('@')[0];
-        let lead = await getRow("SELECT * FROM leads WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [fromJid, `%${searchNumber}%`]);
+        // Dedup ROBUSTO: procura o lead pelos ÚLTIMOS 8 DÍGITOS do telefone (normalizado), além do jid.
+        // Evita criar duplicata quando o telefone foi salvo formatado/sem DDI — causa nº 1 de duplicação.
+        const _pdig = String(phone || '').replace(/\D/g, '');
+        const _last8 = _pdig.length >= 8 ? _pdig.slice(-8) : '';
+        let lead = _last8
+          ? await getRow("SELECT * FROM leads WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?)", [fromJid, `%${_last8}%`])
+          : await getRow("SELECT * FROM leads WHERE whatsapp_jid = ?", [fromJid]);
+        // Achou por telefone mas sem jid salvo? Carimba o jid para futuras buscas casarem direto.
+        if (lead && !lead.whatsapp_jid && fromJid) {
+          try { await runQuery("UPDATE leads SET whatsapp_jid = ? WHERE id = ?", [fromJid, lead.id]); } catch (e) {}
+        }
         if (!lead) {
           const leadId = 'l_' + Math.random().toString(36).substr(2, 9);
           const createdAt = new Date().toISOString().slice(0, 10);
