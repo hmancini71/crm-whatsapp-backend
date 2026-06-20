@@ -243,6 +243,9 @@ db.serialize(() => {
       // Remoção MANUAL e persistente do selo "Assinado" (1 = removido à mão).
       // Quando 1, o lead nunca é re-marcado como assinado pela varredura de e-mails.
       if (!cols.find(c => c.name === 'signed_override')) db.run("ALTER TABLE leads ADD COLUMN signed_override INTEGER DEFAULT 0");
+      // Motivo do declínio (mostrado no card). Preenchido pelo auto-declínio (regra 1.3b) e
+      // também utilizável quando o motivo é definido manualmente.
+      if (!cols.find(c => c.name === 'decline_reason')) db.run("ALTER TABLE leads ADD COLUMN decline_reason TEXT DEFAULT NULL");
     }
   });
 

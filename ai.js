@@ -88,7 +88,23 @@ E-mail: contato@valevisto.com.br | WhatsApp (somente mensagens): (12) 98181-8964
     'pergunte se o cliente ainda tem interesse e se ficou alguma dúvida. Não seja insistente, ' +
     'não invente informações e não repita follow-ups anteriores.',
   fu_hours: 24,
-  fu_max: 2
+  fu_max: 2,
+  // Regras de Movimentação de Cards (editável em Configurações). É a fonte da verdade que orienta
+  // as decisões de movimentação da IA. As regras temporizadas (bolinha, "não é demanda", auto-declínio
+  // 48h) também seguem esta descrição, mas são aplicadas de forma determinística no backend.
+  movement_rules: `REGRAS DE MOVIMENTAÇÃO DE CARDS (vigentes)
+
+REGRA GERAL: não existe movimentação automática de cards entre colunas, exceto nas situações abaixo.
+
+1.1) NOVOS LEADS → TRATAMENTO INICIAL (coluna 1): na coluna "Novos leads", quando a IA já tiver obtido (a) o NOME do cliente, (b) o OBJETIVO/serviço (tag de visto, sem ambiguidade) e (c) já tiver PERGUNTADO qual o melhor horário para um consultor ligar — a confirmação do horário é SEMPRE humana, e o lead é transferido mesmo que o cliente não informe/recuse um horário —, o card é movido para a coluna 1 do "Tratamento inicial" com a tag "Novo lead". A tag "Novo lead" sai quando um humano responder.
+
+1.2) BOLINHA DE TEMPO (colunas 1, 2, 3 e 4 do Tratamento): quando o cliente enviar uma mensagem, acender a bolinha de marcação de tempo (verde até 4 min, amarelo 5–8 min, vermelho acima de 8 min) e mover o card para o TOPO da coluna 1, mantendo os que esperam há mais tempo acima.
+
+1.3a) "A ÚLTIMA MENSAGEM DO CLIENTE NÃO É UMA DEMANDA": ao marcar, remover a bolinha e tratar como se o cliente não tivesse mandado mensagem (o card sai da coluna 1). Se o cliente enviar uma NOVA mensagem, acender a bolinha novamente e reaplicar a regra 1.2.
+
+1.3b) SEM RESPOSTA APÓS FOLLOW-UPS (colunas 3 e 4): depois de executada toda a rotina de follow-up (quantidade e intervalo definidos em Configurações), o lead que NÃO respondeu é movido para "Lead declinou/cancelou" 48h após a última tentativa.
+
+OBSERVAÇÃO: quando um atendente humano responde manualmente a um lead em "Novos leads", o card também é movido para o "Tratamento inicial".`
 };
 
 // Regras invioláveis anti-alucinação — injetadas em TODA geração da IA, no código (não editáveis),
@@ -240,10 +256,12 @@ async function getNovoLeadReply(convoId, leadName) {
   const contents = await buildContents(convoId, 20);
   if (!contents.length) return null;
   const system = GUARDRAILS + '\n\n' + cfg.novo_instructions +
+    (cfg.movement_rules ? '\n\n[REGRAS DE MOVIMENTAÇÃO DE CARDS — siga rigorosamente; valem acima de qualquer interpretação sua sobre quando transferir o lead]\n' + cfg.movement_rules : '') +
     '\n\nContexto: o lead chama-se "' + (leadName || 'desconhecido') + '" e está na etapa "Novo Leads" do CRM.' +
     '\n\n[FORMATO DE SAÍDA OBRIGATÓRIO] Responda SEMPRE em JSON válido EXATO, sem nada fora do JSON: ' +
-    '{"reply": "texto da mensagem ao cliente", "visa_tag": "código exato da tabela do enunciado (ex.: A01) ou string vazia se ainda não identificou", "dados_coletados": true ou false}. ' +
-    'Regra de transferência: "dados_coletados" só pode ser true quando você já souber o NOME do cliente E tiver escolhido um "visa_tag" específico da tabela (sem ambiguidade). ' +
+    '{"reply": "texto da mensagem ao cliente", "visa_tag": "código exato da tabela do enunciado (ex.: A01) ou string vazia se ainda não identificou", "horario_contato": "melhor horário/dia que o cliente informou para um consultor LIGAR, ou string vazia", "dados_coletados": true ou false}. ' +
+    'Fluxo antes de concluir, nesta ordem: (1) descubra o NOME do cliente; (2) identifique o serviço (visa_tag) sem ambiguidade; (3) pergunte qual o melhor horário para um de nossos consultores ENTRAR EM CONTATO POR TELEFONE. NUNCA confirme o horário você mesmo (a confirmação é sempre humana) — apenas registre em "horario_contato" o que o cliente responder. ' +
+    'Regra de transferência: "dados_coletados" só pode ser true depois de você já ter o NOME, um "visa_tag" específico E JÁ TER PERGUNTADO o horário do contato telefônico. Você PODE concluir mesmo que o cliente não informe ou recuse um horário (deixe "horario_contato" vazio) — desde que a pergunta já tenha sido feita. ' +
     'Enquanto o serviço estiver ambíguo, mantenha visa_tag vazio e dados_coletados=false e faça mais UMA pergunta.' +
     '\n\nLEMBRETE FINAL: cumpra as REGRAS INVIOLÁVEIS do início. JAMAIS escreva preços, valores, taxas ou prazos no campo "reply" — qualquer número desses seria FALSO. Se o cliente perguntar valor/preço, o "reply" deve dizer que um consultor informará os valores exatos.';
   const raw = await callGemini(cfg, system, contents, true);
@@ -258,6 +276,7 @@ async function getNovoLeadReply(convoId, leadName) {
     return {
       reply: san.safe,
       visa_tag: tag,
+      horario_contato: (j.horario_contato ? String(j.horario_contato).slice(0, 200) : ''),
       // só conclui se houver tag válida E a resposta não tiver sido bloqueada pelo filtro.
       dados_coletados: !san.blocked && !!j.dados_coletados && !!tag
     };

@@ -580,10 +580,16 @@ async function connectWhatsApp(id, isReconnect = false) {
               // IA respondeu → zera o controle de tempo (fomos os últimos a falar)
               await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [aiLead.id]);
               if (ai.dados_coletados && ai.visa_tag) {
-                // SÓ transfere após identificar o serviço: grava a TAG do serviço, marca "Novo lead"
-                // e move p/ o Tratamento inicial (1ª coluna). "Novo lead" sai quando um humano responder.
+                // SÓ transfere após identificar o serviço E ter perguntado o horário do contato telefônico:
+                // grava a TAG do serviço, marca "Novo lead" e move p/ o Tratamento inicial (1ª coluna).
+                // "Novo lead" sai quando um humano responder.
                 await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead', tags = ? WHERE id = ? AND stage = 'novo'", [JSON.stringify([ai.visa_tag]), aiLead.id]);
-                console.log(`[IA] "${aiLead.name}": serviço identificado (${ai.visa_tag}) → Tratamento inicial + tag "Novo lead".`);
+                // Registra nos comentários o horário que o cliente informou para o consultor ligar (se houver).
+                if (ai.horario_contato) {
+                  const note = '📞 Horário p/ ligar (informado pelo cliente): ' + String(ai.horario_contato).slice(0, 200);
+                  await runQuery("UPDATE leads SET comments = TRIM(COALESCE(comments,'') || char(10) || ?) WHERE id = ?", [note, aiLead.id]);
+                }
+                console.log(`[IA] "${aiLead.name}": serviço identificado (${ai.visa_tag})${ai.horario_contato ? ', horário p/ ligar: ' + ai.horario_contato : ''} → Tratamento inicial + tag "Novo lead".`);
               } else {
                 console.log(`[IA] "${aiLead.name}": IA respondeu (ainda coletando nome/serviço).`);
               }

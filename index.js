@@ -2493,7 +2493,7 @@ app.post('/api/settings/ai', authenticateToken, async (req, res) => {
   try {
     const cur = await getAiSettings();
     const b = req.body || {};
-    ['gemini_key', 'model', 'novo_instructions', 'fu_instructions'].forEach(k => { if (b[k] !== undefined) cur[k] = String(b[k]); });
+    ['gemini_key', 'model', 'novo_instructions', 'fu_instructions', 'movement_rules'].forEach(k => { if (b[k] !== undefined) cur[k] = String(b[k]); });
     ['enabled', 'novo_enabled', 'fu_enabled'].forEach(k => { if (b[k] !== undefined) cur[k] = !!b[k]; });
     if (b.fu_hours !== undefined) cur.fu_hours = Math.max(1, Math.min(168, Number(b.fu_hours) || 24));
     if (b.fu_max !== undefined) cur.fu_max = Math.max(0, Math.min(30, Number(b.fu_max) || 2));
@@ -2607,6 +2607,47 @@ async function aiFollowUpSweep() {
     }
   } catch (e) { console.error('[IA follow-up sweep]', e && e.message); }
   finally { _fuRunning = false; }
+}
+
+// ===== Regra 1.3b: auto-declínio por falta de resposta após os follow-ups =====
+// Lead nas colunas 3/4 do Tratamento (stage 'tratamento', sem prioridade, sem bolinha = cliente NÃO
+// respondeu) que JÁ recebeu TODAS as tentativas de follow-up (ai_fu_count >= fu_max) e cuja última
+// tentativa foi há mais de 48h → move para "Lead declinou/cancelou". Roda no boot e a cada 30 min.
+const AUTO_DECLINE_AFTER_MS = 48 * 3600 * 1000; // 48h após a última tentativa (definido com o Henry)
+let _declineRunning = false;
+async function autoDeclineExhaustedFollowups() {
+  if (_declineRunning) return;
+  _declineRunning = true;
+  try {
+    const cfg = await getAiSettings();
+    const fuMax = cfg.fu_max || 2;
+    if (fuMax < 1) return; // follow-up desligado → não declina automaticamente
+    const cutoff = Date.now() - AUTO_DECLINE_AFTER_MS;
+    const leads = await allRows(
+      "SELECT * FROM leads WHERE archived = 0 AND stage = 'tratamento' AND (priority IS NULL OR priority = '') " +
+      "AND lastClientReply IS NULL AND COALESCE(ai_fu_count,0) >= ? AND COALESCE(ai_fu_last,0) > 0 AND COALESCE(ai_fu_last,0) <= ?",
+      [fuMax, cutoff]
+    );
+    let moved = 0;
+    for (const l of leads) {
+      // Segurança extra: se a última mensagem da conversa for do cliente, ele respondeu → NÃO declina.
+      const convo = await findConvoForLead(l);
+      if (convo) {
+        const last = await getRow("SELECT `from` FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
+        if (last && last.from === 'them') continue;
+      }
+      const reason = 'Sem resposta após ' + (l.ai_fu_count || fuMax) + ' follow-up(s)';
+      await runQuery("UPDATE leads SET stage = 'declinado', priority = '', decline_reason = ? WHERE id = ? AND stage = 'tratamento'", [reason, l.id]);
+      const note = '🚫 [Automático] Movido para "Lead declinou/cancelou": ' + reason +
+        ', 48h após a última tentativa (' + new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) + ').';
+      await runQuery("UPDATE leads SET comments = TRIM(COALESCE(comments,'') || char(10) || ?) WHERE id = ?", [note, l.id]);
+      moved++;
+      try { const full = await getRow("SELECT * FROM leads WHERE id = ?", [l.id]); if (full) sendWebhook('lead.stage_changed', { ...full, tags: full.tags ? JSON.parse(full.tags) : [] }); } catch (e) {}
+      console.log(`[auto-declínio] "${l.name}" → Lead declinou/cancelou (sem resposta após ${l.ai_fu_count || fuMax} follow-up(s)).`);
+    }
+    if (moved) console.log(`[auto-declínio] total: ${moved} lead(s) movidos para declinou/cancelou.`);
+  } catch (e) { console.error('[auto-declínio]', e && e.message); }
+  finally { _declineRunning = false; }
 }
 
 // ===== Integrações: API de entrada (marketing) + export + configurações =====
@@ -2898,4 +2939,7 @@ app.listen(PORT, async () => {
   // IA: follow-up das colunas 2-3 do Tratamento inicial (a cada 30 min; 1ª passada após 2 min)
   setTimeout(() => { aiFollowUpSweep().catch(() => {}); }, 2 * 60 * 1000);
   setInterval(() => { aiFollowUpSweep().catch(() => {}); }, 30 * 60 * 1000);
+  // Regra 1.3b: auto-declínio dos que não responderam após os follow-ups (boot + a cada 30 min).
+  setTimeout(() => { autoDeclineExhaustedFollowups().catch(() => {}); }, 3 * 60 * 1000);
+  setInterval(() => { autoDeclineExhaustedFollowups().catch(() => {}); }, 30 * 60 * 1000);
 });
