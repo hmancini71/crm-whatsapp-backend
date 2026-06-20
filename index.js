@@ -2860,6 +2860,51 @@ async function archiveGhostDuplicates() {
   } catch (e) { console.error('[dedup fantasma]', e && e.message); }
 }
 
+// PONTUAL (uma única vez, guardado por flag): reconcilia duplicatas de MESMO TELEFONE (últimos 8 dígitos)
+// entre leads ATIVOS. Mantém o card na etapa MAIS AVANÇADA (em empate, o de contato mais recente / com
+// mais dados), migra para ele e-mail/rastreamento/recv_number que faltem, e ARQUIVA os demais (recuperável).
+async function reconcileDuplicatesByPhoneOnce() {
+  try {
+    const FLAG = 'dup_phone_reconcile_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const leads = await allRows("SELECT * FROM leads WHERE archived = 0 AND phone IS NOT NULL AND TRIM(phone) <> ''");
+    const norm = (p) => String(p || '').replace(/\D/g, '');
+    const groups = {};
+    leads.forEach(l => { const d = norm(l.phone); if (d.length >= 8) { const k = d.slice(-8); (groups[k] = groups[k] || []).push(l); } });
+    const RANK = { convertida: 6, clientes_antigos: 5, followup: 4, proposta: 3, tratamento: 2, novo: 1, declinado: 0 };
+    let archived = 0, gruposCorrigidos = 0;
+    for (const k of Object.keys(groups)) {
+      const arr = groups[k];
+      if (arr.length < 2) continue;
+      arr.sort((a, b) => {
+        const ra = (RANK[a.stage] != null ? RANK[a.stage] : 1), rb = (RANK[b.stage] != null ? RANK[b.stage] : 1);
+        if (ra !== rb) return rb - ra;                                   // etapa mais avançada primeiro
+        const ta = Number(a.last_client_ts) || 0, tb = Number(b.last_client_ts) || 0;
+        if (ta !== tb) return tb - ta;                                   // contato do cliente mais recente
+        const da = (a.email ? 1 : 0) + (a.tracking ? 1 : 0), db = (b.email ? 1 : 0) + (b.tracking ? 1 : 0);
+        return db - da;                                                  // mais completo
+      });
+      const keep = arr[0];
+      for (let i = 1; i < arr.length; i++) {
+        const dupL = arr[i];
+        // migra para o card mantido os dados úteis que faltarem nele.
+        const sets = [], vals = [];
+        if ((!keep.email || keep.email === '') && dupL.email) { sets.push('email = ?'); vals.push(dupL.email); keep.email = dupL.email; }
+        if ((!keep.tracking || keep.tracking === '') && dupL.tracking) { sets.push('tracking = ?'); vals.push(dupL.tracking); keep.tracking = dupL.tracking; }
+        if ((!keep.recv_number || keep.recv_number === '') && dupL.recv_number) { sets.push('recv_number = ?'); vals.push(dupL.recv_number); keep.recv_number = dupL.recv_number; }
+        if (sets.length) { vals.push(keep.id); await runQuery("UPDATE leads SET " + sets.join(', ') + " WHERE id = ?", vals); }
+        await runQuery("UPDATE leads SET archived = 1 WHERE id = ?", [dupL.id]);
+        archived++;
+        console.log(`[dedup telefone] arquivado "${dupL.name}" (${dupL.stage}) — duplicata de "${keep.name}" (${keep.stage}); telefone …${k}.`);
+      }
+      gruposCorrigidos++;
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[dedup telefone] concluído: ${archived} duplicata(s) arquivada(s) em ${gruposCorrigidos} grupo(s) de mesmo telefone.`);
+  } catch (e) { console.error('[dedup telefone]', e && e.message); }
+}
+
 // PONTUAL (uma única vez, guardado por flag em app_settings): aplica a tag de serviço padrão
 // "A01 - 1 visto amer B1B2" a TODOS os leads ativos que estão SEM tag de serviço. Pedido pontual
 // do Henry em 2026-06-19. NÃO se repete — mesmo em deploys/restarts futuros (flag svc_tag_backfill_v1).
@@ -2971,6 +3016,8 @@ app.listen(PORT, async () => {
   try { await backfillServiceTagOnce(); } catch (e) { console.error('[backfill tag serviço boot]', e && e.message); }
   // wa5/wa6 = pós-venda por padrão (não sobrescreve configuração existente).
   try { await ensurePosVendaDefaults(); } catch (e) { console.error('[wa pós-venda boot]', e && e.message); }
+  // PONTUAL: reconcilia duplicatas JÁ existentes de mesmo telefone (arquiva, mantendo a etapa mais avançada).
+  try { await reconcileDuplicatesByPhoneOnce(); } catch (e) { console.error('[dedup telefone boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
   // Critério SEGURO: só desmarca quem tem nome de UM token e NÃO tem e-mail — esses só podem
   // ter sido marcados pela regra frouxa (não dá pra ter casado por e-mail nem por 2 tokens).
