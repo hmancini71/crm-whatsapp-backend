@@ -246,6 +246,9 @@ db.serialize(() => {
       // Motivo do declínio (mostrado no card). Preenchido pelo auto-declínio (regra 1.3b) e
       // também utilizável quando o motivo é definido manualmente.
       if (!cols.find(c => c.name === 'decline_reason')) db.run("ALTER TABLE leads ADD COLUMN decline_reason TEXT DEFAULT NULL");
+      // Timestamp (ms) da ÚLTIMA mensagem recebida DO CLIENTE — PERSISTENTE (não é zerado quando nós
+      // respondemos). Usado para ordenar TODAS as colunas por antiguidade da mensagem do cliente.
+      if (!cols.find(c => c.name === 'last_client_ts')) db.run("ALTER TABLE leads ADD COLUMN last_client_ts INTEGER DEFAULT 0");
     }
   });
 

@@ -2429,6 +2429,14 @@ async function reconcileReplyDots() {
       const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
       if (!last) continue;
 
+      // last_client_ts: timestamp da última mensagem DO CLIENTE (persistente; usado para ordenar
+      // todas as colunas por antiguidade da msg do cliente). Backfill/auto-correção contínua.
+      try {
+        const lastThem = await getRow("SELECT MAX(timestamp) AS ts FROM messages WHERE conversationId = ? AND `from` = 'them'", [convo.id]);
+        const lct = Number(lastThem && lastThem.ts) || 0;
+        if (lct) await runQuery("UPDATE leads SET last_client_ts = ? WHERE id = ? AND COALESCE(last_client_ts,0) <> ?", [lct, l.id, lct]);
+      } catch (e) {}
+
       const lastTs = Number(last.timestamp) || 0;
       const ndTs = Number(l.not_demand_ts) || 0;
       const awaiting = (last.from === 'them') && (lastTs > ndTs);

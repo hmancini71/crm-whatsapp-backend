@@ -519,8 +519,9 @@ async function connectWhatsApp(id, isReconnect = false) {
         fetchAndStoreAvatar(sock, fromJid).catch(() => {});
         // Carimba lastClientReply para QUALQUER mensagem recebida do cliente
         // (novo, restaurado OU existente) — assim a bolinha de tempo aparece já
-        // na 1ª mensagem, não só a partir da segunda.
-        await runQuery("UPDATE leads SET lastClientReply = ? WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [new Date().toISOString(), fromJid, `%${searchNumber}%`]);
+        // na 1ª mensagem, não só a partir da segunda. Também grava last_client_ts (persistente,
+        // NÃO é zerado quando respondemos) usado para ordenar as colunas por antiguidade da msg do cliente.
+        await runQuery("UPDATE leads SET lastClientReply = ?, last_client_ts = ? WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [new Date().toISOString(), Date.now(), fromJid, `%${searchNumber}%`]);
         // Carimba o número recebido se o lead ainda não tiver (vale para criar,
         // restaurar e existentes — backfill automático no próximo contato).
         if (ourNumber) {
