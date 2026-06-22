@@ -2909,6 +2909,125 @@ async function reconcileDuplicatesByPhoneOnce() {
   } catch (e) { console.error('[dedup telefone]', e && e.message); }
 }
 
+// PONTUAL (uma única vez, guardado por flag): arquiva leads SEM IDENTIFICAÇÃO — sem telefone (≥8 díg.),
+// sem e-mail e com NOME só de símbolo/emoji/em branco (ex.: "✨", "☾", ".", "ㅤ"). São contatos @lid em
+// modo privado / spam que não dá pra trabalhar. Recuperável (archived=1) e auto-restaurado se a pessoa
+// voltar a mandar mensagem. Não toca em Venda convertida / Clientes antigos nem em contratos assinados.
+async function archiveJunkUnidentifiedOnce() {
+  try {
+    const FLAG = 'junk_unidentified_archive_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const leads = await allRows("SELECT id, name, phone, email, stage, value, contract_signed FROM leads WHERE archived = 0 AND stage NOT IN ('convertida','clientes_antigos')");
+    const temLetraOuNumero = (s) => /[\p{L}\p{N}]/u.test(String(s || ''));
+    let archived = 0;
+    for (const l of leads) {
+      const ph = String(l.phone || '').replace(/\D/g, '');
+      if (ph.length >= 8) continue;             // tem telefone usável
+      if (String(l.email || '').trim()) continue; // tem e-mail
+      if (Number(l.value) > 0) continue;          // tem valor → não é lixo
+      if (l.contract_signed === 1) continue;      // contrato assinado → não é lixo
+      if (temLetraOuNumero(l.name)) continue;     // nome tem letra/número → NÃO arquiva
+      await runQuery("UPDATE leads SET archived = 1 WHERE id = ?", [l.id]);
+      archived++;
+      console.log(`[limpeza lixo] arquivado lead sem identificação: nome="${l.name}" (${l.id}, ${l.stage}).`);
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[limpeza lixo] concluído: ${archived} lead(s) sem identificação arquivado(s).`);
+  } catch (e) { console.error('[limpeza lixo]', e && e.message); }
+}
+
+// PONTUAL (uma única vez, guardado por flag): corrige o BACKLOG de leads que entraram pelo site/anúncios
+// SEM "nosso número" (recv_number vazio) — atribui a linha (12) 99227-1554 (wa2), como se o site já
+// tivesse direcionado o cliente para esse WhatsApp. Define recv_number e a linha de atendimento (account).
+async function backfillRecvNumberWa2Once() {
+  try {
+    const FLAG = 'recv_backfill_wa2_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const TARGET_NUM = '+5512992271554';   // (12) 99227-1554
+    const TARGET_ACC = 'wa2';
+    const leads = await allRows("SELECT id FROM leads WHERE archived = 0 AND (recv_number IS NULL OR TRIM(recv_number) = '')");
+    let n = 0;
+    for (const l of leads) {
+      await runQuery("UPDATE leads SET recv_number = ?, account = ? WHERE id = ? AND (recv_number IS NULL OR TRIM(recv_number) = '')", [TARGET_NUM, TARGET_ACC, l.id]);
+      n++;
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[backfill recv wa2] ${n} lead(s) sem nosso número atribuídos à linha (12) 99227-1554 (wa2).`);
+  } catch (e) { console.error('[backfill recv wa2]', e && e.message); }
+}
+
+// PONTUAL (uma única vez, guardado por flag): SIMULA a chegada pelo site para o BACKLOG.
+// Para cada lead ABERTO, com telefone e SEM conversa, move para "Novo Leads", cria a conversa na
+// linha (12) 99227-1554 (wa2) e injeta a SAUDAÇÃO do site como mensagem do CLIENTE (inbound). Isso
+// deixa o lead "aguardando" em Novos Leads — a IA (que já responde Novos Leads) então o atende.
+// O ENVIO real é feito pela rotina backlogKickoffSweep, em LOTES pequenos e espaçados (anti-ban).
+async function setupBacklogKickoffOnce() {
+  try {
+    const FLAG = 'backlog_kickoff_setup_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const GREET = 'Olá, vim do site e gostaria de informações sobre vistos/imigração.';
+    const digits = (s) => String(s || '').replace(/\D/g, '');
+    const leads = await allRows(
+      "SELECT * FROM leads WHERE archived = 0 AND stage NOT IN ('convertida','declinado','clientes_antigos') " +
+      "AND phone IS NOT NULL AND TRIM(phone) <> '' ORDER BY createdAt ASC"
+    );
+    let n = 0;
+    for (const l of leads) {
+      const dig = digits(l.phone);
+      if (dig.length < 8) continue;                 // sem telefone usável
+      const last8 = dig.slice(-8);
+      // já tem conversa? então NÃO é backlog "sem whatsapp" → pula
+      let convo = null;
+      if (l.whatsapp_jid) convo = await getRow("SELECT id FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [l.whatsapp_jid]);
+      if (!convo) convo = await getRow("SELECT id FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + last8]);
+      if (convo) continue;
+      const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+      const nm = l.name || dig;
+      const av = String(nm).slice(0, 2).toUpperCase();
+      const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
+      await runQuery(
+        "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [convoId, 'wa2', nm, String(l.phone || ''), av, timeStr, 1, 0, l.whatsapp_jid || null, 0]
+      );
+      const mid = 'm_' + Math.random().toString(36).substr(2, 9);
+      await runQuery(
+        "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, 'them', ?, ?, ?, 'text', NULL)",
+        [mid, convoId, GREET, timeStr, Date.now()]
+      );
+      await runQuery(
+        "UPDATE leads SET stage = 'novo', account = 'wa2', recv_number = '+5512992271554', lastClientReply = ?, last_client_ts = ? WHERE id = ?",
+        [new Date().toISOString(), Date.now(), l.id]
+      );
+      n++;
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    // Liga a "campanha" de disparo pausado. Para PARAR: setar este valor para '0'.
+    await runQuery("INSERT INTO app_settings (key, value) VALUES ('backlog_kickoff_active', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
+    console.log(`[backlog kickoff] ${n} lead(s) preparados em Novos Leads (saudação do site injetada). A IA vai responder em lotes pequenos.`);
+  } catch (e) { console.error('[backlog kickoff setup]', e && e.message); }
+}
+
+// Disparo PAUSADO: enquanto a flag 'backlog_kickoff_active' = '1', a cada rodada a IA responde
+// um LOTE pequeno de Novos Leads aguardando (anti-ban). Reaproveita processNovoBacklog (testado).
+let _kickoffRunning = false;
+async function backlogKickoffSweep() {
+  if (_kickoffRunning) return;
+  _kickoffRunning = true;
+  try {
+    const camp = await getRow("SELECT value FROM app_settings WHERE key = 'backlog_kickoff_active'");
+    if (!camp || String(camp.value) !== '1') return;
+    const r = await processNovoBacklog(4); // lote pequeno
+    if (r && r.ok === false) console.log('[backlog kickoff]', r.reason);
+    else if (r) console.log(`[backlog kickoff] lote enviado: ${r.respondidos || 0} | restantes a verificar na próxima rodada.`);
+  } catch (e) { console.error('[backlog kickoff sweep]', e && e.message); }
+  finally { _kickoffRunning = false; }
+}
+setTimeout(() => { backlogKickoffSweep().catch(() => {}); }, 4 * 60 * 1000);   // 1ª passada ~4min após subir
+setInterval(() => { backlogKickoffSweep().catch(() => {}); }, 18 * 60 * 1000); // depois, a cada 18min
+
 // PONTUAL (uma única vez, guardado por flag em app_settings): aplica a tag de serviço padrão
 // "A01 - 1 visto amer B1B2" a TODOS os leads ativos que estão SEM tag de serviço. Pedido pontual
 // do Henry em 2026-06-19. NÃO se repete — mesmo em deploys/restarts futuros (flag svc_tag_backfill_v1).
@@ -3022,6 +3141,12 @@ app.listen(PORT, async () => {
   try { await ensurePosVendaDefaults(); } catch (e) { console.error('[wa pós-venda boot]', e && e.message); }
   // PONTUAL: reconcilia duplicatas JÁ existentes de mesmo telefone (arquiva, mantendo a etapa mais avançada).
   try { await reconcileDuplicatesByPhoneOnce(); } catch (e) { console.error('[dedup telefone boot]', e && e.message); }
+  // PONTUAL: arquiva leads sem identificação (sem telefone/e-mail, nome só de símbolo/emoji/branco).
+  try { await archiveJunkUnidentifiedOnce(); } catch (e) { console.error('[limpeza lixo boot]', e && e.message); }
+  // PONTUAL: backlog de leads sem "nosso número" → atribui a linha (12) 99227-1554 (wa2).
+  try { await backfillRecvNumberWa2Once(); } catch (e) { console.error('[backfill recv wa2 boot]', e && e.message); }
+  // PONTUAL: simula a chegada pelo site (saudação injetada) p/ o backlog → a IA inicia o atendimento.
+  try { await setupBacklogKickoffOnce(); } catch (e) { console.error('[backlog kickoff boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
   // Critério SEGURO: só desmarca quem tem nome de UM token e NÃO tem e-mail — esses só podem
   // ter sido marcados pela regra frouxa (não dá pra ter casado por e-mail nem por 2 tokens).
