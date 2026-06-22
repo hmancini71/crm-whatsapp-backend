@@ -2773,6 +2773,10 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
     });
     tracking.channel = deriveChannel(tracking); // "Google Ads" / "Meta Ads" / "Orgânico" / <fonte>
     tracking.received_at = new Date().toISOString();
+    // RESPOSTAS DO FORMULÁRIO (estruturadas p/ o bloco dedicado no Editar Lead): a mensagem do "seu
+    // caso" e o destino de interesse. (O destino também já é capturado via KNOWN_TRACK 'destination'.)
+    if (notes) tracking.form_mensagem = String(notes).slice(0, 2000);
+    if (b.destination) tracking.form_destino = String(b.destination).slice(0, 120);
     const digits = String(phone || '').replace(/\D/g, '');
     let existing = null;
     if (digits.length >= 8) {
