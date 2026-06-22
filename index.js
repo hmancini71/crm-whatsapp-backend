@@ -1697,11 +1697,14 @@ async function getSaleLineFilter() {
 app.get('/api/whatsapp/accounts', authenticateToken, async (req, res) => {
   try {
     const accounts = await allRows("SELECT * FROM whatsapp_accounts");
-    // Anexa o tipo (pre/pos) de cada linha. NÃO filtra aqui: a página Conexões precisa ver TODAS
-    // as linhas (inclusive pós) para gerenciá-las. Quem esconde a linha pós das guias operacionais
-    // é o app nativo (interceptor XHR no inject_modal) + o filtro de conversas abaixo.
-    const { map } = await getSaleLineFilter();
-    const out = accounts.map(a => Object.assign({}, a, { sale_type: map[a.id] || 'pre' }));
+    const { mode, posSet, map } = await getSaleLineFilter();
+    let out = accounts.map(a => Object.assign({}, a, { sale_type: map[a.id] || 'pre' }));
+    // Ambiente pré-venda (padrão): esconde as linhas pós-venda (ex.: wa5 +5511965022030) de TODAS
+    // as telas — guias do chat, seletor "Iniciar conversa" E a página Conexões. Para gerenciar/reexibir
+    // as linhas pós aqui, use ?all=1 (gestão) ou app_settings env_sale_mode='all'.
+    if (req.query.all !== '1' && mode === 'pre' && posSet.size) {
+      out = out.filter(a => !posSet.has(a.id));
+    }
     res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
