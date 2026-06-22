@@ -495,7 +495,11 @@ async function connectWhatsApp(id, isReconnect = false) {
         if (lead && !lead.whatsapp_jid && fromJid) {
           try { await runQuery("UPDATE leads SET whatsapp_jid = ? WHERE id = ?", [fromJid, lead.id]); } catch (e) {}
         }
-        if (!lead) {
+        if (!lead && await isPreEnvPosLine(id)) {
+          // Ambiente pré-venda: mensagem recebida numa linha PÓS-VENDA (ex.: wa5 +5511965022030)
+          // NÃO cria novo lead. O pós-venda terá ambiente próprio. (A mensagem/conversa já foi salva.)
+          console.log(`[WhatsApp ${id}] Ambiente pré-venda: linha pós-venda não cria novo lead para ${phone}.`);
+        } else if (!lead) {
           const leadId = 'l_' + Math.random().toString(36).substr(2, 9);
           const createdAt = new Date().toISOString().slice(0, 10);
           let formattedPhone = phone;
@@ -825,6 +829,19 @@ async function initSessions() {
 // Processa o BACKLOG: faz a IA responder os leads de "Novo Leads" cujo cliente está aguardando
 // (lastClientReply != NULL) — ex.: mensagens que chegaram enquanto a IA estava desligada.
 // Mesma lógica do fluxo em tempo real (responde, zera o tempo, e move ao concluir).
+// Ambiente pré-venda (env_sale_mode='pre', padrão): true se a linha `lineId` for pós-venda
+// (marcada 'pos' em wa_sale_types). Usado para NÃO criar novos leads em linhas pós-venda.
+async function isPreEnvPosLine(lineId) {
+  try {
+    const envRow = await getRow("SELECT value FROM app_settings WHERE key = 'env_sale_mode'");
+    const mode = (envRow && envRow.value) ? String(envRow.value) : 'pre';
+    if (mode !== 'pre') return false;
+    const stRow = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
+    let map = {}; try { map = stRow && stRow.value ? JSON.parse(stRow.value) : {}; } catch (e) { map = {}; }
+    return map[lineId] === 'pos';
+  } catch (e) { return false; }
+}
+
 async function processNovoBacklog(limit) {
   const cfg = await getAiSettings();
   if (!cfg || !cfg.enabled || !cfg.novo_enabled || !cfg.gemini_key) {

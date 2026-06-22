@@ -1115,6 +1115,15 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)" + ORDER);
     }
 
+    // Ambiente pré-venda (env_sale_mode='pre', padrão): esconde conversas das linhas pós-venda
+    // (ex.: wa5 +5511965022030) de TODOS os logins, inclusive admin. O pós-venda terá ambiente próprio.
+    try {
+      const { mode, posSet } = await getSaleLineFilter();
+      if (mode === 'pre' && posSet.size) {
+        convs = (convs || []).filter(c => !posSet.has(c.account));
+      }
+    } catch (e) { /* em caso de falha, não filtra */ }
+
     // Filtro por tipo de linha (Pré/Pós-venda) conforme o usuário logado. Administrador vê TUDO.
     try {
       if (req.user && req.user.role !== 'Administrador') {
@@ -1673,10 +1682,27 @@ app.post('/api/leads/:id/open-conversation', authenticateToken, async (req, res)
 });
 
 // 10. Channels Routes: Get Accounts list
+// Ambiente de vendas: 'pre' (padrão) = só pré-venda → linhas marcadas como 'pos' (ex.: wa5/wa6)
+// ficam OCULTAS para TODOS os logins (inclusive admin) e não recebem novos leads. O pós-venda
+// terá um ambiente próprio depois. Para reexibir as linhas pós aqui: app_settings env_sale_mode='all'.
+async function getSaleLineFilter() {
+  const envRow = await getRow("SELECT value FROM app_settings WHERE key = 'env_sale_mode'");
+  const mode = (envRow && envRow.value) ? String(envRow.value) : 'pre';
+  const stRow = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
+  let map = {}; try { map = stRow && stRow.value ? JSON.parse(stRow.value) : {}; } catch (e) { map = {}; }
+  const posSet = new Set(Object.keys(map).filter(k => map[k] === 'pos'));
+  return { mode, posSet, map };
+}
+
 app.get('/api/whatsapp/accounts', authenticateToken, async (req, res) => {
   try {
     const accounts = await allRows("SELECT * FROM whatsapp_accounts");
-    res.json(accounts);
+    // Anexa o tipo (pre/pos) de cada linha. NÃO filtra aqui: a página Conexões precisa ver TODAS
+    // as linhas (inclusive pós) para gerenciá-las. Quem esconde a linha pós das guias operacionais
+    // é o app nativo (interceptor XHR no inject_modal) + o filtro de conversas abaixo.
+    const { map } = await getSaleLineFilter();
+    const out = accounts.map(a => Object.assign({}, a, { sale_type: map[a.id] || 'pre' }));
+    res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
