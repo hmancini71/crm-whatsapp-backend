@@ -100,6 +100,17 @@ db.serialize(() => {
     value TEXT
   )`);
 
+  // Métricas diárias do Google Ads (conta Vale Visto) — alimentadas pela sincronização
+  // (Supermetrics → CRM). O dashboard lê desta tabela, filtrado por data.
+  db.run(`CREATE TABLE IF NOT EXISTS google_ads_daily (
+    date TEXT PRIMARY KEY,
+    clicks INTEGER DEFAULT 0,
+    cost REAL DEFAULT 0,
+    conversions REAL DEFAULT 0,
+    impressions INTEGER DEFAULT 0,
+    updated_at TEXT
+  )`);
+
   // Check if tables are empty, and insert initial data
   db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
     if (row && row.count === 0) {

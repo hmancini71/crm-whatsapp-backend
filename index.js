@@ -2740,6 +2740,51 @@ async function checkApiKey(req, res, next) {
   } catch (e) { res.status(500).json({ error: e.message }); }
 }
 
+// ===== Google Ads (conta Vale Visto): métricas diárias para o dashboard =====
+// GET: o dashboard lê os dias + totais, filtrado pelas MESMAS datas dos outros gráficos.
+app.get('/api/dashboard/google-ads', authenticateToken, async (req, res) => {
+  try {
+    const days = daysRangeSP(req.query.from, req.query.to, 15);
+    const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
+    const rows = await allRows(
+      "SELECT date, clicks, cost, conversions, impressions FROM google_ads_daily WHERE date >= ? AND date <= ? ORDER BY date ASC",
+      [fromIso, toIso]
+    );
+    const byDate = {}; rows.forEach(r => { byDate[r.date] = r; });
+    const series = days.map(d => {
+      const r = byDate[d.iso] || {};
+      return { date: d.iso, label: d.label, clicks: Number(r.clicks || 0), cost: Number(r.cost || 0), conversions: Number(r.conversions || 0), impressions: Number(r.impressions || 0) };
+    });
+    const sum = (k) => series.reduce((a, x) => a + (Number(x[k]) || 0), 0);
+    const clicks = sum('clicks'), cost = sum('cost'), conversions = sum('conversions'), impressions = sum('impressions');
+    res.json({
+      from: fromIso, to: toIso, days: series,
+      totals: { clicks, cost, conversions, impressions, cpc: clicks > 0 ? cost / clicks : 0, costPerConv: conversions > 0 ? cost / conversions : 0 }
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST (X-API-Key): a sincronização (Supermetrics → CRM) grava/atualiza os dias (upsert por data).
+app.post('/api/integrations/google-ads-daily', checkApiKey, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body && req.body.rows) ? req.body.rows : [];
+    if (!rows.length) return res.status(400).json({ error: 'rows vazio' });
+    const now = new Date().toISOString();
+    let n = 0;
+    for (const r of rows) {
+      const date = String(r.date || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      await runQuery(
+        "INSERT INTO google_ads_daily (date, clicks, cost, conversions, impressions, updated_at) VALUES (?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(date) DO UPDATE SET clicks=excluded.clicks, cost=excluded.cost, conversions=excluded.conversions, impressions=excluded.impressions, updated_at=excluded.updated_at",
+        [date, Math.round(Number(r.clicks) || 0), Number(r.cost) || 0, Number(r.conversions) || 0, Math.round(Number(r.impressions) || 0), now]
+      );
+      n++;
+    }
+    res.json({ success: true, upserted: n });
+  } catch (e) { console.error('[google-ads-daily ingest]', e && e.message); res.status(500).json({ error: e.message }); }
+});
+
 // Configurações de integração (admin)
 app.get('/api/settings/integrations', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
