@@ -538,7 +538,7 @@ async function connectWhatsApp(id, isReconnect = false) {
         await runQuery("UPDATE leads SET lastClientReply = ?, last_client_ts = ? WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [new Date().toISOString(), Date.now(), fromJid, `%${searchNumber}%`]);
         // Carimba o número recebido se o lead ainda não tiver (vale para criar,
         // restaurar e existentes — backfill automático no próximo contato).
-        if (ourNumber) {
+        if (ourNumber && !(await isPreEnvPosLine(id))) {
           await runQuery("UPDATE leads SET recv_number = ? WHERE (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) AND (recv_number IS NULL OR recv_number = '')", [ourNumber, fromJid, `%${searchNumber}%`]);
         }
         // Resposta automática fora do horário: vale APENAS para leads JÁ em atendimento

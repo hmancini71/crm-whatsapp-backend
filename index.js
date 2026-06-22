@@ -2987,6 +2987,25 @@ async function backfillRecvNumberWa2Once() {
   } catch (e) { console.error('[backfill recv wa2]', e && e.message); }
 }
 
+// PONTUAL: o número PÓS-VENDA (11) 96502-2030 (wa5) NÃO pode aparecer nos cards. Migra todo lead que
+// mostra esse número (recv_number) ou está na linha wa5 para a linha PRÉ-venda wa2 (12) 99227-1554,
+// e leva as conversas da wa5 para a wa2. Roda uma vez (flag). Reexecuta com nova flag se preciso.
+async function migrateWa5ToWa2Once() {
+  try {
+    const FLAG = 'migrate_wa5_to_wa2_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const PRE_NUM = '+5512992271554', PRE_ACC = 'wa2';
+    await runQuery(
+      "UPDATE leads SET recv_number = ?, account = ? WHERE account = 'wa5' OR (recv_number IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(recv_number,'+',''),' ',''),'-',''),'(','') LIKE '%965022030')",
+      [PRE_NUM, PRE_ACC]
+    );
+    await runQuery("UPDATE conversations SET account = ? WHERE account = 'wa5'", [PRE_ACC]);
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log('[migra wa5→wa2] leads/conversas do (11) 96502-2030 migrados para a linha pré (12) 99227-1554.');
+  } catch (e) { console.error('[migra wa5→wa2]', e && e.message); }
+}
+
 // PONTUAL (uma única vez, guardado por flag): SIMULA a chegada pelo site para o BACKLOG.
 // Para cada lead ABERTO, com telefone e SEM conversa, move para "Novo Leads", cria a conversa na
 // linha (12) 99227-1554 (wa2) e injeta a SAUDAÇÃO do site como mensagem do CLIENTE (inbound). Isso
@@ -3174,6 +3193,8 @@ app.listen(PORT, async () => {
   try { await archiveJunkUnidentifiedOnce(); } catch (e) { console.error('[limpeza lixo boot]', e && e.message); }
   // PONTUAL: backlog de leads sem "nosso número" → atribui a linha (12) 99227-1554 (wa2).
   try { await backfillRecvNumberWa2Once(); } catch (e) { console.error('[backfill recv wa2 boot]', e && e.message); }
+  // PONTUAL: tira o número pós-venda (11) 96502-2030 (wa5) dos cards → migra para wa2.
+  try { await migrateWa5ToWa2Once(); } catch (e) { console.error('[migra wa5→wa2 boot]', e && e.message); }
   // PONTUAL: simula a chegada pelo site (saudação injetada) p/ o backlog → a IA inicia o atendimento.
   try { await setupBacklogKickoffOnce(); } catch (e) { console.error('[backlog kickoff boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
