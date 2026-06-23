@@ -2702,6 +2702,7 @@ async function aiFollowUpSweep() {
       [cfg.fu_max || 2]
     );
     if (!leads.length) return;
+    const { posSet: _posLines } = await getSaleLineFilter(); // IA não atua nas linhas pós (2030)
     const convs = await allRows("SELECT id, account, phone, whatsapp_jid FROM conversations WHERE (archived IS NULL OR archived = 0)");
     const norm = (p) => String(p || '').replace(/\D/g, '');
     // ANTI-SPAM: no máximo PER_RUN_CAP follow-ups por rodada (a cada 30 min) e com intervalo
@@ -2717,6 +2718,7 @@ async function aiFollowUpSweep() {
           (lt.length === 8 && norm(c.phone).slice(-8) === lt)
         );
         if (!conv || !conv.account) continue;
+        if (_posLines.has(conv.account)) continue; // pós-venda (2030): sem follow-up da IA
         const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [conv.id]);
         if (!last || last.from !== 'me') continue;              // só quando NÓS falamos por último (cliente não respondeu)
         if (Date.now() - (last.timestamp || 0) < horasMs) continue; // espaça os envios: ≥ fu_hours desde a última msg

@@ -562,7 +562,7 @@ async function connectWhatsApp(id, isReconnect = false) {
             "SELECT * FROM leads WHERE archived = 0 AND stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) LIMIT 1",
             [fromJid, `%${sn2}%`]
           );
-          if (aiLead) {
+          if (aiLead && !(await isPosLine(id))) {
             const ai = await getNovoLeadReply(convoId, aiLead.name);
             if (ai && ai.reply) {
               // Fora do horário? Seg–Sex 9h–18h, Sáb 9h–13h, Dom fechado (fuso de São Paulo).
@@ -826,13 +826,10 @@ async function initSessions() {
 // Processa o BACKLOG: faz a IA responder os leads de "Novo Leads" cujo cliente está aguardando
 // (lastClientReply != NULL) — ex.: mensagens que chegaram enquanto a IA estava desligada.
 // Mesma lógica do fluxo em tempo real (responde, zera o tempo, e move ao concluir).
-// Ambiente pré-venda (env_sale_mode='pre', padrão): true se a linha `lineId` for pós-venda
-// (marcada 'pos' em wa_sale_types). Usado para NÃO criar novos leads em linhas pós-venda.
-async function isPreEnvPosLine(lineId) {
+// True se a linha `lineId` for PÓS-VENDA (marcada 'pos' em wa_sale_types, ex.: wa5/2030).
+// A IA atua APENAS nas linhas de pré-venda — nunca no pós-venda (2030).
+async function isPosLine(lineId) {
   try {
-    const envRow = await getRow("SELECT value FROM app_settings WHERE key = 'env_sale_mode'");
-    const mode = (envRow && envRow.value) ? String(envRow.value) : 'pre';
-    if (mode !== 'pre') return false;
     const stRow = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
     let map = {}; try { map = stRow && stRow.value ? JSON.parse(stRow.value) : {}; } catch (e) { map = {}; }
     return map[lineId] === 'pos';
@@ -865,6 +862,7 @@ async function processNovoBacklog(limit) {
       const lastMsg = await getRow("SELECT `from` FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
       if (!lastMsg || lastMsg.from !== 'them') continue;
       const account = convo.account || lead.account;
+      if (await isPosLine(account)) continue; // IA atua só no pré-venda (nunca no 2030/pós)
       const sock = sessions[account];
       if (!sock) { skipped.push((lead.name || lead.id) + ' — linha desconectada'); done++; continue; }
       const jid = convo.whatsapp_jid ? convo.whatsapp_jid
