@@ -551,7 +551,7 @@ async function connectWhatsApp(id, isReconnect = false) {
           }
           if (_lead && _lead.stage && _lead.stage !== 'novo') _autoReplyOk = true;
         } catch (e) {}
-        if (_autoReplyOk) await maybeAutoReply(sock, fromJid, convoId);
+        if (_autoReplyOk && !(await isPosLine(id))) await maybeAutoReply(sock, fromJid, convoId); // 2030/pós: sem automação
 
         // ===== IA (Gemini): 1ª interação nos leads em "Novo Leads" =====
         // Coleta dados do cliente conforme as instruções de Configurações; quando
