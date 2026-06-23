@@ -495,11 +495,7 @@ async function connectWhatsApp(id, isReconnect = false) {
         if (lead && !lead.whatsapp_jid && fromJid) {
           try { await runQuery("UPDATE leads SET whatsapp_jid = ? WHERE id = ?", [fromJid, lead.id]); } catch (e) {}
         }
-        if (!lead && await isPreEnvPosLine(id)) {
-          // Ambiente pré-venda: mensagem recebida numa linha PÓS-VENDA (ex.: wa5 +5511965022030)
-          // NÃO cria novo lead. O pós-venda terá ambiente próprio. (A mensagem/conversa já foi salva.)
-          console.log(`[WhatsApp ${id}] Ambiente pré-venda: linha pós-venda não cria novo lead para ${phone}.`);
-        } else if (!lead) {
+        if (!lead) {
           const leadId = 'l_' + Math.random().toString(36).substr(2, 9);
           const createdAt = new Date().toISOString().slice(0, 10);
           let formattedPhone = phone;
@@ -538,7 +534,8 @@ async function connectWhatsApp(id, isReconnect = false) {
         await runQuery("UPDATE leads SET lastClientReply = ?, last_client_ts = ? WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [new Date().toISOString(), Date.now(), fromJid, `%${searchNumber}%`]);
         // Carimba o número recebido se o lead ainda não tiver (vale para criar,
         // restaurar e existentes — backfill automático no próximo contato).
-        if (ourNumber && !(await isPreEnvPosLine(id))) {
+        if (ourNumber) {
+          // SEMPRE carimba o número REAL que recebeu (inclusive 2030). NUNCA mascara com outra linha.
           await runQuery("UPDATE leads SET recv_number = ? WHERE (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) AND (recv_number IS NULL OR recv_number = '')", [ourNumber, fromJid, `%${searchNumber}%`]);
         }
         // Resposta automática fora do horário: vale APENAS para leads JÁ em atendimento

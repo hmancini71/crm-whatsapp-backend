@@ -555,10 +555,25 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
     // Ordena por prioridade (followup no topo, depois urgente/vermelho, depois média/amarelo, depois sem), e por data.
     const leads = await allRows("SELECT * FROM leads WHERE archived = 0 ORDER BY CASE priority WHEN 'followup' THEN 1 WHEN 'urgente' THEN 2 WHEN 'media' THEN 3 ELSE 4 END, createdAt DESC");
-    const parsedLeads = leads.map(l => ({
+    let parsedLeads = leads.map(l => ({
       ...l,
       tags: l.tags ? JSON.parse(l.tags) : []
     }));
+    // Ambiente pré-venda: OCULTA (NÃO mascara) os leads cuja linha REAL é pós-venda (ex.: 2030/wa5).
+    // O número verdadeiro continua salvo no lead; ele apenas não aparece no pipeline pré-venda.
+    try {
+      const { mode, posSet } = await getSaleLineFilter();
+      if (mode === 'pre' && posSet.size) {
+        const ph = Array.from(posSet);
+        const accs = await allRows("SELECT id, number FROM whatsapp_accounts WHERE id IN (" + ph.map(() => '?').join(',') + ")", ph);
+        const posDigits = accs.map(a => String(a.number || '').replace(/\D/g, '').slice(-8)).filter(d => d.length >= 8);
+        parsedLeads = parsedLeads.filter(l => {
+          if (posSet.has(l.account)) return false;
+          const rn = String(l.recv_number || '').replace(/\D/g, '');
+          return !(rn && posDigits.some(d => rn.endsWith(d)));
+        });
+      }
+    } catch (e) { /* em caso de falha, não filtra */ }
     res.json(parsedLeads);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -3035,21 +3050,10 @@ async function backfillRecvNumberWa2Once() {
 // PONTUAL: o número PÓS-VENDA (11) 96502-2030 (wa5) NÃO pode aparecer nos cards. Migra todo lead que
 // mostra esse número (recv_number) ou está na linha wa5 para a linha PRÉ-venda wa2 (12) 99227-1554,
 // e leva as conversas da wa5 para a wa2. Roda uma vez (flag). Reexecuta com nova flag se preciso.
-async function migrateWa5ToWa2Once() {
-  try {
-    const FLAG = 'migrate_wa5_to_wa2_v1';
-    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
-    if (done && done.value) return;
-    const PRE_NUM = '+5512992271554', PRE_ACC = 'wa2';
-    await runQuery(
-      "UPDATE leads SET recv_number = ?, account = ? WHERE account = 'wa5' OR (recv_number IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(recv_number,'+',''),' ',''),'-',''),'(','') LIKE '%965022030')",
-      [PRE_NUM, PRE_ACC]
-    );
-    await runQuery("UPDATE conversations SET account = ? WHERE account = 'wa5'", [PRE_ACC]);
-    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
-    console.log('[migra wa5→wa2] leads/conversas do (11) 96502-2030 migrados para a linha pré (12) 99227-1554.');
-  } catch (e) { console.error('[migra wa5→wa2]', e && e.message); }
-}
+// DESATIVADO: esta rotina MASCARAVA o número 2030 trocando-o pelo da wa2 — isso estava ERRADO.
+// NUNCA relabelar uma linha por outra. O 2030 é apenas OCULTADO por filtro nas telas (o número
+// real é sempre preservado). Mantida como no-op para não voltar a mascarar.
+async function migrateWa5ToWa2Once() { /* no-op: jamais mascarar uma linha com outra. */ }
 
 // PONTUAL (uma única vez, guardado por flag): SIMULA a chegada pelo site para o BACKLOG.
 // Para cada lead ABERTO, com telefone e SEM conversa, move para "Novo Leads", cria a conversa na
