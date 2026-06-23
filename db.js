@@ -322,6 +322,33 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: 'pos_stage' = coluna do pipeline PÓS-VENDA (ambiente do 2030). Independente do
+  // 'stage' (pré-venda). Valores: vendas_concretizadas | para_classificar | visto_americano |
+  // visto_canadense | visto_portugues | aire_italiano | outros.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'pos_stage')) {
+      db.run("ALTER TABLE leads ADD COLUMN pos_stage TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) console.error("Failed to add pos_stage column to leads:", alterErr);
+        else console.log("Migration: added 'pos_stage' column to leads table.");
+      });
+    }
+  });
+
+  // Seed do usuário do AMBIENTE PÓS-VENDA (Alexandre). Idempotente (INSERT OR IGNORE por id/email).
+  // wa_type='pos' → vê apenas o 2030 e o pipeline pós-venda. Pedido explícito do Henry.
+  try {
+    const alexHash = bcrypt.hashSync('ValeVisto@12', 10);
+    db.run(
+      "INSERT OR IGNORE INTO users (id, email, password_hash, name, role, avatar, wa_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ['u_alexandre', 'alexandre@valevisto.com.br', alexHash, 'Alexandre', 'Vendedor', 'AL', 'pos'],
+      (e) => {
+        if (e) console.error("Seed Alexandre falhou:", e);
+        // Garante wa_type='pos' mesmo se o usuário já existia com outro tipo.
+        db.run("UPDATE users SET wa_type='pos' WHERE email='alexandre@valevisto.com.br'");
+      }
+    );
+  } catch (e) { console.error("Seed Alexandre erro:", e && e.message); }
+
   // Log de cada disparo de follow-up automático (col 3-4 do Tratamento) — para o gráfico diário.
   db.run(`CREATE TABLE IF NOT EXISTS followup_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

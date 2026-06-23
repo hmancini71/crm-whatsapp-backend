@@ -187,13 +187,17 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // 2. Auth Route: Me
-app.get('/api/auth/me', authenticateToken, (req, res) => {
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  // wa_type define o AMBIENTE do login: 'pos' (Alexandre → só 2030/pós-venda) vs pré/ambos.
+  let wa_type = 'ambos';
+  try { const u = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]); if (u && u.wa_type) wa_type = u.wa_type; } catch (e) {}
   res.json({
     id: req.user.sub,
     name: req.user.name,
     email: req.user.email,
     role: req.user.role,
-    avatar: req.user.avatar
+    avatar: req.user.avatar,
+    wa_type
   });
 });
 
@@ -559,19 +563,19 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       ...l,
       tags: l.tags ? JSON.parse(l.tags) : []
     }));
-    // Ambiente pré-venda: OCULTA (NÃO mascara) os leads cuja linha REAL é pós-venda (ex.: 2030/wa5).
-    // O número verdadeiro continua salvo no lead; ele apenas não aparece no pipeline pré-venda.
+    // Filtra por LOGIN (sem mascarar, sempre o número real):
+    //  - PÓS (Alexandre): só leads do 2030 OU vendas convertidas; 'stage' é remapeado p/ pos_stage
+    //    (assim o pipeline nativo coloca os cards nas colunas do pós-venda).
+    //  - PRÉ/admin: exclui os leads do 2030.
     try {
-      const { mode, posSet } = await getSaleLineFilter();
-      if (mode === 'pre' && posSet.size) {
-        const ph = Array.from(posSet);
-        const accs = await allRows("SELECT id, number FROM whatsapp_accounts WHERE id IN (" + ph.map(() => '?').join(',') + ")", ph);
-        const posDigits = accs.map(a => String(a.number || '').replace(/\D/g, '').slice(-8)).filter(d => d.length >= 8);
-        parsedLeads = parsedLeads.filter(l => {
-          if (posSet.has(l.account)) return false;
-          const rn = String(l.recv_number || '').replace(/\D/g, '');
-          return !(rn && posDigits.some(d => rn.endsWith(d)));
-        });
+      const { posSet, posDigits } = await posLineInfo();
+      const isPos = await userIsPos(req);
+      if (isPos) {
+        parsedLeads = parsedLeads
+          .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida')
+          .map(l => Object.assign({}, l, { stage: posStageFor(l) }));
+      } else if (posSet.size) {
+        parsedLeads = parsedLeads.filter(l => !leadIsPos(l, posSet, posDigits));
       }
     } catch (e) { /* em caso de falha, não filtra */ }
     res.json(parsedLeads);
@@ -658,6 +662,13 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
   try {
     const cur = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     if (!cur) return res.status(404).json({ error: "Lead não encontrado" });
+    // PÓS-VENDA: se a coluna arrastada é uma coluna do pipeline pós (ex.: visto_americano), grava
+    // em pos_stage — NUNCA mexe no 'stage' do pré-venda. (As colunas pós têm nomes próprios.)
+    if (POS_STAGES.includes(stage)) {
+      await runQuery("UPDATE leads SET pos_stage = ? WHERE id = ?", [stage, id]);
+      const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+      return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
+    }
     // Estágios TERMINAIS: uma vez em "Venda convertida" ou "Lead declinou/cancelado",
     // o lead NÃO muda mais de etapa por processos automáticos (drag, reconcile, etc.).
     // EXCEÇÃO: force=true (ação deliberada do operador via combo "Editar Lead").
@@ -1130,26 +1141,13 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)" + ORDER);
     }
 
-    // Ambiente pré-venda (env_sale_mode='pre', padrão): esconde conversas das linhas pós-venda
-    // (ex.: wa5 +5511965022030) de TODOS os logins, inclusive admin. O pós-venda terá ambiente próprio.
+    // Filtra por LOGIN: PÓS-venda (Alexandre) vê SÓ conversas das linhas pós (2030);
+    // pré/admin excluem as conversas das linhas pós. Nunca mascara — só mostra/oculta.
     try {
-      const { mode, posSet } = await getSaleLineFilter();
-      if (mode === 'pre' && posSet.size) {
-        convs = (convs || []).filter(c => !posSet.has(c.account));
-      }
-    } catch (e) { /* em caso de falha, não filtra */ }
-
-    // Filtro por tipo de linha (Pré/Pós-venda) conforme o usuário logado. Administrador vê TUDO.
-    try {
-      if (req.user && req.user.role !== 'Administrador') {
-        const urow = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]);
-        const wt = (urow && urow.wa_type) || 'ambos';
-        if (wt === 'pre' || wt === 'pos') {
-          const strow = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
-          let map = {}; try { map = strow && strow.value ? JSON.parse(strow.value) : {}; } catch (e) {}
-          const allowed = new Set(Object.keys(map).filter(k => map[k] === wt));
-          convs = (convs || []).filter(c => allowed.has(c.account));
-        }
+      const { posSet } = await getSaleLineFilter();
+      if (posSet.size) {
+        const isPos = await userIsPos(req);
+        convs = (convs || []).filter(c => isPos ? posSet.has(c.account) : !posSet.has(c.account));
       }
     } catch (e) { /* em caso de falha, não filtra */ }
 
@@ -1249,6 +1247,16 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     if (!convo) {
       return res.status(404).json({ error: "Conversa não encontrada" });
     }
+    // Trava de ambiente: pós-venda SÓ envia pelo 2030; pré/admin NÃO enviam pelo 2030.
+    try {
+      const { posSet } = await getSaleLineFilter();
+      if (posSet.size) {
+        const isPos = await userIsPos(req);
+        const convPos = posSet.has(convo.account);
+        if (isPos && !convPos) return res.status(403).json({ error: 'No pós-venda só é permitido enviar pelo número 2030.' });
+        if (!isPos && convPos) return res.status(403).json({ error: 'Este número (2030) é do ambiente pós-venda.' });
+      }
+    } catch (e) { /* não bloqueia em falha de checagem */ }
 
     // NÓS respondemos → conversa "lida": zera a bolinha (como no WhatsApp Web).
     await runQuery("UPDATE conversations SET unread = 0 WHERE id = ?", [id]);
@@ -1709,16 +1717,46 @@ async function getSaleLineFilter() {
   return { mode, posSet, map };
 }
 
+// O usuário logado é do ambiente PÓS-VENDA? (wa_type='pos' → vê só o 2030 + vendas convertidas)
+async function userIsPos(req) {
+  try {
+    if (!req.user || !req.user.sub) return false;
+    const u = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]);
+    return !!(u && String(u.wa_type) === 'pos');
+  } catch (e) { return false; }
+}
+// Linhas pós-venda: ids (wa5/wa6) + últimos 8 dígitos dos números, p/ identificar leads/conversas do 2030.
+async function posLineInfo() {
+  const { posSet } = await getSaleLineFilter();
+  if (!posSet.size) return { posSet, posDigits: [] };
+  const ph = Array.from(posSet);
+  const accs = await allRows("SELECT id, number FROM whatsapp_accounts WHERE id IN (" + ph.map(() => '?').join(',') + ")", ph);
+  const posDigits = accs.map(a => String(a.number || '').replace(/\D/g, '').slice(-8)).filter(d => d.length >= 8);
+  return { posSet, posDigits };
+}
+function leadIsPos(l, posSet, posDigits) {
+  if (posSet.has(l.account)) return true;
+  const rn = String(l.recv_number || '').replace(/\D/g, '');
+  return !!(rn && posDigits.some(d => rn.endsWith(d)));
+}
+// Colunas do pipeline PÓS-VENDA.
+const POS_STAGES = ['vendas_concretizadas', 'para_classificar', 'visto_americano', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
+function posStageFor(lead) {
+  if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) return lead.pos_stage;
+  if (lead.stage === 'convertida') return 'vendas_concretizadas';
+  return 'para_classificar';
+}
+
 app.get('/api/whatsapp/accounts', authenticateToken, async (req, res) => {
   try {
     const accounts = await allRows("SELECT * FROM whatsapp_accounts");
-    const { mode, posSet, map } = await getSaleLineFilter();
+    const { posSet, map } = await getSaleLineFilter();
     let out = accounts.map(a => Object.assign({}, a, { sale_type: map[a.id] || 'pre' }));
-    // Ambiente pré-venda (padrão): esconde as linhas pós-venda (ex.: wa5 +5511965022030) de TODAS
-    // as telas — guias do chat, seletor "Iniciar conversa" E a página Conexões. Para gerenciar/reexibir
-    // as linhas pós aqui, use ?all=1 (gestão) ou app_settings env_sale_mode='all'.
-    if (req.query.all !== '1' && mode === 'pre' && posSet.size) {
-      out = out.filter(a => !posSet.has(a.id));
+    // Filtra por LOGIN: usuário PÓS-venda (Alexandre) vê SÓ as linhas pós (2030); pré/admin veem
+    // TUDO menos as pós. ?all=1 mostra todas (gestão/Conexões). Nunca mascara — apenas mostra/oculta.
+    if (req.query.all !== '1' && posSet.size) {
+      const isPos = await userIsPos(req);
+      out = isPos ? out.filter(a => posSet.has(a.id)) : out.filter(a => !posSet.has(a.id));
     }
     res.json(out);
   } catch (err) {
@@ -3055,6 +3093,26 @@ async function backfillRecvNumberWa2Once() {
 // real é sempre preservado). Mantida como no-op para não voltar a mascarar.
 async function migrateWa5ToWa2Once() { /* no-op: jamais mascarar uma linha com outra. */ }
 
+// RESTAURA os leads que eram REALMENTE do 2030 (wa5) e foram mascarados como wa2 pela migração antiga.
+// Identificados pelo BACKUP do banco de ANTES do erro (cópia 22/06 13:00) — por ID estável + jid,
+// então pega até os que estão sem telefone no campo. Reaplica a cada boot (idempotente).
+const POS_2030_LEAD_IDS = ['l_0oolx4j5i', 'l_j2phc2gq9', 'l_4wov4e9wk', 'l_hccyr1sjp', 'l_abizx6h5b', 'l_443c3susk', 'l_o3sgrg1jc', 'l_xf67s33ki', 'l_f25zgyslb'];
+const POS_2030_JIDS = ['214967575937091@lid', '199763341390002@lid', '84082692194496@lid', '237855506977000@lid', '223342611190012@lid', '75879388561658@lid', '119589102997711@lid', '167491007471765@lid', '119443191517381@lid'];
+async function restore2030Leads() {
+  try {
+    const NUM = '+5511965022030', ACC = 'wa5';
+    if (POS_2030_LEAD_IDS.length) {
+      const ph = POS_2030_LEAD_IDS.map(() => '?').join(',');
+      await runQuery("UPDATE leads SET recv_number = ?, account = ? WHERE id IN (" + ph + ")", [NUM, ACC, ...POS_2030_LEAD_IDS]);
+    }
+    if (POS_2030_JIDS.length) {
+      const ph = POS_2030_JIDS.map(() => '?').join(',');
+      await runQuery("UPDATE conversations SET account = ? WHERE whatsapp_jid IN (" + ph + ")", [ACC, ...POS_2030_JIDS]);
+    }
+    console.log(`[restaura 2030] ${POS_2030_LEAD_IDS.length} lead(s) restaurados à linha real (11... 96502-2030 / wa5).`);
+  } catch (e) { console.error('[restaura 2030]', e && e.message); }
+}
+
 // PONTUAL (uma única vez, guardado por flag): SIMULA a chegada pelo site para o BACKLOG.
 // Para cada lead ABERTO, com telefone e SEM conversa, move para "Novo Leads", cria a conversa na
 // linha (12) 99227-1554 (wa2) e injeta a SAUDAÇÃO do site como mensagem do CLIENTE (inbound). Isso
@@ -3242,8 +3300,9 @@ app.listen(PORT, async () => {
   try { await archiveJunkUnidentifiedOnce(); } catch (e) { console.error('[limpeza lixo boot]', e && e.message); }
   // PONTUAL: backlog de leads sem "nosso número" → atribui a linha (12) 99227-1554 (wa2).
   try { await backfillRecvNumberWa2Once(); } catch (e) { console.error('[backfill recv wa2 boot]', e && e.message); }
-  // PONTUAL: tira o número pós-venda (11) 96502-2030 (wa5) dos cards → migra para wa2.
-  try { await migrateWa5ToWa2Once(); } catch (e) { console.error('[migra wa5→wa2 boot]', e && e.message); }
+  // (migrateWa5ToWa2Once virou no-op: nunca mais mascarar.)
+  // Restaura a linha REAL (2030/wa5) dos leads que foram mascarados — lista informada pelo Henry.
+  try { await restore2030Leads(); } catch (e) { console.error('[restaura 2030 boot]', e && e.message); }
   // PONTUAL: simula a chegada pelo site (saudação injetada) p/ o backlog → a IA inicia o atendimento.
   try { await setupBacklogKickoffOnce(); } catch (e) { console.error('[backlog kickoff boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
