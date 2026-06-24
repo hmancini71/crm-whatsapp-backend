@@ -15,6 +15,31 @@ const { getNovoLeadReply, getAiSettings } = require('./ai');
 // ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
 const _aiSentIds = new Set();
 
+// Mensagens-padrão dos anúncios do META (click-to-WhatsApp). Ao chegar uma delas, o lead é
+// classificado como "Meta Ads" (tracking.channel). Lista informada pelo Henry.
+const META_AD_MESSAGES = [
+  'olá! quero informações sobre primeiro visto ou renovação.',
+  'olá! gostaria de saber mais detalhes sobre a oferta de renovação de visto.',
+  'olá! gostaria de saber mais informações sobre como tirar o primeiro visto.',
+  'olá! gostaria de saber mais informações sobre a renovação de visto.'
+];
+function _normMsg(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+function isMetaAdMessage(text) { const t = _normMsg(text); return META_AD_MESSAGES.some(m => t === m || t.startsWith(m)); }
+async function markLeadMeta(fromJid, phone) {
+  try {
+    const tail = String(phone || '').replace(/\D/g, '').slice(-8);
+    let lead = null;
+    if (fromJid) lead = await getRow("SELECT id, tracking FROM leads WHERE whatsapp_jid = ? LIMIT 1", [fromJid]);
+    if (!lead && tail.length >= 8) lead = await getRow("SELECT id, tracking FROM leads WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
+    if (!lead) return;
+    let tk = {}; try { tk = lead.tracking ? JSON.parse(lead.tracking) : {}; } catch (e) { tk = {}; }
+    if (tk.channel === 'Meta Ads') return;
+    tk.channel = 'Meta Ads';
+    await runQuery("UPDATE leads SET tracking = ? WHERE id = ?", [JSON.stringify(tk), lead.id]);
+    console.log(`[meta] lead ${lead.id} classificado como Meta Ads pelo texto do anúncio.`);
+  } catch (e) { console.error('[meta classify]', e && e.message); }
+}
+
 if (ffmpegPath) {
   try { ffmpeg.setFfmpegPath(ffmpegPath); } catch (e) { console.error('ffmpeg path set failed', e); }
 }
@@ -538,6 +563,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           // SEMPRE carimba o número REAL que recebeu (inclusive 2030). NUNCA mascara com outra linha.
           await runQuery("UPDATE leads SET recv_number = ? WHERE (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) AND (recv_number IS NULL OR recv_number = '')", [ourNumber, fromJid, `%${searchNumber}%`]);
         }
+        // Mensagem-padrão de anúncio do META → classifica o lead como Meta Ads.
+        if (isMetaAdMessage(text)) await markLeadMeta(fromJid, phone);
         // Resposta automática fora do horário: vale APENAS para leads JÁ em atendimento
         // (Tratamento inicial, Proposta enviada, Follow-up pagamento, Venda convertida,
         // Lead declinou/cancelado e Clientes antigos). NÃO vale para "Novo Leads" — esses são

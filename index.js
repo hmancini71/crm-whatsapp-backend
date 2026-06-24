@@ -2867,6 +2867,8 @@ app.post('/api/settings/integrations', authenticateToken, async (req, res) => {
 // Deriva o CANAL de origem a partir do rastreamento: "Google Ads", "Meta Ads", "Orgânico" ou a
 // própria fonte (capitalizada) quando for outra origem paga conhecida pela utm_source.
 function deriveChannel(tk) {
+  // Canal explícito já definido (ex.: classificação manual/por mensagem do Meta) tem prioridade.
+  if (tk && typeof tk.channel === 'string' && tk.channel.trim()) return tk.channel.trim();
   const src = String(tk.utm_source || '').toLowerCase();
   const med = String(tk.utm_medium || '').toLowerCase();
   if (tk.gclid || /google|adwords|gads/.test(src)) return 'Google Ads';
@@ -3115,6 +3117,40 @@ async function restore2030Leads() {
   } catch (e) { console.error('[restaura 2030]', e && e.message); }
 }
 
+// HISTÓRICO: classifica como "Meta Ads" os leads cujo cliente enviou uma das mensagens-padrão de
+// anúncio do Meta (click-to-WhatsApp). Roda uma vez (flag); as novas são classificadas no handler.
+async function backfillMetaChannelOnce() {
+  try {
+    const FLAG = 'meta_channel_backfill_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const rows = await allRows(
+      "SELECT DISTINCT conversationId AS cid FROM messages WHERE `from`='them' AND (" +
+      "text LIKE '%quero informa%es sobre primeiro visto ou renova%' OR " +
+      "text LIKE '%oferta de renova%o de visto%' OR " +
+      "text LIKE '%como tirar o primeiro visto%' OR " +
+      "text LIKE '%informa%es sobre a renova%o de visto%')"
+    );
+    let n = 0;
+    for (const r of rows) {
+      const conv = await getRow("SELECT whatsapp_jid, phone FROM conversations WHERE id = ?", [r.cid]);
+      if (!conv) continue;
+      const tail = String(conv.phone || '').replace(/\D/g, '').slice(-8);
+      let lead = null;
+      if (conv.whatsapp_jid) lead = await getRow("SELECT id, tracking FROM leads WHERE whatsapp_jid = ? LIMIT 1", [conv.whatsapp_jid]);
+      if (!lead && tail.length >= 8) lead = await getRow("SELECT id, tracking FROM leads WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
+      if (!lead) continue;
+      let tk = {}; try { tk = lead.tracking ? JSON.parse(lead.tracking) : {}; } catch (e) { tk = {}; }
+      if (tk.channel === 'Meta Ads') continue;
+      tk.channel = 'Meta Ads';
+      await runQuery("UPDATE leads SET tracking = ? WHERE id = ?", [JSON.stringify(tk), lead.id]);
+      n++;
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[meta backfill] ${n} lead(s) classificados como Meta Ads pelo histórico de mensagens.`);
+  } catch (e) { console.error('[meta backfill]', e && e.message); }
+}
+
 // PONTUAL (uma única vez, guardado por flag): SIMULA a chegada pelo site para o BACKLOG.
 // Para cada lead ABERTO, com telefone e SEM conversa, move para "Novo Leads", cria a conversa na
 // linha (12) 99227-1554 (wa2) e injeta a SAUDAÇÃO do site como mensagem do CLIENTE (inbound). Isso
@@ -3305,6 +3341,8 @@ app.listen(PORT, async () => {
   // (migrateWa5ToWa2Once virou no-op: nunca mais mascarar.)
   // Restaura a linha REAL (2030/wa5) dos leads que foram mascarados — lista informada pelo Henry.
   try { await restore2030Leads(); } catch (e) { console.error('[restaura 2030 boot]', e && e.message); }
+  // PONTUAL: classifica como Meta Ads os leads do histórico que mandaram a mensagem-padrão do Meta.
+  try { await backfillMetaChannelOnce(); } catch (e) { console.error('[meta backfill boot]', e && e.message); }
   // PONTUAL: simula a chegada pelo site (saudação injetada) p/ o backlog → a IA inicia o atendimento.
   try { await setupBacklogKickoffOnce(); } catch (e) { console.error('[backlog kickoff boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
