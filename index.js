@@ -3121,7 +3121,7 @@ async function restore2030Leads() {
 // anúncio do Meta (click-to-WhatsApp). Roda uma vez (flag); as novas são classificadas no handler.
 async function backfillMetaChannelOnce() {
   try {
-    const FLAG = 'meta_channel_backfill_v1';
+    const FLAG = 'meta_channel_backfill_v2';
     const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
     if (done && done.value) return;
     const rows = await allRows(
@@ -3129,7 +3129,8 @@ async function backfillMetaChannelOnce() {
       "text LIKE '%quero informa%es sobre primeiro visto ou renova%' OR " +
       "text LIKE '%oferta de renova%o de visto%' OR " +
       "text LIKE '%como tirar o primeiro visto%' OR " +
-      "text LIKE '%informa%es sobre a renova%o de visto%')"
+      "text LIKE '%informa%es sobre a renova%o de visto%' OR " +
+      "text LIKE '%vim do site e gostaria de saber mais sobre os servi%os de visto americano%')"
     );
     let n = 0;
     for (const r of rows) {

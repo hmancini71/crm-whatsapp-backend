@@ -21,7 +21,8 @@ const META_AD_MESSAGES = [
   'olá! quero informações sobre primeiro visto ou renovação.',
   'olá! gostaria de saber mais detalhes sobre a oferta de renovação de visto.',
   'olá! gostaria de saber mais informações sobre como tirar o primeiro visto.',
-  'olá! gostaria de saber mais informações sobre a renovação de visto.'
+  'olá! gostaria de saber mais informações sobre a renovação de visto.',
+  'olá. vim do site e gostaria de saber mais sobre os serviços de visto americano'
 ];
 function _normMsg(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
 function isMetaAdMessage(text) { const t = _normMsg(text); return META_AD_MESSAGES.some(m => t === m || t.startsWith(m)); }
