@@ -1833,16 +1833,17 @@ function leadIsPos(l, posSet, posDigits) {
   return !!(rn && posDigits.some(d => rn.endsWith(d)));
 }
 // Colunas do pipeline PÓS-VENDA.
-const POS_STAGES = ['vendas_concretizadas', 'para_classificar', 'visto_americano', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
+const POS_STAGES = ['vendas_concretizadas', 'para_classificar', 'visto_amer_primeiro', 'visto_amer_renov', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
 // Colunas do pipeline PÓS-VENDA (com título e cor) — o servidor entrega isto quando o usuário é 'pos'.
 const POS_STAGES_FULL = [
-  { id: 'vendas_concretizadas', title: 'Vendas Concretizadas',       color: '#16a34a' },
-  { id: 'para_classificar',     title: '2030 para organizar',        color: '#71717a' },
-  { id: 'visto_americano',      title: 'Vistos americanos',          color: '#2563eb' },
-  { id: 'visto_canadense',      title: 'Vistos canadenses',          color: '#ef4444' },
-  { id: 'visto_portugues',      title: 'Vistos portugueses',         color: '#15803d' },
-  { id: 'aire_italiano',        title: 'Passaporte italiano / AIRE', color: '#0ea5e9' },
-  { id: 'outros',               title: 'Outros',                     color: '#6b7280' }
+  { id: 'vendas_concretizadas', title: 'Vendas Concretizadas',         color: '#16a34a' },
+  { id: 'para_classificar',     title: '2030 para organizar',          color: '#71717a' },
+  { id: 'visto_amer_primeiro',  title: 'Primeiro Visto Americano',     color: '#2563eb' },
+  { id: 'visto_amer_renov',     title: 'Renovação de Visto americano', color: '#1d4ed8' },
+  { id: 'visto_canadense',      title: 'Vistos canadenses',            color: '#ef4444' },
+  { id: 'visto_portugues',      title: 'Vistos portugueses',           color: '#15803d' },
+  { id: 'aire_italiano',        title: 'Passaporte italiano / AIRE',   color: '#0ea5e9' },
+  { id: 'outros',               title: 'Outros',                       color: '#6b7280' }
 ];
 function posStageFor(lead) {
   if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) return lead.pos_stage;
@@ -3105,6 +3106,27 @@ async function archiveGhostDuplicates() {
 // PONTUAL (uma única vez, guardado por flag): reconcilia duplicatas de MESMO TELEFONE (últimos 8 dígitos)
 // entre leads ATIVOS. Mantém o card na etapa MAIS AVANÇADA (em empate, o de contato mais recente / com
 // mais dados), migra para ele e-mail/rastreamento/recv_number que faltem, e ARQUIVA os demais (recuperável).
+// PONTUAL: divide a antiga coluna pós "Vistos americanos" (visto_americano) em Primeiro Visto
+// (visto_amer_primeiro) e Renovação (visto_amer_renov). Classifica os leads atuais pela tag (renov → Renovação).
+async function splitVistoAmericanoOnce() {
+  try {
+    const FLAG = 'split_visto_amer_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const leads = await allRows("SELECT id, tags FROM leads WHERE pos_stage = 'visto_americano'");
+    let prim = 0, ren = 0;
+    for (const l of leads) {
+      let isRenov = false;
+      try { const tg = l.tags ? JSON.parse(l.tags) : []; const s = (Array.isArray(tg) ? tg.join(' ') : String(tg || '')).toLowerCase(); isRenov = /renov/.test(s); } catch (e) {}
+      const target = isRenov ? 'visto_amer_renov' : 'visto_amer_primeiro';
+      await runQuery("UPDATE leads SET pos_stage = ? WHERE id = ?", [target, l.id]);
+      if (isRenov) ren++; else prim++;
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[split visto amer] ${prim} → Primeiro Visto, ${ren} → Renovação.`);
+  } catch (e) { console.error('[split visto amer]', e && e.message); }
+}
+
 async function reconcileDuplicatesByPhoneOnce() {
   try {
     const FLAG = 'dup_phone_reconcile_v1';
@@ -3451,6 +3473,8 @@ app.listen(PORT, async () => {
   try { await restore2030Leads(); } catch (e) { console.error('[restaura 2030 boot]', e && e.message); }
   // PONTUAL: classifica como Meta Ads os leads do histórico que mandaram a mensagem-padrão do Meta.
   try { await backfillMetaChannelOnce(); } catch (e) { console.error('[meta backfill boot]', e && e.message); }
+  // PONTUAL: divide a coluna pós "Vistos americanos" em Primeiro Visto / Renovação (separa os atuais por tag).
+  try { await splitVistoAmericanoOnce(); } catch (e) { console.error('[split visto amer boot]', e && e.message); }
   // PONTUAL: simula a chegada pelo site (saudação injetada) p/ o backlog → a IA inicia o atendimento.
   try { await setupBacklogKickoffOnce(); } catch (e) { console.error('[backlog kickoff boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
