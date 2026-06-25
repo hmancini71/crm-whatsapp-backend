@@ -780,6 +780,10 @@ const CORRECT_STAGES = [
 
 app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
   try {
+    // Fonte de verdade das colunas: o SERVIDOR decide pré/pós pelo wa_type do usuário logado.
+    let wa_type = 'ambos';
+    try { const u = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]); if (u && u.wa_type) wa_type = u.wa_type; } catch (e) {}
+    if (wa_type === 'pos') return res.json(POS_STAGES_FULL);
     let stages = await allRows("SELECT * FROM stages");
     // Self-healing: if stages don't match expected set, fix them
     const ids = stages.map(s => s.id).sort().join(',');
@@ -1807,6 +1811,16 @@ function leadIsPos(l, posSet, posDigits) {
 }
 // Colunas do pipeline PÓS-VENDA.
 const POS_STAGES = ['vendas_concretizadas', 'para_classificar', 'visto_americano', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
+// Colunas do pipeline PÓS-VENDA (com título e cor) — o servidor entrega isto quando o usuário é 'pos'.
+const POS_STAGES_FULL = [
+  { id: 'vendas_concretizadas', title: 'Vendas Concretizadas',       color: '#16a34a' },
+  { id: 'para_classificar',     title: '2030 para organizar',        color: '#71717a' },
+  { id: 'visto_americano',      title: 'Vistos americanos',          color: '#2563eb' },
+  { id: 'visto_canadense',      title: 'Vistos canadenses',          color: '#ef4444' },
+  { id: 'visto_portugues',      title: 'Vistos portugueses',         color: '#15803d' },
+  { id: 'aire_italiano',        title: 'Passaporte italiano / AIRE', color: '#0ea5e9' },
+  { id: 'outros',               title: 'Outros',                     color: '#6b7280' }
+];
 function posStageFor(lead) {
   if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) return lead.pos_stage;
   if (lead.stage === 'convertida') return 'vendas_concretizadas';
