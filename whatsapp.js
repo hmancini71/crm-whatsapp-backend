@@ -577,7 +577,8 @@ async function connectWhatsApp(id, isReconnect = false) {
           if (!_lead && _tail.length >= 8) {
             _lead = await getRow("SELECT stage FROM leads WHERE archived = 0 AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", [`%${_tail}%`]);
           }
-          if (_lead && _lead.stage && _lead.stage !== 'novo') _autoReplyOk = true;
+          // JAMAIS automação para estágios terminais (Venda convertida / Declinou / Clientes antigos).
+          if (_lead && _lead.stage && !['novo', 'convertida', 'declinado', 'clientes_antigos'].includes(_lead.stage)) _autoReplyOk = true;
         } catch (e) {}
         if (_autoReplyOk && !(await isPosLine(id))) await maybeAutoReply(sock, fromJid, convoId); // 2030/pós: sem automação
 

@@ -2828,6 +2828,10 @@ async function aiFollowUpSweep() {
         // (removido o guard ai_fu_last > last.timestamp: como o próprio follow-up vira a última msg,
         //  ele bloqueava permanentemente o 2º envio. A cadência já é controlada pela janela acima
         //  + last.from==='me' + ai_fu_count < fu_max.)
+        // Re-checa o estágio AGORA (o lead pode ter virado Venda convertida entre a consulta e o envio).
+        // REGRA: JAMAIS enviar mensagem automática para quem está em 'convertida' (ou fora do 'tratamento').
+        const freshNow = await getRow("SELECT stage, archived FROM leads WHERE id = ?", [l.id]);
+        if (!freshNow || freshNow.archived || freshNow.stage !== 'tratamento') { console.log(`[IA follow-up] "${l.name}": pulado (estágio agora = ${freshNow && freshNow.stage}).`); continue; }
         const tentativa = (l.ai_fu_count || 0) + 1;
         const texto = await getFollowUpReply(conv.id, l.name, tentativa);
         if (!texto) continue;
