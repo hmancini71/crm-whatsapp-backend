@@ -1156,7 +1156,30 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       const { posSet } = await getSaleLineFilter();
       if (posSet.size) {
         const isPos = await userIsPos(req);
-        convs = (convs || []).filter(c => isPos ? posSet.has(c.account) : !posSet.has(c.account));
+        if (isPos) {
+          // Pós: conversas do 2030 + o HISTÓRICO das Vendas Concretizadas (leads convertidos),
+          // mesmo que a conversa tenha sido travada numa linha do PRÉ (só leitura; mostra o nº do pré).
+          const convLeads = await allRows("SELECT whatsapp_jid, phone FROM leads WHERE stage = 'convertida'");
+          const cj = new Set(), ct = new Set();
+          for (const l of convLeads) {
+            if (l.whatsapp_jid) cj.add(l.whatsapp_jid);
+            const t = String(l.phone || '').replace(/\D/g, '').slice(-8);
+            if (t.length >= 8) ct.add(t);
+          }
+          const isConverted = (c) => {
+            if (c.whatsapp_jid && cj.has(c.whatsapp_jid)) return true;
+            const t = String(c.phone || '').replace(/\D/g, '').slice(-8);
+            return t.length >= 8 && ct.has(t);
+          };
+          const numByAcc = {};
+          try { const accs = await allRows("SELECT id, number FROM whatsapp_accounts"); accs.forEach(a => { numByAcc[a.id] = a.number; }); } catch (e) {}
+          convs = (convs || []).filter(c => posSet.has(c.account) || isConverted(c)).map(c => {
+            if (posSet.has(c.account)) return c;
+            return Object.assign({}, c, { _saleHistory: 1, _saleLineNumber: numByAcc[c.account] || c.recv_number || '' });
+          });
+        } else {
+          convs = (convs || []).filter(c => !posSet.has(c.account));
+        }
       }
     } catch (e) { /* em caso de falha, não filtra */ }
 
