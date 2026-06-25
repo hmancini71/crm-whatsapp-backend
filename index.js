@@ -24,6 +24,7 @@ const {
   sessionQrs,
   sessions,
   MEDIA_DIR, sendWhatsAppMedia,
+  editWhatsAppMessage, deleteWhatsAppMessage,
   avatarFileForJid, fetchAndStoreAvatar } = require('./whatsapp');
 
 // Redirect console logs to an in-memory buffer
@@ -1202,7 +1203,7 @@ app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
     }
 
     const messages = await allRows(
-      "SELECT id, \`from\`, text, time, type, timestamp, status FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
+      "SELECT id, \`from\`, text, time, type, timestamp, status, edited, deleted FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
       [id]
     );
 
@@ -1503,6 +1504,67 @@ app.post('/api/conversations/:id/media', authenticateToken, async (req, res) => 
 });
 
 // 9b2. Conversations Routes: Archive a conversation (esconde da lista de WhatsApp)
+// Deletar um contato/conversa da Caixa de Entrada (remove a conversa e o histórico no CRM).
+app.delete('/api/conversations/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) return res.status(404).json({ error: 'Conversa não encontrada' });
+    await runQuery("DELETE FROM messages WHERE conversationId = ?", [id]);
+    await runQuery("DELETE FROM conversations WHERE id = ?", [id]);
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Editar o texto de uma mensagem JÁ enviada por nós (texto, janela ~15 min no WhatsApp).
+app.patch('/api/conversations/:id/messages/:mid', authenticateToken, async (req, res) => {
+  const { id, mid } = req.params;
+  const { text } = req.body;
+  if (!text || !String(text).trim()) return res.status(400).json({ error: 'Texto é obrigatório' });
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) return res.status(404).json({ error: 'Conversa não encontrada' });
+    const msg = await getRow("SELECT * FROM messages WHERE id = ? AND conversationId = ?", [mid, id]);
+    if (!msg) return res.status(404).json({ error: 'Mensagem não encontrada' });
+    if (msg.from !== 'me') return res.status(403).json({ error: 'Só dá para editar mensagens que você enviou.' });
+    if (msg.type && msg.type !== 'text') return res.status(400).json({ error: 'Só mensagens de texto podem ser editadas.' });
+    try {
+      const { posSet } = await getSaleLineFilter();
+      if (posSet.size) {
+        const isPos = await userIsPos(req); const convPos = posSet.has(convo.account);
+        if (isPos !== convPos) return res.status(403).json({ error: 'Sem permissão neste ambiente.' });
+      }
+    } catch (e) { /* não bloqueia em falha de checagem */ }
+    if (convo.account === 'ig') return res.status(400).json({ error: 'Edição não é suportada no Instagram.' });
+    if (!(sessions[convo.account] && sessions[convo.account].ws && sessions[convo.account].ws.isOpen)) return res.status(409).json({ error: 'A linha do WhatsApp está desconectada.' });
+    const r = await editWhatsAppMessage(convo.account, id, mid, String(text).trim());
+    res.json(r);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Apagar PARA TODOS uma mensagem enviada por nós (texto ou áudio).
+app.delete('/api/conversations/:id/messages/:mid', authenticateToken, async (req, res) => {
+  const { id, mid } = req.params;
+  try {
+    const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
+    if (!convo) return res.status(404).json({ error: 'Conversa não encontrada' });
+    const msg = await getRow("SELECT * FROM messages WHERE id = ? AND conversationId = ?", [mid, id]);
+    if (!msg) return res.status(404).json({ error: 'Mensagem não encontrada' });
+    if (msg.from !== 'me') return res.status(403).json({ error: 'Só dá para apagar para todos as mensagens que você enviou.' });
+    try {
+      const { posSet } = await getSaleLineFilter();
+      if (posSet.size) {
+        const isPos = await userIsPos(req); const convPos = posSet.has(convo.account);
+        if (isPos !== convPos) return res.status(403).json({ error: 'Sem permissão neste ambiente.' });
+      }
+    } catch (e) { /* não bloqueia em falha de checagem */ }
+    if (convo.account === 'ig') return res.status(400).json({ error: 'Apagar não é suportado no Instagram.' });
+    if (!(sessions[convo.account] && sessions[convo.account].ws && sessions[convo.account].ws.isOpen)) return res.status(409).json({ error: 'A linha do WhatsApp está desconectada.' });
+    const r = await deleteWhatsAppMessage(convo.account, id, mid);
+    res.json(r);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/conversations/:id/archive', authenticateToken, async (req, res) => {
   try {
     await runQuery("UPDATE conversations SET archived = 1 WHERE id = ?", [req.params.id]);

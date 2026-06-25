@@ -459,6 +459,24 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: colunas 'edited' e 'deleted' em messages (editar/apagar mensagens enviadas)
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'edited')) {
+      db.run("ALTER TABLE messages ADD COLUMN edited INTEGER DEFAULT 0", (e) => {
+        if (e) console.error("Failed to add edited column to messages:", e);
+        else console.log("Migration: added 'edited' column to messages table.");
+      });
+    }
+  });
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'deleted')) {
+      db.run("ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0", (e) => {
+        if (e) console.error("Failed to add deleted column to messages:", e);
+        else console.log("Migration: added 'deleted' column to messages table.");
+      });
+    }
+  });
+
   // Safe migration: add 'archived' column to conversations if it doesn't exist yet
   db.all("PRAGMA table_info(conversations)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'archived')) {

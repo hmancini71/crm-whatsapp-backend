@@ -825,6 +825,32 @@ async function sendWhatsAppMedia(accountId, convoId, buffer, mimetype, fileName)
   return { id: msgId, from: 'me', text: label, time: timeStr, type: type };
 }
 
+// Edita o texto de uma mensagem JÁ enviada por nós (protocolo de edição do WhatsApp; janela ~15 min).
+async function editWhatsAppMessage(accountId, convoId, msgId, newText) {
+  const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
+  if (!convo) throw new Error("Conversation not found");
+  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
+  const sock = sessions[accountId];
+  if (!sock) throw new Error("WhatsApp account not connected");
+  const key = { remoteJid: jid, fromMe: true, id: msgId };
+  await sock.sendMessage(jid, { text: newText, edit: key });
+  await runQuery("UPDATE messages SET text = ?, edited = 1 WHERE id = ? AND conversationId = ?", [newText, msgId, convoId]);
+  return { id: msgId, text: newText, edited: 1 };
+}
+
+// Apaga PARA TODOS uma mensagem enviada por nós (revoke do WhatsApp).
+async function deleteWhatsAppMessage(accountId, convoId, msgId) {
+  const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
+  if (!convo) throw new Error("Conversation not found");
+  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
+  const sock = sessions[accountId];
+  if (!sock) throw new Error("WhatsApp account not connected");
+  const key = { remoteJid: jid, fromMe: true, id: msgId };
+  await sock.sendMessage(jid, { delete: key });
+  await runQuery("UPDATE messages SET deleted = 1 WHERE id = ? AND conversationId = ?", [msgId, convoId]);
+  return { id: msgId, deleted: 1 };
+}
+
 // Auto reconnect active sessions on startup
 async function initSessions() {
   const connectedAccounts = await allRows("SELECT id FROM whatsapp_accounts WHERE status = 'connected'");
@@ -939,6 +965,8 @@ module.exports = {
   disconnectWhatsApp,
   sendWhatsAppMessage,
   sendWhatsAppAudio,
+  editWhatsAppMessage,
+  deleteWhatsAppMessage,
   processNovoBacklog,
   initSessions,
   sessions,
