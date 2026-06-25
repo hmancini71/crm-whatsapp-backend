@@ -1157,25 +1157,32 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       if (posSet.size) {
         const isPos = await userIsPos(req);
         if (isPos) {
-          // Pós: conversas do 2030 + o HISTÓRICO das Vendas Concretizadas (leads convertidos),
-          // mesmo que a conversa tenha sido travada numa linha do PRÉ (só leitura; mostra o nº do pré).
-          const convLeads = await allRows("SELECT whatsapp_jid, phone FROM leads WHERE stage IN ('convertida', 'clientes_antigos')");
-          const cj = new Set(), ct = new Set();
-          for (const l of convLeads) {
-            if (l.whatsapp_jid) cj.add(l.whatsapp_jid);
+          // Pós: SÓ conversas cujo lead está NO PIPELINE pós (2030 + Vendas Concretizadas + Clientes
+          // Antigos), incluindo o HISTÓRICO em linhas do pré (read-only, com o nº do pré). Conversas
+          // SEM lead no pipeline (órfãs) NÃO aparecem.
+          const { posSet: pLines, posDigits } = await posLineInfo();
+          const allLeads = await allRows("SELECT whatsapp_jid, phone, stage, account, recv_number FROM leads WHERE archived = 0");
+          const pipeJ = new Set(), pipeT = new Set();   // leads que estão no pipeline pós
+          const histJ = new Set(), histT = new Set();   // convertida/clientes_antigos (conversa pode estar em linha do pré)
+          for (const l of allLeads) {
+            const isHist = l.stage === 'convertida' || l.stage === 'clientes_antigos';
+            if (!(leadIsPos(l, pLines, posDigits) || isHist)) continue;
             const t = String(l.phone || '').replace(/\D/g, '').slice(-8);
-            if (t.length >= 8) ct.add(t);
+            if (l.whatsapp_jid) pipeJ.add(l.whatsapp_jid);
+            if (t.length >= 8) pipeT.add(t);
+            if (isHist) { if (l.whatsapp_jid) histJ.add(l.whatsapp_jid); if (t.length >= 8) histT.add(t); }
           }
-          const isConverted = (c) => {
-            if (c.whatsapp_jid && cj.has(c.whatsapp_jid)) return true;
+          const matchSet = (c, jset, tset) => {
+            if (c.whatsapp_jid && jset.has(c.whatsapp_jid)) return true;
             const t = String(c.phone || '').replace(/\D/g, '').slice(-8);
-            return t.length >= 8 && ct.has(t);
+            return t.length >= 8 && tset.has(t);
           };
           const numByAcc = {};
           try { const accs = await allRows("SELECT id, number FROM whatsapp_accounts"); accs.forEach(a => { numByAcc[a.id] = a.number; }); } catch (e) {}
-          convs = (convs || []).filter(c => posSet.has(c.account) || isConverted(c)).map(c => {
-            if (posSet.has(c.account)) return c;
-            return Object.assign({}, c, { _saleHistory: 1, _saleLineNumber: numByAcc[c.account] || c.recv_number || '' });
+          convs = (convs || []).filter(c => matchSet(c, pipeJ, pipeT)).map(c => {
+            if (posSet.has(c.account)) return c;                 // conversa na linha 2030 (pós): normal
+            if (matchSet(c, histJ, histT)) return Object.assign({}, c, { _saleHistory: 1, _saleLineNumber: numByAcc[c.account] || c.recv_number || '' });
+            return c;
           });
         } else {
           convs = (convs || []).filter(c => !posSet.has(c.account));
