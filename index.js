@@ -577,7 +577,7 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       const isPos = await userIsPos(req);
       if (isPos) {
         parsedLeads = parsedLeads
-          .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida')
+          .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida' || l.stage === 'clientes_antigos')
           .map(l => Object.assign({}, l, { stage: posStageFor(l) }));
       } else if (posSet.size) {
         parsedLeads = parsedLeads.filter(l => !leadIsPos(l, posSet, posDigits));
@@ -1159,7 +1159,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         if (isPos) {
           // Pós: conversas do 2030 + o HISTÓRICO das Vendas Concretizadas (leads convertidos),
           // mesmo que a conversa tenha sido travada numa linha do PRÉ (só leitura; mostra o nº do pré).
-          const convLeads = await allRows("SELECT whatsapp_jid, phone FROM leads WHERE stage = 'convertida'");
+          const convLeads = await allRows("SELECT whatsapp_jid, phone FROM leads WHERE stage IN ('convertida', 'clientes_antigos')");
           const cj = new Set(), ct = new Set();
           for (const l of convLeads) {
             if (l.whatsapp_jid) cj.add(l.whatsapp_jid);
@@ -1833,21 +1833,24 @@ function leadIsPos(l, posSet, posDigits) {
   return !!(rn && posDigits.some(d => rn.endsWith(d)));
 }
 // Colunas do pipeline PÓS-VENDA.
-const POS_STAGES = ['vendas_concretizadas', 'para_classificar', 'visto_amer_primeiro', 'visto_amer_renov', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
+const POS_STAGES = ['vendas_concretizadas', 'clientes_antigos_pos', 'para_classificar', 'visto_amer_primeiro', 'visto_amer_renov', 'visto_amer_renov_sem', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
 // Colunas do pipeline PÓS-VENDA (com título e cor) — o servidor entrega isto quando o usuário é 'pos'.
 const POS_STAGES_FULL = [
-  { id: 'vendas_concretizadas', title: 'Vendas Concretizadas',         color: '#16a34a' },
-  { id: 'para_classificar',     title: '2030 para organizar',          color: '#71717a' },
-  { id: 'visto_amer_primeiro',  title: 'Primeiro Visto Americano',     color: '#2563eb' },
-  { id: 'visto_amer_renov',     title: 'Renovação de Visto americano', color: '#1d4ed8' },
-  { id: 'visto_canadense',      title: 'Vistos canadenses',            color: '#ef4444' },
-  { id: 'visto_portugues',      title: 'Vistos portugueses',           color: '#15803d' },
-  { id: 'aire_italiano',        title: 'Passaporte italiano / AIRE',   color: '#0ea5e9' },
-  { id: 'outros',               title: 'Outros',                       color: '#6b7280' }
+  { id: 'vendas_concretizadas', title: 'Vendas Concretizadas',                        color: '#16a34a' },
+  { id: 'clientes_antigos_pos', title: 'Clientes Antigos',                            color: '#6366f1' },
+  { id: 'para_classificar',     title: '2030 para organizar',                         color: '#71717a' },
+  { id: 'visto_amer_primeiro',  title: 'Primeiro Visto Americano',                    color: '#2563eb' },
+  { id: 'visto_amer_renov',     title: 'Renovação Visto Americano com representação', color: '#1d4ed8' },
+  { id: 'visto_amer_renov_sem', title: 'Renovação Visto Americano sem representação', color: '#7c3aed' },
+  { id: 'visto_canadense',      title: 'Vistos canadenses',                           color: '#ef4444' },
+  { id: 'visto_portugues',      title: 'Vistos portugueses',                          color: '#15803d' },
+  { id: 'aire_italiano',        title: 'Passaporte italiano / AIRE',                  color: '#0ea5e9' },
+  { id: 'outros',               title: 'Outros',                                      color: '#6b7280' }
 ];
 function posStageFor(lead) {
   if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) return lead.pos_stage;
   if (lead.stage === 'convertida') return 'vendas_concretizadas';
+  if (lead.stage === 'clientes_antigos') return 'clientes_antigos_pos';
   return 'para_classificar';
 }
 
