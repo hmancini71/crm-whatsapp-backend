@@ -155,7 +155,11 @@ app.post('/api/auth/login', async (req, res) => {
   }
 
   try {
-    const user = await getRow("SELECT * FROM users WHERE email = ?", [email]);
+    // E-mail é salvo em minúsculas no cadastro → normaliza aqui também (case-insensitive + trim),
+    // senão "Levi@..." não casa com "levi@..." e o login falha sem motivo.
+    const mail = String(email).trim().toLowerCase();
+    let user = await getRow("SELECT * FROM users WHERE email = ?", [mail]);
+    if (!user) user = await getRow("SELECT * FROM users WHERE LOWER(email) = ?", [mail]); // pega cadastros antigos sem normalização
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
       return res.status(400).json({ error: "Credenciais inválidas" });
     }
