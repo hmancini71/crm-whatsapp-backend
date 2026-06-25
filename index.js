@@ -1163,14 +1163,12 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
           const { posSet: pLines, posDigits } = await posLineInfo();
           const allLeads = await allRows("SELECT whatsapp_jid, phone, stage, account, recv_number FROM leads WHERE archived = 0");
           const pipeJ = new Set(), pipeT = new Set();   // leads que estão no pipeline pós
-          const histJ = new Set(), histT = new Set();   // convertida/clientes_antigos (conversa pode estar em linha do pré)
           for (const l of allLeads) {
             const isHist = l.stage === 'convertida' || l.stage === 'clientes_antigos';
             if (!(leadIsPos(l, pLines, posDigits) || isHist)) continue;
             const t = String(l.phone || '').replace(/\D/g, '').slice(-8);
             if (l.whatsapp_jid) pipeJ.add(l.whatsapp_jid);
             if (t.length >= 8) pipeT.add(t);
-            if (isHist) { if (l.whatsapp_jid) histJ.add(l.whatsapp_jid); if (t.length >= 8) histT.add(t); }
           }
           const matchSet = (c, jset, tset) => {
             if (c.whatsapp_jid && jset.has(c.whatsapp_jid)) return true;
@@ -1179,10 +1177,11 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
           };
           const numByAcc = {};
           try { const accs = await allRows("SELECT id, number FROM whatsapp_accounts"); accs.forEach(a => { numByAcc[a.id] = a.number; }); } catch (e) {}
+          // Mostra TODAS as conversas dos leads do pipeline pós. As atendidas por uma linha DIFERENTE
+          // do 2030 (números herdados do pré) também aparecem, com o nº do pré entre parênteses.
           convs = (convs || []).filter(c => matchSet(c, pipeJ, pipeT)).map(c => {
             if (posSet.has(c.account)) return c;                 // conversa na linha 2030 (pós): normal
-            if (matchSet(c, histJ, histT)) return Object.assign({}, c, { _saleHistory: 1, _saleLineNumber: numByAcc[c.account] || c.recv_number || '' });
-            return c;
+            return Object.assign({}, c, { _saleHistory: 1, _saleLineNumber: numByAcc[c.account] || c.recv_number || '' });
           });
         } else {
           convs = (convs || []).filter(c => !posSet.has(c.account));
