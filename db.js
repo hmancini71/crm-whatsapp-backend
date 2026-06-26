@@ -20,6 +20,35 @@ function isGoogleAdsFirstMsg(text) { return normMsg(text).startsWith(GOOGLE_ADS_
 // ("Google Ads", "Google%20Ads", com &amp; no lugar de &, etc.), a origem do lead é "Google Ads".
 // Aceita o tracking como objeto, como JSON do campo, ou como query string crua. Fonte única da
 // verdade: usada no endpoint /api/integrations/lead e no backfill dos leads antigos.
+// Extrai os parâmetros de anúncio (utm_source/utm_medium/gclid/fbclid) do tracking. Usa os campos de
+// TOPO e, quando faltam, procura DENTRO das URLs de `referrer` e `landing_page` — porque alguns
+// formulários (ex.: Formulário de Contato do site) mandam os UTMs só embutidos na URL, não como campos.
+function extractAdParams(tk) {
+  tk = tk || {};
+  const res = {
+    utm_source: tk.utm_source || '',
+    utm_medium: tk.utm_medium || '',
+    gclid: tk.gclid || '',
+    fbclid: tk.fbclid || ''
+  };
+  const scan = (url) => {
+    if (!url || typeof url !== 'string') return;
+    const q = url.indexOf('?'); if (q < 0) return;
+    const qs = url.slice(q + 1).replace(/#.*$/, '').replace(/&amp;/gi, '&');
+    qs.split('&').forEach(pair => {
+      const i = pair.indexOf('='); if (i < 0) return;
+      const k = pair.slice(0, i).toLowerCase(); let v = pair.slice(i + 1);
+      try { v = decodeURIComponent(v.replace(/\+/g, ' ')); } catch (e) {}
+      if (k === 'utm_source' && !res.utm_source) res.utm_source = v;
+      else if (k === 'utm_medium' && !res.utm_medium) res.utm_medium = v;
+      else if ((k === 'gclid' || k === 'gbraid' || k === 'wbraid') && !res.gclid) res.gclid = v;
+      else if (k === 'fbclid' && !res.fbclid) res.fbclid = v;
+    });
+  };
+  if (!(res.utm_source && res.gclid)) { scan(tk.referrer); scan(tk.landing_page); }
+  return res;
+}
+
 function isGoogleAdsUtm(tracking) {
   if (!tracking) return false;
   let tk = tracking;
@@ -36,10 +65,13 @@ function isGoogleAdsUtm(tracking) {
     }
   }
   if (!tk || typeof tk !== 'object') return false;
-  let src = String(tk.utm_source == null ? '' : tk.utm_source).replace(/&amp;/gi, '&');
+  const p = extractAdParams(tk);
+  let src = String(p.utm_source == null ? '' : p.utm_source).replace(/&amp;/gi, '&');
   try { src = decodeURIComponent(src.replace(/\+/g, ' ')); } catch (e) { src = src.replace(/%20/gi, ' '); }
   src = src.toLowerCase().trim();
-  return /google\s*ads/.test(src) || /adwords|gads/.test(src);
+  if (/google\s*ads/.test(src) || /adwords|gads/.test(src)) return true;
+  if (p.gclid) return true;  // gclid (ou gbraid/wbraid) = clique do Google Ads
+  return false;
 }
 
 // Run initialization sequentially
@@ -730,5 +762,6 @@ module.exports = {
   allRows,
   isGoogleAdsFirstMsg,
   GOOGLE_ADS_FIRST_MSG,
-  isGoogleAdsUtm
+  isGoogleAdsUtm,
+  extractAdParams
 };

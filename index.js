@@ -11,7 +11,7 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
-const { runQuery, getRow, allRows, isGoogleAdsUtm } = require('./db');
+const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
 const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
 const {
@@ -3046,13 +3046,15 @@ app.post('/api/settings/integrations', authenticateToken, async (req, res) => {
 // Deriva o CANAL de origem a partir do rastreamento: "Google Ads", "Meta Ads", "Orgânico" ou a
 // própria fonte (capitalizada) quando for outra origem paga conhecida pela utm_source.
 function deriveChannel(tk) {
-  const src = String(tk.utm_source || '').toLowerCase();
-  const med = String(tk.utm_medium || '').toLowerCase();
+  // Lê UTMs/gclid do topo E de dentro do referrer/landing_page (formulários que mandam só na URL).
+  const p = extractAdParams(tk);
+  const src = String(p.utm_source || '').toLowerCase();
+  const med = String(p.utm_medium || '').toLowerCase();
   // Sinais FORTES de clique de anúncio têm prioridade ATÉ sobre o channel gravado — que pode estar
-  // defasado/errado (ex.: lead com gclid + utm_source=Google Ads foi rotulado "Meta Ads" por engano
-  // numa rotulagem antiga). gclid = clique do Google; fbclid = clique do Meta.
-  if (tk.gclid || /google|adwords|gads/.test(src)) return 'Google Ads';
-  if (tk.fbclid || /facebook|meta|instagram|\bfb\b|\big\b/.test(src) || /facebook|meta|instagram/.test(med)) return 'Meta Ads';
+  // defasado/errado (ex.: lead com gclid + utm_source=Google Ads foi rotulado "Meta Ads"/"Orgânico"
+  // por engano). gclid = clique do Google; fbclid = clique do Meta.
+  if (p.gclid || /google|adwords|gads/.test(src)) return 'Google Ads';
+  if (p.fbclid || /facebook|meta|instagram|\bfb\b|\big\b/.test(src) || /facebook|meta|instagram/.test(med)) return 'Meta Ads';
   // Sem sinal de clique de anúncio: usa o channel explícito (classificação manual/por mensagem) se houver.
   if (tk && typeof tk.channel === 'string' && tk.channel.trim()) return tk.channel.trim();
   if (src && src !== 'direct' && src !== '(direct)') return src.charAt(0).toUpperCase() + src.slice(1);
@@ -3224,6 +3226,35 @@ async function migrateVistoAmerToGroupOnce() {
     await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
     console.log(`[visto amer grupo] ${(r && r.changes) || 0} card(s) movidos p/ Agendamento.`);
   } catch (e) { console.error('[visto amer grupo]', e && e.message); }
+}
+
+// PONTUAL (flag): re-carimba o tk.channel recomputado — agora lendo UTMs/gclid também de DENTRO do
+// referrer/landing_page — e corrige source='Google Ads' nos leads detectados por utm_source/gclid.
+// Conserta leads do Formulário de Contato que vinham como "Orgânico" por terem os UTMs só na URL.
+async function restampChannelsFromReferrerOnce() {
+  try {
+    const FLAG = 'channel_referrer_restamp_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const leads = await allRows("SELECT id, source, tracking FROM leads WHERE tracking IS NOT NULL AND TRIM(tracking) <> ''");
+    let chFix = 0, srcFix = 0;
+    for (const l of leads) {
+      let tk; try { tk = JSON.parse(l.tracking); } catch (e) { continue; }
+      if (!tk || typeof tk !== 'object') continue;
+      const ch = deriveChannel(tk);
+      if (ch && tk.channel !== ch) {
+        tk.channel = ch;
+        await runQuery("UPDATE leads SET tracking = ? WHERE id = ?", [JSON.stringify(tk), l.id]);
+        chFix++;
+      }
+      if (l.source !== 'Google Ads' && isGoogleAdsUtm(tk)) {
+        await runQuery("UPDATE leads SET source = 'Google Ads' WHERE id = ?", [l.id]);
+        srcFix++;
+      }
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[restamp canal] channel recarimbado em ${chFix} lead(s); source→Google Ads em ${srcFix} lead(s).`);
+  } catch (e) { console.error('[restamp canal]', e && e.message); }
 }
 
 async function reconcileDuplicatesByPhoneOnce() {
@@ -3668,6 +3699,8 @@ app.listen(PORT, async () => {
   // acima: pega também leads sem telefone (via JID) e duplicatas que surgirem no futuro.
   try { await unifyDuplicateWhatsappCards(); } catch (e) { console.error('[unifica whatsapp boot]', e && e.message); }
   setInterval(() => { unifyDuplicateWhatsappCards().catch(() => {}); }, 30 * 60 * 1000);
+  // PONTUAL: re-carimba canal (lendo UTMs do referrer) e corrige source dos leads detectados como Google Ads.
+  try { await restampChannelsFromReferrerOnce(); } catch (e) { console.error('[restamp canal boot]', e && e.message); }
   // PONTUAL: arquiva leads sem identificação (sem telefone/e-mail, nome só de símbolo/emoji/branco).
   try { await archiveJunkUnidentifiedOnce(); } catch (e) { console.error('[limpeza lixo boot]', e && e.message); }
   // PONTUAL: backlog de leads sem "nosso número" → atribui a linha (12) 99227-1554 (wa2).
