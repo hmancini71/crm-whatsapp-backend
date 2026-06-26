@@ -135,7 +135,7 @@ db.serialize(() => {
         ["followup",       "Follow-up pagamento",      "#ec4899"],
         ["convertida",     "Venda convertida",         "#16a34a"],
         ["declinado",      "Lead declinou/cancelado",  "#ef4444"],
-        ["clientes_antigos", "Clientes antigos",       "#6366f1"]
+        ["clientes_antigos", "Comunicação com ambiente Pós-Venda", "#6366f1"]
       ];
       const stmt = db.prepare("INSERT INTO stages VALUES (?, ?, ?)");
       initialStages.forEach(s => stmt.run(s));
@@ -330,6 +330,24 @@ db.serialize(() => {
       db.run("ALTER TABLE leads ADD COLUMN pos_stage TEXT DEFAULT NULL", (alterErr) => {
         if (alterErr) console.error("Failed to add pos_stage column to leads:", alterErr);
         else console.log("Migration: added 'pos_stage' column to leads table.");
+      });
+    }
+  });
+
+  // Safe migration: 'bridge' = card na COLUNA-PONTE ("Comunicação com ambiente Pré/Pós-Venda"). É uma
+  // flag dedicada (1/0) em vez de sobrescrever stage/pos_stage — assim o card preserva a coluna de
+  // origem e, ao SAIR da ponte por qualquer lado, some da ponte nos DOIS ambientes (bridge=0).
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'bridge')) {
+      db.run("ALTER TABLE leads ADD COLUMN bridge INTEGER DEFAULT 0", (alterErr) => {
+        if (alterErr) { console.error("Failed to add bridge column to leads:", alterErr); return; }
+        console.log("Migration: added 'bridge' column to leads table.");
+        // Migra os leads que já estavam na ponte (modelo antigo, pipeline217): marca bridge=1 e tira
+        // o valor-ponte de stage/pos_stage p/ manter o invariante (bridge=0 nunca tem valor-ponte).
+        db.run("UPDATE leads SET bridge = 1 WHERE stage = 'clientes_antigos' OR pos_stage = 'clientes_antigos_pos'", () => {
+          db.run("UPDATE leads SET stage = 'convertida' WHERE bridge = 1 AND stage = 'clientes_antigos'");
+          db.run("UPDATE leads SET pos_stage = NULL WHERE bridge = 1 AND pos_stage = 'clientes_antigos_pos'");
+        });
       });
     }
   });

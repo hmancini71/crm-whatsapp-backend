@@ -107,7 +107,7 @@ app.post('/api/debug/fix-stages', async (req, res) => {
       { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
       { id: "convertida", title: "Venda convertida",        color: "#16a34a" },
       { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" },
-      { id: "clientes_antigos", title: "Clientes antigos",  color: "#6366f1" }
+      { id: "clientes_antigos", title: "Comunicação com ambiente Pós-Venda",  color: "#6366f1" }
     ];
     await runQuery("DELETE FROM stages");
     for (const s of correctStages) {
@@ -575,12 +575,22 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
     try {
       const { posSet, posDigits } = await posLineInfo();
       const isPos = await userIsPos(req);
+      // COLUNA-PONTE: 'Comunicação com ambiente Pré/Pós-Venda'. Um lead está na ponte se foi colocado
+      // nela por QUALQUER lado — stage='clientes_antigos' (pré) OU pos_stage='clientes_antigos_pos'
+      // (pós). Quem está na ponte aparece nos DOIS ambientes, na coluna-ponte de cada board.
+      const inBridge = (l) => l.bridge === 1;
       if (isPos) {
+        // PÓS: vê os leads do 2030, as vendas convertidas e os da ponte. Os da ponte vão p/ a coluna-
+        // ponte do board pós ('clientes_antigos_pos'); os demais, pela regra normal (posStageFor).
         parsedLeads = parsedLeads
-          .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida' || l.stage === 'clientes_antigos')
-          .map(l => Object.assign({}, l, { stage: posStageFor(l) }));
+          .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida' || inBridge(l))
+          .map(l => Object.assign({}, l, { stage: inBridge(l) ? 'clientes_antigos_pos' : posStageFor(l) }));
       } else if (posSet.size) {
-        parsedLeads = parsedLeads.filter(l => !leadIsPos(l, posSet, posDigits));
+        // PRÉ/admin: exclui os leads do 2030, EXCETO os que estão na coluna-ponte (cross-visíveis).
+        // Os da ponte são remapeados p/ a coluna-ponte do board pré ('clientes_antigos').
+        parsedLeads = parsedLeads
+          .filter(l => !leadIsPos(l, posSet, posDigits) || inBridge(l))
+          .map(l => inBridge(l) ? Object.assign({}, l, { stage: 'clientes_antigos' }) : l);
       }
     } catch (e) { /* em caso de falha, não filtra */ }
     res.json(parsedLeads);
@@ -667,21 +677,30 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
   try {
     const cur = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     if (!cur) return res.status(404).json({ error: "Lead não encontrado" });
-    // PÓS-VENDA: se a coluna arrastada é uma coluna do pipeline pós (ex.: visto_americano), grava
-    // em pos_stage — NUNCA mexe no 'stage' do pré-venda. (As colunas pós têm nomes próprios.)
-    if (POS_STAGES.includes(stage)) {
-      await runQuery("UPDATE leads SET pos_stage = ? WHERE id = ?", [stage, id]);
+    // COLUNA-PONTE: entrar nela (por qualquer board) marca a flag 'bridge' e PRESERVA o stage/pos_stage
+    // de origem — não grava o valor-ponte. Assim, ao SAIR da ponte (mover p/ qualquer outra coluna), o
+    // bridge volta a 0 e o card some da ponte nos DOIS ambientes, retornando à sua coluna de origem.
+    if (stage === 'clientes_antigos' || stage === 'clientes_antigos_pos') {
+      await runQuery("UPDATE leads SET bridge = 1 WHERE id = ?", [id]);
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
     }
-    // Estágios TERMINAIS: uma vez em "Venda convertida" ou "Lead declinou/cancelado",
-    // o lead NÃO muda mais de etapa por processos automáticos (drag, reconcile, etc.).
-    // EXCEÇÃO: force=true (ação deliberada do operador via combo "Editar Lead").
-    if (!force && (cur.stage === 'convertida' || cur.stage === 'declinado' || cur.stage === 'clientes_antigos') && stage !== cur.stage) {
+    // PÓS-VENDA: coluna pós (não-ponte) → grava pos_stage e SAI da ponte (bridge=0). NUNCA mexe no
+    // 'stage' do pré-venda. (As colunas pós têm nomes próprios.)
+    if (POS_STAGES.includes(stage)) {
+      await runQuery("UPDATE leads SET pos_stage = ?, bridge = 0 WHERE id = ?", [stage, id]);
+      const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+      return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
+    }
+    // Estágios TERMINAIS: uma vez em "Venda convertida" ou "Lead declinou/cancelado", o lead NÃO muda
+    // mais de etapa por processos automáticos (drag, reconcile, etc.). EXCEÇÃO: force=true OU lead na
+    // ponte (bridge=1, estado transitório — precisa poder sair).
+    if (!force && cur.bridge !== 1 && (cur.stage === 'convertida' || cur.stage === 'declinado') && stage !== cur.stage) {
       console.log(`[stage] BLOQUEADO: "${cur.name}" está em '${cur.stage}' (terminal) — mudança p/ '${stage}' ignorada.`);
       return res.json({ ...cur, tags: cur.tags ? JSON.parse(cur.tags) : [], _locked: true });
     }
-    await runQuery("UPDATE leads SET stage = ? WHERE id = ?", [stage, id]);
+    // PRÉ-VENDA: coluna pré (não-ponte) → grava stage e SAI da ponte (bridge=0).
+    await runQuery("UPDATE leads SET stage = ?, bridge = 0 WHERE id = ?", [stage, id]);
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.stage_changed', { ...lead, tags: lead.tags ? JSON.parse(lead.tags) : [] });
     res.json({
@@ -775,7 +794,7 @@ const CORRECT_STAGES = [
   { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
   { id: "convertida", title: "Venda convertida",        color: "#16a34a" },
   { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" },
-  { id: "clientes_antigos", title: "Clientes antigos",  color: "#6366f1" }
+  { id: "clientes_antigos", title: "Comunicação com ambiente Pós-Venda",  color: "#6366f1" }
 ];
 
 app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
@@ -785,9 +804,10 @@ app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
     try { const u = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]); if (u && u.wa_type) wa_type = u.wa_type; } catch (e) {}
     if (wa_type === 'pos') return res.json(POS_STAGES_FULL);
     let stages = await allRows("SELECT * FROM stages");
-    // Self-healing: if stages don't match expected set, fix them
-    const ids = stages.map(s => s.id).sort().join(',');
-    const expectedIds = CORRECT_STAGES.map(s => s.id).sort().join(',');
+    // Self-healing: if stages don't match expected set (id OU título), fix them. Inclui o título p/
+    // que renomear uma coluna no CORRECT_STAGES propague ao banco automaticamente no próximo GET.
+    const ids = stages.map(s => s.id + ' ' + s.title).sort().join('|');
+    const expectedIds = CORRECT_STAGES.map(s => s.id + ' ' + s.title).sort().join('|');
     if (ids !== expectedIds) {
       console.log("Self-healing stages: current=" + ids + " expected=" + expectedIds);
       await runQuery("DELETE FROM stages");
@@ -1843,7 +1863,7 @@ const POS_STAGES = ['vendas_concretizadas', 'clientes_antigos_pos', 'para_classi
 // Colunas do pipeline PÓS-VENDA (com título e cor) — o servidor entrega isto quando o usuário é 'pos'.
 const POS_STAGES_FULL = [
   { id: 'vendas_concretizadas', title: 'Vendas Concretizadas',                        color: '#16a34a' },
-  { id: 'clientes_antigos_pos', title: 'Clientes Antigos',                            color: '#6366f1' },
+  { id: 'clientes_antigos_pos', title: 'Comunicação com ambiente Pré-Venda',          color: '#6366f1' },
   { id: 'para_classificar',     title: '2030 para organizar',                         color: '#71717a' },
   { id: 'visto_amer_primeiro',  title: 'Primeiro Visto Americano',                    color: '#2563eb' },
   { id: 'visto_amer_renov',     title: 'Renovação Visto Americano com representação', color: '#1d4ed8' },
@@ -2621,23 +2641,34 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
     // stage='convertida' (terminal) o mantém visível ao usuário pós sem reset de automações.
     let finalStage = stage || "novo";
     let posStage = null;
-    if (POS_STAGES.includes(stage)) {
+    let bridgeVal = 0;
+    const _isBridge = (stage === 'clientes_antigos' || stage === 'clientes_antigos_pos');
+    // Função auxiliar: carimba uma linha 2030 no recv_number (p/ o lead pertencer ao ambiente pós).
+    const _stampPos = async () => {
+      if (recvNumber) return;
+      try {
+        const { posSet } = await getSaleLineFilter();
+        if (posSet.size) {
+          const ph = Array.from(posSet);
+          const acc = await getRow("SELECT number FROM whatsapp_accounts WHERE id IN (" + ph.map(() => '?').join(',') + ") AND number IS NOT NULL LIMIT 1", ph);
+          if (acc && acc.number) recvNumber = acc.number;
+        }
+      } catch (e) {}
+    };
+    if (_isBridge) {
+      // Criado direto na COLUNA-PONTE: marca bridge=1; o stage de origem fica como 'convertida' (home
+      // não-sentinela). Se veio do board pós, carimba como 2030.
+      bridgeVal = 1;
+      finalStage = "convertida";
+      if (stage === 'clientes_antigos_pos') await _stampPos();
+    } else if (POS_STAGES.includes(stage)) {
       posStage = stage;
       finalStage = "convertida";
-      if (!recvNumber) {
-        try {
-          const { posSet } = await getSaleLineFilter();
-          if (posSet.size) {
-            const ph = Array.from(posSet);
-            const acc = await getRow("SELECT number FROM whatsapp_accounts WHERE id IN (" + ph.map(() => '?').join(',') + ") AND number IS NOT NULL LIMIT 1", ph);
-            if (acc && acc.number) recvNumber = acc.number;
-          }
-        } catch (e) {}
-      }
+      await _stampPos();
     }
     await runQuery(
-      "INSERT INTO leads (id, name, company, phone, email, value, stage, pos_stage, source, account, owner, tags, createdAt, archived, priority, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, finalStage, posStage, source || "Manual", account || "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify(safeTags), createdAt, 0, priority || "", recvNumber]
+      "INSERT INTO leads (id, name, company, phone, email, value, stage, pos_stage, bridge, source, account, owner, tags, createdAt, archived, priority, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, finalStage, posStage, bridgeVal, source || "Manual", account || "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify(safeTags), createdAt, 0, priority || "", recvNumber]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.created', { ...lead, tags: safeTags });
@@ -3111,7 +3142,8 @@ async function archiveGhostDuplicates() {
       "AND (tags IS NULL OR tags = '' OR tags = '[]') " +
       "AND (followup_date IS NULL OR followup_date = '') " +
       "AND (contract_signed IS NULL OR contract_signed = 0) " +
-      "AND stage NOT IN ('novo','convertida','declinado','clientes_antigos')"
+      "AND stage NOT IN ('novo','convertida','declinado','clientes_antigos') " +
+      "AND bridge IS NOT 1"
     );
     let archived = 0;
     for (const g of ghosts) {
@@ -3207,7 +3239,7 @@ async function archiveJunkUnidentifiedOnce() {
     const FLAG = 'junk_unidentified_archive_v1';
     const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
     if (done && done.value) return;
-    const leads = await allRows("SELECT id, name, phone, email, stage, value, contract_signed FROM leads WHERE archived = 0 AND stage NOT IN ('convertida','clientes_antigos')");
+    const leads = await allRows("SELECT id, name, phone, email, stage, value, contract_signed FROM leads WHERE archived = 0 AND bridge IS NOT 1 AND stage NOT IN ('convertida','clientes_antigos')");
     const temLetraOuNumero = (s) => /[\p{L}\p{N}]/u.test(String(s || ''));
     let archived = 0;
     for (const l of leads) {
@@ -3323,7 +3355,7 @@ async function setupBacklogKickoffOnce() {
     const GREET = 'Olá, vim do site e gostaria de informações sobre vistos/imigração.';
     const digits = (s) => String(s || '').replace(/\D/g, '');
     const leads = await allRows(
-      "SELECT * FROM leads WHERE archived = 0 AND stage NOT IN ('convertida','declinado','clientes_antigos') " +
+      "SELECT * FROM leads WHERE archived = 0 AND bridge IS NOT 1 AND stage NOT IN ('convertida','declinado','clientes_antigos') " +
       "AND phone IS NOT NULL AND TRIM(phone) <> '' ORDER BY createdAt ASC"
     );
     let n = 0;
