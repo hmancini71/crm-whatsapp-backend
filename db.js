@@ -5,6 +5,43 @@ const bcrypt = require('bcryptjs');
 const DB_PATH = path.join(__dirname, 'database.db');
 const db = new sqlite3.Database(DB_PATH);
 
+// ── Regra de origem "Google Ads" ────────────────────────────────────────────
+// A mensagem inicial pré-preenchida pelo clique vindo do site (campanhas do
+// Google Ads) chega SEMPRE com esta frase exata. Quando a 1ª mensagem do cliente
+// começa com ela, a origem (source) do lead é "Google Ads". É a fonte única da
+// verdade da regra: usada tanto na criação do lead (whatsapp.js) quanto no
+// backfill dos cards antigos (migração abaixo).
+const GOOGLE_ADS_FIRST_MSG = 'olá, vim do site e gostaria de informações sobre vistos/imigração.';
+function normMsg(s) { return String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' '); }
+function isGoogleAdsFirstMsg(text) { return normMsg(text).startsWith(GOOGLE_ADS_FIRST_MSG); }
+
+// ── Regra de origem "Google Ads" por UTM ─────────────────────────────────────
+// Quando o rastreamento (campo `tracking`) tem utm_source = "Google Ads" em QUALQUER forma
+// ("Google Ads", "Google%20Ads", com &amp; no lugar de &, etc.), a origem do lead é "Google Ads".
+// Aceita o tracking como objeto, como JSON do campo, ou como query string crua. Fonte única da
+// verdade: usada no endpoint /api/integrations/lead e no backfill dos leads antigos.
+function isGoogleAdsUtm(tracking) {
+  if (!tracking) return false;
+  let tk = tracking;
+  if (typeof tracking === 'string') {
+    const raw = tracking.replace(/&amp;/gi, '&');
+    try {
+      tk = JSON.parse(tracking);
+    } catch (e) {
+      tk = {};
+      raw.replace(/^[?#]/, '').split('&').forEach(pair => {
+        const i = pair.indexOf('=');
+        if (i > 0) tk[pair.slice(0, i).trim()] = pair.slice(i + 1);
+      });
+    }
+  }
+  if (!tk || typeof tk !== 'object') return false;
+  let src = String(tk.utm_source == null ? '' : tk.utm_source).replace(/&amp;/gi, '&');
+  try { src = decodeURIComponent(src.replace(/\+/g, ' ')); } catch (e) { src = src.replace(/%20/gi, ' '); }
+  src = src.toLowerCase().trim();
+  return /google\s*ads/.test(src) || /adwords|gads/.test(src);
+}
+
 // Run initialization sequentially
 db.serialize(() => {
   // 1. Users Table
@@ -582,6 +619,80 @@ db.serialize(() => {
       stmt.finalize();
     }
   });
+
+  // ── Backfill ÚNICO: aplica a regra de origem "Google Ads" aos cards JÁ existentes.
+  // Para cada lead, olha a PRIMEIRA mensagem recebida do cliente; se ela começa com a
+  // frase do site (isGoogleAdsFirstMsg), reclassifica source = 'Google Ads'. Mesma regra
+  // que passa a valer na criação (whatsapp.js). Guard por flag em app_settings → roda
+  // só uma vez por base, para não sobrescrever ajustes manuais em deploys futuros.
+  db.get("SELECT value FROM app_settings WHERE key = 'src_google_ads_backfill_v1'", (gErr, gRow) => {
+    if (gErr) { console.error("Backfill Google Ads: erro ao ler flag:", gErr.message); return; }
+    if (gRow) return; // já rodou nesta base
+    db.all("SELECT id, source, whatsapp_jid, phone FROM leads", (lErr, leads) => {
+      if (lErr) { console.error("Backfill Google Ads: erro ao ler leads:", lErr.message); return; }
+      db.all("SELECT id, whatsapp_jid, phone FROM conversations", (cErr, convs) => {
+        if (cErr) { console.error("Backfill Google Ads: erro ao ler conversations:", cErr.message); return; }
+        const last8 = (p) => { const d = String(p || '').replace(/\D/g, ''); return d.length >= 8 ? d.slice(-8) : ''; };
+        // Índices p/ casar lead → conversa (mesma lógica de dedup usada no WhatsApp: jid e últimos 8 dígitos)
+        const byJid = new Map(), byL8 = new Map();
+        convs.forEach(c => {
+          if (c.whatsapp_jid) byJid.set(c.whatsapp_jid, c.id);
+          const l8 = last8(c.phone) || last8(c.whatsapp_jid);
+          if (l8 && !byL8.has(l8)) byL8.set(l8, c.id);
+        });
+        const firstThemMsg = (convId) => new Promise((resolve) => {
+          db.get("SELECT text FROM messages WHERE conversationId = ? AND `from` = 'them' ORDER BY timestamp ASC LIMIT 1",
+            [convId], (e, r) => resolve(e ? null : (r && r.text)));
+        });
+        (async () => {
+          try {
+            const toFix = [];
+            for (const ld of leads) {
+              if (ld.source === 'Google Ads') continue; // já classificado
+              let convId = ld.whatsapp_jid ? byJid.get(ld.whatsapp_jid) : null;
+              if (!convId) { const l8 = last8(ld.phone) || last8(ld.whatsapp_jid); if (l8) convId = byL8.get(l8); }
+              if (!convId) continue;
+              const t = await firstThemMsg(convId);
+              if (isGoogleAdsFirstMsg(t)) toFix.push(ld.id);
+            }
+            if (toFix.length) {
+              const ph = toFix.map(() => '?').join(',');
+              db.run(`UPDATE leads SET source = 'Google Ads' WHERE id IN (${ph})`, toFix, (uErr) => {
+                if (uErr) console.error("Backfill Google Ads: erro no UPDATE:", uErr.message);
+                else console.log(`Backfill Google Ads: ${toFix.length} card(s) reclassificados como origem 'Google Ads'.`);
+              });
+            } else {
+              console.log("Backfill Google Ads: nenhum card antigo correspondente à frase do site.");
+            }
+            db.run("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('src_google_ads_backfill_v1', ?)", [new Date().toISOString()]);
+          } catch (e) {
+            console.error("Backfill Google Ads: falha inesperada:", e && e.message);
+          }
+        })();
+      });
+    });
+  });
+
+  // ── Backfill ÚNICO: classifica origem "Google Ads" nos leads cujo rastreamento (tracking) tem
+  // utm_source = Google Ads. Mesma regra do endpoint /api/integrations/lead. Guard por flag → 1x por base.
+  db.get("SELECT value FROM app_settings WHERE key = 'src_google_ads_utm_backfill_v1'", (gErr, gRow) => {
+    if (gErr) { console.error("Backfill UTM Google Ads: erro ao ler flag:", gErr.message); return; }
+    if (gRow) return; // já rodou nesta base
+    db.all("SELECT id, source, tracking FROM leads WHERE tracking IS NOT NULL AND TRIM(tracking) <> ''", (lErr, rows) => {
+      if (lErr) { console.error("Backfill UTM Google Ads: erro ao ler leads:", lErr.message); return; }
+      const toFix = (rows || []).filter(r => r.source !== 'Google Ads' && isGoogleAdsUtm(r.tracking)).map(r => r.id);
+      if (toFix.length) {
+        const ph = toFix.map(() => '?').join(',');
+        db.run(`UPDATE leads SET source = 'Google Ads' WHERE id IN (${ph})`, toFix, (uErr) => {
+          if (uErr) console.error("Backfill UTM Google Ads: erro no UPDATE:", uErr.message);
+          else console.log(`Backfill UTM Google Ads: ${toFix.length} lead(s) reclassificados por utm_source.`);
+        });
+      } else {
+        console.log("Backfill UTM Google Ads: nenhum lead com utm_source Google Ads.");
+      }
+      db.run("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('src_google_ads_utm_backfill_v1', ?)", [new Date().toISOString()]);
+    });
+  });
 });
 
 // Helper functions for promise based database calls
@@ -616,5 +727,8 @@ module.exports = {
   db,
   runQuery,
   getRow,
-  allRows
+  allRows,
+  isGoogleAdsFirstMsg,
+  GOOGLE_ADS_FIRST_MSG,
+  isGoogleAdsUtm
 };

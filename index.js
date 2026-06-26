@@ -11,7 +11,7 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
-const { runQuery, getRow, allRows } = require('./db');
+const { runQuery, getRow, allRows, isGoogleAdsUtm } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
 const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
 const {
@@ -3091,8 +3091,13 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
       existing = await getRow("SELECT * FROM leads WHERE archived = 0 AND LOWER(email) = ?", [String(email).toLowerCase()]);
     }
     if (existing) {
-      // Lead JÁ existe: só carimba o rastreamento. NÃO sobrescreve nome/telefone/comentários do lead.
-      await runQuery("UPDATE leads SET tracking = ? WHERE id = ?", [JSON.stringify(tracking), existing.id]);
+      // Lead JÁ existe: carimba o rastreamento. NÃO sobrescreve nome/telefone/comentários do lead.
+      // Regra de origem: se o utm_source é Google Ads, classifica a origem como "Google Ads" também aqui.
+      if (isGoogleAdsUtm(tracking)) {
+        await runQuery("UPDATE leads SET tracking = ?, source = 'Google Ads' WHERE id = ?", [JSON.stringify(tracking), existing.id]);
+      } else {
+        await runQuery("UPDATE leads SET tracking = ? WHERE id = ?", [JSON.stringify(tracking), existing.id]);
+      }
       const upd = await getRow("SELECT * FROM leads WHERE id = ?", [existing.id]);
       sendWebhook('lead.updated', { ...upd, tags: upd.tags ? JSON.parse(upd.tags) : [], tracking });
       return res.json({ ok: true, action: 'tracking_stamped', leadId: existing.id });
@@ -3103,10 +3108,12 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
     // "notes" (mensagem do cliente) e "destination" vão para os comentários internos — só na CRIAÇÃO.
     let comments = String(notes || '').slice(0, 2000);
     if (b.destination) comments = (comments ? comments + '\n' : '') + 'Destino: ' + String(b.destination).slice(0, 120);
+    // Regra de origem: utm_source = Google Ads → origem "Google Ads"; senão usa source/utm_source/title.
+    const leadSource = isGoogleAdsUtm(tracking) ? 'Google Ads' : String(b.source || b.utm_source || b.title || 'Marketing').slice(0, 80);
     await runQuery(
       "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority, tracking, comments) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [id, String(name || email || phone).slice(0, 200), String(company || '').slice(0, 200), String(phone || ''), String(email || ''), Number(b.value) || 0,
-       'novo', String(b.source || b.utm_source || b.title || 'Marketing').slice(0, 80), '', 'Marketing', JSON.stringify(tags), createdAt, 0, '', JSON.stringify(tracking), comments]
+       'novo', leadSource, '', 'Marketing', JSON.stringify(tags), createdAt, 0, '', JSON.stringify(tracking), comments]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.created', { ...lead, tags, tracking });
@@ -3248,6 +3255,95 @@ async function reconcileDuplicatesByPhoneOnce() {
     await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
     console.log(`[dedup telefone] concluído: ${archived} duplicata(s) arquivada(s) em ${gruposCorrigidos} grupo(s) de mesmo telefone.`);
   } catch (e) { console.error('[dedup telefone]', e && e.message); }
+}
+
+// RECORRENTE (boot + a cada 30 min): unifica num ÚNICO card todos os leads ATIVOS que tenham o MESMO
+// número de WhatsApp. Chave robusta: últimos 8 dígitos do telefone; sem telefone, usa os dígitos do
+// JID @s.whatsapp.net; senão, o JID @lid exato. Mantém o card na etapa MAIS avançada (empate: contato
+// do cliente mais recente, depois o mais completo), CONSOLIDA nele os dados dos demais (pós-venda,
+// comentários, valor, tags, contrato, comprovante, e-mail, rastreamento, etc.) e ARQUIVA as duplicatas
+// (archived=1, reversível). Idempotente: depois de rodar, cada grupo fica com 1 card ativo → no-op.
+// LIMITAÇÃO conhecida: um card só-@lid (sem telefone) não casa com a versão "número real" da mesma
+// pessoa — esse caso é tratado pelo dedup-fantasma (mesmo nome, sem telefone).
+async function unifyDuplicateWhatsappCards() {
+  try {
+    const leads = await allRows("SELECT * FROM leads WHERE archived = 0");
+    const digits = (s) => String(s || '').replace(/\D/g, '');
+    const waKey = (l) => {
+      const pd = digits(l.phone);
+      if (pd.length >= 8) return 'n:' + pd.slice(-8);
+      const jid = String(l.whatsapp_jid || '');
+      if (jid.endsWith('@s.whatsapp.net')) {
+        const jd = digits(jid.split('@')[0]);
+        if (jd.length >= 8) return 'n:' + jd.slice(-8);
+      }
+      return jid ? 'j:' + jid : null;
+    };
+    const groups = {};
+    leads.forEach(l => { const k = waKey(l); if (k) (groups[k] = groups[k] || []).push(l); });
+    const RANK = { convertida: 6, clientes_antigos: 5, followup: 4, proposta: 3, tratamento: 2, novo: 1, declinado: 0 };
+    const rk = (s) => (RANK[s] != null ? RANK[s] : 1);
+    const completeness = (l) => (l.email ? 1 : 0) + (l.tracking ? 1 : 0) + (l.pos_stage ? 1 : 0) + (Number(l.value) > 0 ? 1 : 0) + (Number(l.contract_signed) === 1 ? 1 : 0);
+    const isPlaceholderName = (n) => { const s = String(n || '').trim(); return !s || /^(usu[aá]rio whatsapp|instagram( lead)?|lead)$/i.test(s); };
+    const parseTags = (t) => { try { const x = JSON.parse(t || '[]'); return Array.isArray(x) ? x : []; } catch (e) { return []; } };
+    const unionTags = (a, b) => {
+      const out = [], seen = new Set();
+      [...parseTags(a), ...parseTags(b)].forEach(t => { const key = String(t).toLowerCase().trim(); if (t && !seen.has(key)) { seen.add(key); out.push(t); } });
+      return out;
+    };
+    // Colunas que podem ser consolidadas no card mantido (stage/priority/account NÃO mudam: são do vencedor).
+    const COLS = ['name', 'company', 'email', 'phone', 'value', 'source', 'tags', 'comments', 'pos_stage',
+      'bridge', 'contract_signed', 'signed_override', 'payment_proof', 'followup_date', 'decline_reason',
+      'tracking', 'recv_number', 'whatsapp_jid', 'createdAt', 'last_client_ts', 'lastClientReply'];
+    let archived = 0, gruposCorrigidos = 0;
+    for (const k of Object.keys(groups)) {
+      const arr = groups[k];
+      if (arr.length < 2) continue;
+      arr.sort((a, b) => {
+        const ra = rk(a.stage), rb = rk(b.stage);
+        if (ra !== rb) return rb - ra;                               // etapa mais avançada primeiro
+        const ta = Number(a.last_client_ts) || 0, tb = Number(b.last_client_ts) || 0;
+        if (ta !== tb) return tb - ta;                               // contato do cliente mais recente
+        return completeness(b) - completeness(a);                    // mais completo
+      });
+      const keep = arr[0];
+      const acc = Object.assign({}, keep);                           // cópia de trabalho p/ consolidar
+      for (let i = 1; i < arr.length; i++) {
+        const d = arr[i];
+        const empty = (v) => v == null || v === '';
+        if (isPlaceholderName(acc.name) && !isPlaceholderName(d.name)) acc.name = d.name;
+        if (empty(acc.company) && !empty(d.company)) acc.company = d.company;
+        if (empty(acc.email) && !empty(d.email)) acc.email = d.email;
+        if (digits(acc.phone).length < 8 && digits(d.phone).length >= 8) acc.phone = d.phone;
+        if ((empty(acc.value) || Number(acc.value) === 0) && Number(d.value) > 0) acc.value = d.value;
+        if ((empty(acc.source) || acc.source === 'Venda') && !empty(d.source) && d.source !== 'Venda') acc.source = d.source;
+        if (empty(acc.pos_stage) && !empty(d.pos_stage)) acc.pos_stage = d.pos_stage;
+        if (empty(acc.payment_proof) && !empty(d.payment_proof)) acc.payment_proof = d.payment_proof;
+        if (empty(acc.followup_date) && !empty(d.followup_date)) acc.followup_date = d.followup_date;
+        if (empty(acc.decline_reason) && !empty(d.decline_reason)) acc.decline_reason = d.decline_reason;
+        if (empty(acc.tracking) && !empty(d.tracking)) acc.tracking = d.tracking;
+        if (empty(acc.recv_number) && !empty(d.recv_number)) acc.recv_number = d.recv_number;
+        if (empty(acc.whatsapp_jid) && !empty(d.whatsapp_jid)) acc.whatsapp_jid = d.whatsapp_jid;
+        if (Number(acc.contract_signed) !== 1 && Number(d.contract_signed) === 1) acc.contract_signed = 1;
+        if (Number(acc.signed_override) !== 1 && Number(d.signed_override) === 1) acc.signed_override = 1;
+        if (Number(acc.bridge) !== 1 && Number(d.bridge) === 1) acc.bridge = 1;
+        if (!empty(d.createdAt) && (empty(acc.createdAt) || String(d.createdAt) < String(acc.createdAt))) acc.createdAt = d.createdAt;
+        if ((Number(d.last_client_ts) || 0) > (Number(acc.last_client_ts) || 0)) acc.last_client_ts = d.last_client_ts;
+        if (!empty(d.lastClientReply) && (empty(acc.lastClientReply) || String(d.lastClientReply) > String(acc.lastClientReply))) acc.lastClientReply = d.lastClientReply;
+        acc.tags = JSON.stringify(unionTags(acc.tags, d.tags));
+        const dc = String(d.comments || '').trim();
+        if (dc && !String(acc.comments || '').includes(dc)) acc.comments = String(acc.comments || '').trim() ? (String(acc.comments).trim() + '\n' + dc) : dc;
+        await runQuery("UPDATE leads SET archived = 1 WHERE id = ?", [d.id]);
+        archived++;
+        console.log(`[unifica whatsapp] arquivado "${d.name}" (${d.stage}) — duplicata de "${keep.name}" (${keep.stage}); chave ${k}.`);
+      }
+      const sets = [], vals = [];
+      for (const c of COLS) { if (acc[c] !== keep[c]) { sets.push(c + ' = ?'); vals.push(acc[c]); } }
+      if (sets.length) { vals.push(keep.id); await runQuery("UPDATE leads SET " + sets.join(', ') + " WHERE id = ?", vals); }
+      gruposCorrigidos++;
+    }
+    if (archived) console.log(`[unifica whatsapp] concluído: ${archived} card(s) unificado(s) em ${gruposCorrigidos} grupo(s) de mesmo número.`);
+  } catch (e) { console.error('[unifica whatsapp]', e && e.message); }
 }
 
 // PONTUAL (uma única vez, guardado por flag): arquiva leads SEM IDENTIFICAÇÃO — sem telefone (≥8 díg.),
@@ -3545,6 +3641,11 @@ app.listen(PORT, async () => {
   try { await ensurePosVendaDefaults(); } catch (e) { console.error('[wa pós-venda boot]', e && e.message); }
   // PONTUAL: reconcilia duplicatas JÁ existentes de mesmo telefone (arquiva, mantendo a etapa mais avançada).
   try { await reconcileDuplicatesByPhoneOnce(); } catch (e) { console.error('[dedup telefone boot]', e && e.message); }
+  // RECORRENTE: unifica num único card todos os leads do MESMO número de WhatsApp (arquiva duplicatas,
+  // consolida os dados no card da etapa mais avançada) — no boot e a cada 30 min. Supera o dedup pontual
+  // acima: pega também leads sem telefone (via JID) e duplicatas que surgirem no futuro.
+  try { await unifyDuplicateWhatsappCards(); } catch (e) { console.error('[unifica whatsapp boot]', e && e.message); }
+  setInterval(() => { unifyDuplicateWhatsappCards().catch(() => {}); }, 30 * 60 * 1000);
   // PONTUAL: arquiva leads sem identificação (sem telefone/e-mail, nome só de símbolo/emoji/branco).
   try { await archiveJunkUnidentifiedOnce(); } catch (e) { console.error('[limpeza lixo boot]', e && e.message); }
   // PONTUAL: backlog de leads sem "nosso número" → atribui a linha (12) 99227-1554 (wa2).

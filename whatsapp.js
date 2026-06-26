@@ -10,7 +10,7 @@ const fs = require('fs');
 const QRCode = require('qrcode');
 const ffmpegPath = require('ffmpeg-static');
 const ffmpeg = require('fluent-ffmpeg');
-const { runQuery, getRow, allRows } = require('./db');
+const { runQuery, getRow, allRows, isGoogleAdsFirstMsg } = require('./db');
 const { getNovoLeadReply, getAiSettings } = require('./ai');
 // ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
 const _aiSentIds = new Set();
@@ -528,10 +528,14 @@ async function connectWhatsApp(id, isReconnect = false) {
           if (!fromJid.endsWith('@lid') && phone.startsWith('+55') && phone.length === 14) {
             formattedPhone = `+55 ${phone.slice(3, 5)} ${phone.slice(5, 10)}-${phone.slice(10)}`;
           }
-          console.log(`[WhatsApp ${id}] No lead found for ${phone}. Creating new lead: leadId=${leadId}`);
+          // Regra de origem: a 1ª mensagem (pré-preenchida pelo site, clique vindo de
+          // anúncio do Google Ads) começa SEMPRE com a frase padrão → origem "Google Ads".
+          // Qualquer outra abertura mantém o padrão "Venda".
+          const leadSource = isGoogleAdsFirstMsg(text) ? "Google Ads" : "Venda";
+          console.log(`[WhatsApp ${id}] No lead found for ${phone}. Creating new lead: leadId=${leadId} (source=${leadSource})`);
           await runQuery(
             "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [leadId, name, "", fromJid.endsWith('@lid') ? "" : formattedPhone, "", 0, "novo", "Venda", id, "Rafael Andrade", JSON.stringify([]), createdAt, 0, fromJid, ourNumber]
+            [leadId, name, "", fromJid.endsWith('@lid') ? "" : formattedPhone, "", 0, "novo", leadSource, id, "Rafael Andrade", JSON.stringify([]), createdAt, 0, fromJid, ourNumber]
           );
         } else if (lead.archived === 1) {
           // Lead arquivado ("bloqueado") voltou a falar → restaura. Vai para "Novo Leads",
