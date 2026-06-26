@@ -905,22 +905,28 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const _byDay = {};
     _range.forEach(d => { _byDay[d.iso] = { day: d.label, ga: 0, meta: 0, org: 0, semclass: 0, total: 0 }; });
     const _allInRange = await allRows(
-      "SELECT createdAt, tracking FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?",
+      "SELECT createdAt, tracking, source FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?",
       [_range[0].iso, _range[_range.length - 1].iso]
     );
     _allInRange.forEach(l => {
       const k = String(l.createdAt || '').slice(0, 10);
       const slot = _byDay[k]; if (!slot) return;
-      let cat = 'semclass';
+      // Canal pelo RASTREAMENTO (autoritativo: UTM/gclid). Sem rastreamento que resolva um canal,
+      // usa o campo `source` como FALLBACK — assim leads classificados como "Google Ads"/"Meta Ads"
+      // por outras regras (ex.: 1ª mensagem do site) aparecem no canal certo, não em "Sem classificação".
+      let ch = '';
       if (l.tracking) {
         try {
           const tk = JSON.parse(l.tracking);
-          if (tk && typeof tk === 'object' && Object.keys(tk).length) {
-            const ch = deriveChannel(tk);
-            cat = (ch === 'Google Ads') ? 'ga' : (ch === 'Meta Ads') ? 'meta' : 'org';
-          }
+          if (tk && typeof tk === 'object' && Object.keys(tk).length) ch = deriveChannel(tk);
         } catch (e) {}
       }
+      const src = String(l.source || '').trim().toLowerCase();
+      let cat;
+      if (ch === 'Google Ads' || src === 'google ads') cat = 'ga';
+      else if (ch === 'Meta Ads' || src === 'meta ads' || src === 'facebook ads') cat = 'meta';
+      else if (ch) cat = 'org';            // tinha rastreamento, mas canal orgânico/outra fonte
+      else cat = 'semclass';               // sem rastreamento e sem source de canal pago
       slot[cat]++; slot.total++;
     });
     const weeklyByChannel = _range.map(d => _byDay[d.iso]);
