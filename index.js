@@ -2615,9 +2615,29 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
         recvNumber = (acc && acc.number) || null;
       } catch (e) {}
     }
+    // PÓS-VENDA: se a etapa escolhida é uma COLUNA do pipeline pós (ex.: visto_amer_primeiro), grava
+    // em 'pos_stage' — NUNCA no 'stage' do pré-venda (mesma regra do PATCH /stage). O lead é carimbado
+    // como pós (recv_number de uma linha 2030) p/ aparecer SÓ no board pós e não vazar no pré, e
+    // stage='convertida' (terminal) o mantém visível ao usuário pós sem reset de automações.
+    let finalStage = stage || "novo";
+    let posStage = null;
+    if (POS_STAGES.includes(stage)) {
+      posStage = stage;
+      finalStage = "convertida";
+      if (!recvNumber) {
+        try {
+          const { posSet } = await getSaleLineFilter();
+          if (posSet.size) {
+            const ph = Array.from(posSet);
+            const acc = await getRow("SELECT number FROM whatsapp_accounts WHERE id IN (" + ph.map(() => '?').join(',') + ") AND number IS NOT NULL LIMIT 1", ph);
+            if (acc && acc.number) recvNumber = acc.number;
+          }
+        } catch (e) {}
+      }
+    }
     await runQuery(
-      "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, priority, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, stage || "novo", source || "Manual", account || "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify(safeTags), createdAt, 0, priority || "", recvNumber]
+      "INSERT INTO leads (id, name, company, phone, email, value, stage, pos_stage, source, account, owner, tags, createdAt, archived, priority, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, finalStage, posStage, source || "Manual", account || "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify(safeTags), createdAt, 0, priority || "", recvNumber]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.created', { ...lead, tags: safeTags });
