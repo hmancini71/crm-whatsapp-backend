@@ -896,7 +896,7 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const _range = daysRangeSP(req.query.from, req.query.to, 15);
     const weeklyLeads = [];
     for (const dia of _range) {
-      const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ?", [dia.iso]);
+      const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ? AND archived = 0", [dia.iso]);
       weeklyLeads.push({ day: dia.label, value: (r && r.count) || 0 });
     }
 
@@ -905,30 +905,13 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const _byDay = {};
     _range.forEach(d => { _byDay[d.iso] = { day: d.label, ga: 0, meta: 0, org: 0, semclass: 0, total: 0 }; });
     const _allInRange = await allRows(
-      "SELECT createdAt, tracking, source FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?",
+      "SELECT createdAt, tracking, source FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0",
       [_range[0].iso, _range[_range.length - 1].iso]
     );
     _allInRange.forEach(l => {
       const k = String(l.createdAt || '').slice(0, 10);
       const slot = _byDay[k]; if (!slot) return;
-      // Canal pelo RASTREAMENTO (autoritativo: UTM/gclid). Sem rastreamento que resolva um canal,
-      // usa o campo `source` como FALLBACK — assim leads classificados como "Google Ads"/"Meta Ads"
-      // por outras regras (ex.: 1ª mensagem do site) aparecem no canal certo, não em "Sem classificação".
-      let ch = '';
-      if (l.tracking) {
-        try {
-          const tk = JSON.parse(l.tracking);
-          if (tk && typeof tk === 'object' && Object.keys(tk).length) ch = deriveChannel(tk);
-        } catch (e) {}
-      }
-      const src = String(l.source || '').trim().toLowerCase();
-      let cat;
-      if (ch === 'Google Ads') cat = 'ga';                          // clique de anúncio comprova o canal
-      else if (ch === 'Meta Ads') cat = 'meta';
-      else if (src === 'google ads') cat = 'ga';                    // sem prova no tracking → confia no source
-      else if (src === 'meta ads' || src === 'facebook ads') cat = 'meta';
-      else if (ch) cat = 'org';                                     // tracking resolveu canal não-pago (Orgânico/outra fonte)
-      else cat = 'semclass';                                        // sem rastreamento e sem source de canal pago
+      const cat = leadChannelCat(l); // mesma classificação do endpoint /dashboard/channel-leads (popup)
       slot[cat]++; slot.total++;
     });
     const weeklyByChannel = _range.map(d => _byDay[d.iso]);
@@ -953,6 +936,24 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// 6a2. Dashboard: lista os leads de um DIA + CANAL (popup ao clicar num segmento da barra).
+// Usa EXATAMENTE a mesma base e classificação do gráfico "Leads por canal" (active-only + leadChannelCat),
+// então a contagem do popup bate com a altura do segmento. Inclui todos os ambientes (igual ao gráfico).
+app.get('/api/dashboard/channel-leads', authenticateToken, async (req, res) => {
+  try {
+    const date = String(req.query.date || '').slice(0, 10);
+    const channel = String(req.query.channel || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || ['ga', 'meta', 'org', 'semclass'].indexOf(channel) < 0) {
+      return res.status(400).json({ error: 'Parâmetros: date=YYYY-MM-DD e channel=ga|meta|org|semclass' });
+    }
+    const rows = await allRows("SELECT * FROM leads WHERE substr(createdAt,1,10) = ? AND archived = 0", [date]);
+    const leads = rows
+      .filter(l => leadChannelCat(l) === channel)
+      .map(l => Object.assign({}, l, { tags: l.tags ? (function () { try { return JSON.parse(l.tags); } catch (e) { return []; } })() : [] }));
+    res.json(leads);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // 6b. Dashboard: contratos assinados por dia (e-mails "Contrato Assinado pelo Cliente:")
@@ -3059,6 +3060,23 @@ function deriveChannel(tk) {
   if (tk && typeof tk.channel === 'string' && tk.channel.trim()) return tk.channel.trim();
   if (src && src !== 'direct' && src !== '(direct)') return src.charAt(0).toUpperCase() + src.slice(1);
   return 'Orgânico';
+}
+
+// Categoria do gráfico (ga|meta|org|semclass) de um lead — FONTE ÚNICA usada tanto no gráfico
+// "Leads por canal" quanto no endpoint que lista os leads de um dia+canal (popup). Canal pelo
+// rastreamento (deriveChannel); sem prova no tracking, confia no campo source; senão org/semclass.
+function leadChannelCat(l) {
+  let ch = '';
+  if (l && l.tracking) {
+    try { const tk = JSON.parse(l.tracking); if (tk && typeof tk === 'object' && Object.keys(tk).length) ch = deriveChannel(tk); } catch (e) {}
+  }
+  const src = String((l && l.source) || '').trim().toLowerCase();
+  if (ch === 'Google Ads') return 'ga';
+  if (ch === 'Meta Ads') return 'meta';
+  if (src === 'google ads') return 'ga';
+  if (src === 'meta ads' || src === 'facebook ads') return 'meta';
+  if (ch) return 'org';
+  return 'semclass';
 }
 
 // API de ENTRADA: recebe leads/rastreamento do marketing digital.
