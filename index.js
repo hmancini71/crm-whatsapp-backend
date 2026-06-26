@@ -923,10 +923,12 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
       }
       const src = String(l.source || '').trim().toLowerCase();
       let cat;
-      if (ch === 'Google Ads' || src === 'google ads') cat = 'ga';
-      else if (ch === 'Meta Ads' || src === 'meta ads' || src === 'facebook ads') cat = 'meta';
-      else if (ch) cat = 'org';            // tinha rastreamento, mas canal orgânico/outra fonte
-      else cat = 'semclass';               // sem rastreamento e sem source de canal pago
+      if (ch === 'Google Ads') cat = 'ga';                          // clique de anúncio comprova o canal
+      else if (ch === 'Meta Ads') cat = 'meta';
+      else if (src === 'google ads') cat = 'ga';                    // sem prova no tracking → confia no source
+      else if (src === 'meta ads' || src === 'facebook ads') cat = 'meta';
+      else if (ch) cat = 'org';                                     // tracking resolveu canal não-pago (Orgânico/outra fonte)
+      else cat = 'semclass';                                        // sem rastreamento e sem source de canal pago
       slot[cat]++; slot.total++;
     });
     const weeklyByChannel = _range.map(d => _byDay[d.iso]);
@@ -3044,12 +3046,15 @@ app.post('/api/settings/integrations', authenticateToken, async (req, res) => {
 // Deriva o CANAL de origem a partir do rastreamento: "Google Ads", "Meta Ads", "Orgânico" ou a
 // própria fonte (capitalizada) quando for outra origem paga conhecida pela utm_source.
 function deriveChannel(tk) {
-  // Canal explícito já definido (ex.: classificação manual/por mensagem do Meta) tem prioridade.
-  if (tk && typeof tk.channel === 'string' && tk.channel.trim()) return tk.channel.trim();
   const src = String(tk.utm_source || '').toLowerCase();
   const med = String(tk.utm_medium || '').toLowerCase();
+  // Sinais FORTES de clique de anúncio têm prioridade ATÉ sobre o channel gravado — que pode estar
+  // defasado/errado (ex.: lead com gclid + utm_source=Google Ads foi rotulado "Meta Ads" por engano
+  // numa rotulagem antiga). gclid = clique do Google; fbclid = clique do Meta.
   if (tk.gclid || /google|adwords|gads/.test(src)) return 'Google Ads';
   if (tk.fbclid || /facebook|meta|instagram|\bfb\b|\big\b/.test(src) || /facebook|meta|instagram/.test(med)) return 'Meta Ads';
+  // Sem sinal de clique de anúncio: usa o channel explícito (classificação manual/por mensagem) se houver.
+  if (tk && typeof tk.channel === 'string' && tk.channel.trim()) return tk.channel.trim();
   if (src && src !== 'direct' && src !== '(direct)') return src.charAt(0).toUpperCase() + src.slice(1);
   return 'Orgânico';
 }
