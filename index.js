@@ -3280,6 +3280,17 @@ async function unifyDuplicateWhatsappCards() {
   try {
     const leads = await allRows("SELECT * FROM leads WHERE archived = 0");
     const digits = (s) => String(s || '').replace(/\D/g, '');
+    // Pré-passo: recupera o telefone REAL dos leads SEM telefone (ex.: cards @lid) a partir da CONVERSA
+    // vinculada (mesmo whatsapp_jid). O @lid é um id de privacidade do WhatsApp e NÃO revela o número;
+    // sem telefone esses cards não casam por número e nunca unificam. Com o número recuperado, a
+    // unificação por número passa a funcionar — e mensagens futuras também casam pelo telefone.
+    for (const l of leads) {
+      if (digits(l.phone).length >= 8 || !l.whatsapp_jid) continue;
+      try {
+        const c = await getRow("SELECT phone FROM conversations WHERE whatsapp_jid = ? AND phone IS NOT NULL AND TRIM(phone) <> '' LIMIT 1", [l.whatsapp_jid]);
+        if (c && digits(c.phone).length >= 8) { await runQuery("UPDATE leads SET phone = ? WHERE id = ?", [c.phone, l.id]); l.phone = c.phone; }
+      } catch (e) {}
+    }
     const waKey = (l) => {
       const pd = digits(l.phone);
       if (pd.length >= 8) return 'n:' + pd.slice(-8);
