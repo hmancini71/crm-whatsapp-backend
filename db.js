@@ -151,7 +151,9 @@ db.serialize(() => {
         ["wa3", "Vendas", "", "#7c3aed", "disconnected", 0, null],
         ["wa4", "Vendas", "", "#ea580c", "disconnected", 0, null],
         ["wa5", "Vendas", "", "#db2777", "disconnected", 0, null],
-        ["wa6", "Vendas", "", "#16a34a", "disconnected", 0, null]
+        ["wa6", "Vendas", "", "#16a34a", "disconnected", 0, null],
+        ["wa7", "Vendas", "", "#0891b2", "disconnected", 0, null],
+        ["wa8", "Vendas", "", "#ca8a04", "disconnected", 0, null]
       ];
       const stmt = db.prepare("INSERT INTO whatsapp_accounts VALUES (?, ?, ?, ?, ?, ?, ?)");
       initialAccounts.forEach(a => stmt.run(a));
@@ -159,12 +161,14 @@ db.serialize(() => {
     }
   });
 
-  // Migração: garante que as linhas wa5 e wa6 existam em bancos JÁ criados (que tinham só wa1–wa4).
-  // INSERT OR IGNORE não toca nas contas existentes — apenas acrescenta as que faltam (total: 6 linhas).
+  // Migração: garante que as linhas wa5–wa8 existam em bancos JÁ criados (que tinham menos linhas).
+  // INSERT OR IGNORE não toca nas contas existentes — apenas acrescenta as que faltam (total: 8 linhas).
   {
     const extraAccounts = [
       ["wa5", "Vendas", "", "#db2777", "disconnected", 0, null],
-      ["wa6", "Vendas", "", "#16a34a", "disconnected", 0, null]
+      ["wa6", "Vendas", "", "#16a34a", "disconnected", 0, null],
+      ["wa7", "Vendas", "", "#0891b2", "disconnected", 0, null],
+      ["wa8", "Vendas", "", "#ca8a04", "disconnected", 0, null]
     ];
     const stmtE = db.prepare("INSERT OR IGNORE INTO whatsapp_accounts (id, label, number, color, status, unread, connect_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
     extraAccounts.forEach(a => stmtE.run(a));
