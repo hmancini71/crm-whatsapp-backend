@@ -1859,7 +1859,7 @@ function leadIsPos(l, posSet, posDigits) {
   return !!(rn && posDigits.some(d => rn.endsWith(d)));
 }
 // Colunas do pipeline PÓS-VENDA.
-const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar', 'visto_amer_agendamento', 'visto_amer_validacao', 'visto_amer_envio', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
+const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar', 'visto_amer_agendamento', 'visto_amer_validacao', 'visto_amer_envio', 'visto_canadense', 'visto_portugues', 'visto_australiano', 'visto_mexicano', 'aire_italiano', 'outros'];
 // Colunas do pipeline PÓS-VENDA (com título e cor) — o servidor entrega isto quando o usuário é 'pos'.
 // As 3 colunas com group='Grupo Visto Americano' são raias internas agrupadas no frontend sob um título único.
 const POS_STAGES_FULL = [
@@ -1871,6 +1871,8 @@ const POS_STAGES_FULL = [
   { id: 'visto_amer_envio',       title: 'Envio passaporte',                   color: '#7c3aed', group: 'Grupo Visto Americano' },
   { id: 'visto_canadense',        title: 'Vistos canadenses',                  color: '#ef4444' },
   { id: 'visto_portugues',        title: 'Vistos portugueses',                 color: '#15803d' },
+  { id: 'visto_australiano',      title: 'Vistos australianos',                color: '#0891b2' },
+  { id: 'visto_mexicano',         title: 'Vistos mexicanos',                   color: '#ca8a04' },
   { id: 'aire_italiano',          title: 'Passaporte italiano / AIRE',         color: '#0ea5e9' },
   { id: 'outros',                 title: 'Outros',                             color: '#6b7280' }
 ];
