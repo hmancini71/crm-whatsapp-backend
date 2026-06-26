@@ -1859,19 +1859,20 @@ function leadIsPos(l, posSet, posDigits) {
   return !!(rn && posDigits.some(d => rn.endsWith(d)));
 }
 // Colunas do pipeline PÓS-VENDA.
-const POS_STAGES = ['vendas_concretizadas', 'clientes_antigos_pos', 'para_classificar', 'visto_amer_primeiro', 'visto_amer_renov', 'visto_amer_renov_sem', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
+const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar', 'visto_amer_agendamento', 'visto_amer_validacao', 'visto_amer_envio', 'visto_canadense', 'visto_portugues', 'aire_italiano', 'outros'];
 // Colunas do pipeline PÓS-VENDA (com título e cor) — o servidor entrega isto quando o usuário é 'pos'.
+// As 3 colunas com group='Grupo Visto Americano' são raias internas agrupadas no frontend sob um título único.
 const POS_STAGES_FULL = [
-  { id: 'vendas_concretizadas', title: 'Vendas Concretizadas',                        color: '#16a34a' },
-  { id: 'clientes_antigos_pos', title: 'Comunicação com ambiente Pré-Venda',          color: '#6366f1' },
-  { id: 'para_classificar',     title: '2030 para organizar',                         color: '#71717a' },
-  { id: 'visto_amer_primeiro',  title: 'Primeiro Visto Americano',                    color: '#2563eb' },
-  { id: 'visto_amer_renov',     title: 'Renovação Visto Americano com representação', color: '#1d4ed8' },
-  { id: 'visto_amer_renov_sem', title: 'Renovação Visto Americano sem representação', color: '#7c3aed' },
-  { id: 'visto_canadense',      title: 'Vistos canadenses',                           color: '#ef4444' },
-  { id: 'visto_portugues',      title: 'Vistos portugueses',                          color: '#15803d' },
-  { id: 'aire_italiano',        title: 'Passaporte italiano / AIRE',                  color: '#0ea5e9' },
-  { id: 'outros',               title: 'Outros',                                      color: '#6b7280' }
+  { id: 'clientes_antigos_pos',   title: 'Comunicação com ambiente Pré-Venda', color: '#6366f1' },
+  { id: 'vendas_concretizadas',   title: 'Clientes concluídos',                color: '#16a34a' },
+  { id: 'para_classificar',       title: 'Mensagens novas para organizar',     color: '#71717a' },
+  { id: 'visto_amer_agendamento', title: 'Agendamento',                        color: '#2563eb', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_validacao',   title: 'Validação',                          color: '#1d4ed8', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_envio',       title: 'Envio passaporte',                   color: '#7c3aed', group: 'Grupo Visto Americano' },
+  { id: 'visto_canadense',        title: 'Vistos canadenses',                  color: '#ef4444' },
+  { id: 'visto_portugues',        title: 'Vistos portugueses',                 color: '#15803d' },
+  { id: 'aire_italiano',          title: 'Passaporte italiano / AIRE',         color: '#0ea5e9' },
+  { id: 'outros',                 title: 'Outros',                             color: '#6b7280' }
 ];
 function posStageFor(lead) {
   if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) return lead.pos_stage;
@@ -3188,6 +3189,23 @@ async function splitVistoAmericanoOnce() {
   } catch (e) { console.error('[split visto amer]', e && e.message); }
 }
 
+// PONTUAL: o pós passou a ter o "Grupo Visto Americano" com 3 raias (agendamento → validação → envio
+// passaporte), substituindo as colunas antigas (Primeiro Visto / Renovação com-/sem- representação).
+// Move todos os cards dessas colunas antigas p/ a 1ª raia 'visto_amer_agendamento'. Idempotente (flag).
+async function migrateVistoAmerToGroupOnce() {
+  try {
+    const FLAG = 'visto_amer_group_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const r = await runQuery(
+      "UPDATE leads SET pos_stage = 'visto_amer_agendamento' " +
+      "WHERE pos_stage IN ('visto_americano', 'visto_amer_primeiro', 'visto_amer_renov', 'visto_amer_renov_sem')"
+    );
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[visto amer grupo] ${(r && r.changes) || 0} card(s) movidos p/ Agendamento.`);
+  } catch (e) { console.error('[visto amer grupo]', e && e.message); }
+}
+
 async function reconcileDuplicatesByPhoneOnce() {
   try {
     const FLAG = 'dup_phone_reconcile_v1';
@@ -3536,6 +3554,8 @@ app.listen(PORT, async () => {
   try { await backfillMetaChannelOnce(); } catch (e) { console.error('[meta backfill boot]', e && e.message); }
   // PONTUAL: divide a coluna pós "Vistos americanos" em Primeiro Visto / Renovação (separa os atuais por tag).
   try { await splitVistoAmericanoOnce(); } catch (e) { console.error('[split visto amer boot]', e && e.message); }
+  // Migra as colunas americanas antigas p/ o novo "Grupo Visto Americano" (raia Agendamento).
+  try { await migrateVistoAmerToGroupOnce(); } catch (e) { console.error('[visto amer grupo boot]', e && e.message); }
   // PONTUAL: simula a chegada pelo site (saudação injetada) p/ o backlog → a IA inicia o atendimento.
   try { await setupBacklogKickoffOnce(); } catch (e) { console.error('[backlog kickoff boot]', e && e.message); }
   // Correção: limpa "contrato assinado" gravado por engano pela regra antiga de nome único.
