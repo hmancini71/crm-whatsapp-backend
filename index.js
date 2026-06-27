@@ -579,18 +579,24 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       // nela por QUALQUER lado — stage='clientes_antigos' (pré) OU pos_stage='clientes_antigos_pos'
       // (pós). Quem está na ponte aparece nos DOIS ambientes, na coluna-ponte de cada board.
       const inBridge = (l) => l.bridge === 1;
+      // SELO da coluna-ponte: a DIREÇÃO é dada pela ORIGEM do card. Lead pós (2030) que foi p/ a ponte
+      // veio do ambiente PÓS → assunto p/ o PRÉ ('pre'); lead pré que foi p/ a ponte → assunto p/ o PÓS
+      // ('pos'). Derivado aqui (não persistido): classifica todos automaticamente e some fora da ponte.
+      const bridgeSubject = (l) => leadIsPos(l, posSet, posDigits) ? 'pre' : 'pos';
       if (isPos) {
         // PÓS: vê os leads do 2030, as vendas convertidas e os da ponte. Os da ponte vão p/ a coluna-
         // ponte do board pós ('clientes_antigos_pos'); os demais, pela regra normal (posStageFor).
         parsedLeads = parsedLeads
           .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida' || inBridge(l))
-          .map(l => Object.assign({}, l, { stage: inBridge(l) ? 'clientes_antigos_pos' : posStageFor(l) }));
+          .map(l => Object.assign({}, l, inBridge(l)
+            ? { stage: 'clientes_antigos_pos', bridge_subject: bridgeSubject(l) }
+            : { stage: posStageFor(l) }));
       } else if (posSet.size) {
         // PRÉ/admin: exclui os leads do 2030, EXCETO os que estão na coluna-ponte (cross-visíveis).
         // Os da ponte são remapeados p/ a coluna-ponte do board pré ('clientes_antigos').
         parsedLeads = parsedLeads
           .filter(l => !leadIsPos(l, posSet, posDigits) || inBridge(l))
-          .map(l => inBridge(l) ? Object.assign({}, l, { stage: 'clientes_antigos' }) : l);
+          .map(l => inBridge(l) ? Object.assign({}, l, { stage: 'clientes_antigos', bridge_subject: bridgeSubject(l) }) : l);
       }
     } catch (e) { /* em caso de falha, não filtra */ }
     res.json(parsedLeads);
