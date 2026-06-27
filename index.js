@@ -2836,11 +2836,13 @@ app.get('/api/dashboard/followups-weekly', authenticateToken, async (req, res) =
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Dashboard: TEMPO MÉDIO DE RESPOSTA às mensagens dos clientes na coluna 1 do "Tratamento inicial"
-// (leads stage='tratamento', pré-venda). Para cada "demanda" do cliente (sequência de mensagens dele
-// SEM resposta nossa no meio) que COMEÇOU dentro da janela pedida, mede o tempo até a 1ª resposta
-// NOSSA (qualquer `from='me'` — inclui IA/auto-resposta, conforme pedido). Retorna a média (avgMs),
-// a quantidade de respostas medidas (count) e quantas demandas ainda aguardam (pending).
+// Dashboard: TEMPO MÉDIO DE RESPOSTA do VENDEDOR às mensagens dos clientes na coluna 1 do
+// "Tratamento inicial" (leads stage='tratamento', pré-venda). Mede só a resposta HUMANA:
+// cliente = `from='them'`; resposta = `from='me' AND ai=0` (a IA grava ai=1 e NÃO conta — senão
+// a média mediria o robô, ~1s; a auto-resposta de fora do horário também é excluída pelo texto).
+// Para cada demanda do cliente, mede da ÚLTIMA mensagem do cliente até a 1ª resposta humana (mesma
+// referência da "bolinha de tempo"). avgMs = média; count = nº de respostas medidas na janela;
+// pending = demandas em que a ÚLTIMA mensagem ainda é do cliente (bolinha acesa, aguardando humano).
 // Janela em minutos via ?minutes= (padrão 60 = última hora). O front atualiza a cada 15s.
 app.get('/api/dashboard/response-time', authenticateToken, async (req, res) => {
   try {
@@ -2866,27 +2868,46 @@ app.get('/api/dashboard/response-time', authenticateToken, async (req, res) => {
     }
     if (!convIds.length) return res.json({ avgMs: null, count: 0, pending: 0, minutes });
 
+    // Texto da auto-resposta de fora do horário (from='me', ai=0) — não conta como resposta humana.
+    let autoMsg = null;
+    try {
+      const bhRow = await getRow("SELECT value FROM app_settings WHERE key = 'business_hours'");
+      const bh = bhRow && bhRow.value ? JSON.parse(bhRow.value) : null;
+      if (bh && bh.message) autoMsg = String(bh.message).trim();
+    } catch (e) {}
+    const isHumanReply = (m) =>
+      m.from === 'me' && Number(m.ai) === 0 && !(autoMsg && String(m.text || '').trim() === autoMsg);
+
     const ph = convIds.map(() => '?').join(',');
     const msgs = await allRows(
-      "SELECT conversationId, `from`, timestamp FROM messages WHERE conversationId IN (" + ph + ") AND timestamp >= ? ORDER BY conversationId, timestamp ASC",
+      "SELECT conversationId, `from`, COALESCE(ai,0) AS ai, text, timestamp FROM messages WHERE conversationId IN (" + ph + ") AND timestamp >= ? ORDER BY conversationId, timestamp ASC",
       [...convIds, since - BUFFER_MS]
     );
 
-    // Varre por conversa: cada demanda (cliente fala, nós ainda não) gera 1 medição de tempo de resposta.
+    // Varre por conversa. demandTs = ÚLTIMA mensagem do cliente sem resposta HUMANA depois (igual à
+    // bolinha). Resposta humana fecha a demanda e mede o tempo. Mensagens da IA (ai=1)/auto NÃO
+    // fecham a demanda nem contam. pending = conversa cuja ÚLTIMA mensagem ainda é do cliente.
     let totalMs = 0, count = 0, pending = 0;
-    let curConv = null, awaitingSince = null;
-    const flushPending = () => { if (awaitingSince !== null && awaitingSince >= since) pending++; awaitingSince = null; };
+    let curConv = null, demandTs = null, lastFrom = null;
+    const finishConv = () => {
+      if (lastFrom === 'them' && demandTs !== null && demandTs >= since) pending++;
+      demandTs = null; lastFrom = null;
+    };
     for (const m of msgs) {
-      if (m.conversationId !== curConv) { flushPending(); curConv = m.conversationId; awaitingSince = null; }
+      if (m.conversationId !== curConv) { finishConv(); curConv = m.conversationId; }
       const ts = m.timestamp || 0;
-      if (m.from !== 'me') {
-        if (awaitingSince === null) awaitingSince = ts;            // início de uma demanda do cliente
-      } else if (awaitingSince !== null) {
-        if (awaitingSince >= since && ts >= awaitingSince) { totalMs += (ts - awaitingSince); count++; } // 1ª resposta nossa
-        awaitingSince = null;
+      if (m.from === 'them') {
+        demandTs = ts; lastFrom = 'them';            // (re)inicia/atualiza a demanda na última msg do cliente
+      } else if (m.from === 'me') {
+        lastFrom = 'me';
+        if (isHumanReply(m) && demandTs !== null) {
+          if (demandTs >= since && ts >= demandTs) { totalMs += (ts - demandTs); count++; }
+          demandTs = null;                            // demanda atendida por humano
+        }
+        // IA/auto (ai=1 ou texto da auto-resposta): ignora — não fecha nem conta.
       }
     }
-    flushPending();
+    finishConv();
 
     res.json({ avgMs: count ? Math.round(totalMs / count) : null, count, pending, minutes });
   } catch (e) { res.status(500).json({ error: e.message }); }
