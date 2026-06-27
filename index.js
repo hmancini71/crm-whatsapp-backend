@@ -2872,6 +2872,25 @@ async function aiFollowUpSweep() {
   try {
     const cfg = await getAiSettings();
     if (!cfg.enabled || !cfg.fu_enabled || !cfg.gemini_key) return;
+    // JANELA DE HORÁRIO COMERCIAL: o follow-up automático só pode SAIR entre 9h e 17h, de
+    // segunda a sexta (fuso de Brasília — process.env.TZ já é America/Sao_Paulo no topo do arquivo).
+    // Essa trava fica no BACKEND de propósito: a regra "envie em horário comercial" no prompt não
+    // garante nada, pois o LLM só gera o TEXTO — quem decide a HORA do disparo é este código.
+    // (Antes não havia trava, por isso saíam mensagens às 22h/03h.) Para mudar a janela, ajuste
+    // FU_START_HOUR / FU_END_HOUR / os dias abaixo.
+    {
+      const FU_START_HOUR = 9;   // começa às 9h
+      const FU_END_HOUR = 17;    // para às 17h (último envio até 16:59)
+      const _now = new Date();
+      const _day = _now.getDay();    // 0=Dom, 1=Seg ... 5=Sex, 6=Sáb (já em horário de Brasília)
+      const _hour = _now.getHours();
+      const _diaUtil = (_day >= 1 && _day <= 5);
+      const _dentroHora = (_hour >= FU_START_HOUR && _hour < FU_END_HOUR);
+      if (!_diaUtil || !_dentroHora) {
+        console.log(`[IA follow-up] fora da janela comercial (seg–sex ${FU_START_HOUR}h–${FU_END_HOUR}h): dia=${_day} hora=${_hour}h — nada enviado nesta rodada.`);
+        return;
+      }
+    }
     const horasMs = (cfg.fu_hours || 24) * 3600 * 1000;
     const leads = await allRows(
       "SELECT * FROM leads WHERE archived = 0 AND stage = 'tratamento' AND (priority IS NULL OR priority = '') AND lastClientReply IS NULL AND COALESCE(ai_fu_count, 0) < ?",
