@@ -2836,6 +2836,62 @@ app.get('/api/dashboard/followups-weekly', authenticateToken, async (req, res) =
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Dashboard: TEMPO MÉDIO DE RESPOSTA às mensagens dos clientes na coluna 1 do "Tratamento inicial"
+// (leads stage='tratamento', pré-venda). Para cada "demanda" do cliente (sequência de mensagens dele
+// SEM resposta nossa no meio) que COMEÇOU dentro da janela pedida, mede o tempo até a 1ª resposta
+// NOSSA (qualquer `from='me'` — inclui IA/auto-resposta, conforme pedido). Retorna a média (avgMs),
+// a quantidade de respostas medidas (count) e quantas demandas ainda aguardam (pending).
+// Janela em minutos via ?minutes= (padrão 60 = última hora). O front atualiza a cada 15s.
+app.get('/api/dashboard/response-time', authenticateToken, async (req, res) => {
+  try {
+    const minutes = Math.max(1, Math.min(60 * 24 * 60, parseInt(req.query.minutes, 10) || 60)); // 1 min .. 60 dias
+    const now = Date.now();
+    const since = now - minutes * 60 * 1000;
+    const BUFFER_MS = 6 * 3600 * 1000; // contexto p/ detectar o início de demandas próximas de "since"
+
+    const leads = await allRows("SELECT phone, whatsapp_jid FROM leads WHERE archived = 0 AND stage = 'tratamento'");
+    if (!leads.length) return res.json({ avgMs: null, count: 0, pending: 0, minutes });
+
+    const { posSet } = await getSaleLineFilter(); // exclui as linhas pós-venda (2030)
+    const convs = await allRows("SELECT id, account, phone, whatsapp_jid FROM conversations WHERE (archived IS NULL OR archived = 0)");
+    const norm = (p) => String(p || '').replace(/\D/g, '');
+    const convIds = [];
+    for (const l of leads) {
+      const lt = norm(l.phone).slice(-8);
+      const conv = convs.find(c =>
+        (l.whatsapp_jid && c.whatsapp_jid && c.whatsapp_jid === l.whatsapp_jid) ||
+        (lt.length === 8 && norm(c.phone).slice(-8) === lt)
+      );
+      if (conv && conv.account && !posSet.has(conv.account)) convIds.push(conv.id);
+    }
+    if (!convIds.length) return res.json({ avgMs: null, count: 0, pending: 0, minutes });
+
+    const ph = convIds.map(() => '?').join(',');
+    const msgs = await allRows(
+      "SELECT conversationId, `from`, timestamp FROM messages WHERE conversationId IN (" + ph + ") AND timestamp >= ? ORDER BY conversationId, timestamp ASC",
+      [...convIds, since - BUFFER_MS]
+    );
+
+    // Varre por conversa: cada demanda (cliente fala, nós ainda não) gera 1 medição de tempo de resposta.
+    let totalMs = 0, count = 0, pending = 0;
+    let curConv = null, awaitingSince = null;
+    const flushPending = () => { if (awaitingSince !== null && awaitingSince >= since) pending++; awaitingSince = null; };
+    for (const m of msgs) {
+      if (m.conversationId !== curConv) { flushPending(); curConv = m.conversationId; awaitingSince = null; }
+      const ts = m.timestamp || 0;
+      if (m.from !== 'me') {
+        if (awaitingSince === null) awaitingSince = ts;            // início de uma demanda do cliente
+      } else if (awaitingSince !== null) {
+        if (awaitingSince >= since && ts >= awaitingSince) { totalMs += (ts - awaitingSince); count++; } // 1ª resposta nossa
+        awaitingSince = null;
+      }
+    }
+    flushPending();
+
+    res.json({ avgMs: count ? Math.round(totalMs / count) : null, count, pending, minutes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Dashboard: bloqueios do filtro anti-invenção da IA por dia (últimos 7 dias, Brasília) + por tipo + amostras.
 app.get('/api/dashboard/guardrail-weekly', authenticateToken, async (req, res) => {
   try {
