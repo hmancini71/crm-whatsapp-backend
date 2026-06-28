@@ -3014,6 +3014,26 @@ app.get('/api/dashboard/followups-weekly', authenticateToken, async (req, res) =
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Dashboard: PESSOAS que receberam follow-up automático num DIA (clique na barra). Dedupe por lead
+// (count = nº de disparos no dia). Brasília (UTC-3). ?day=YYYY-MM-DD.
+app.get('/api/dashboard/followups-day', authenticateToken, async (req, res) => {
+  try {
+    const day = String(req.query.day || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ error: 'Parâmetro day inválido (use YYYY-MM-DD).' });
+    const sinceMs = Date.parse(day + 'T00:00:00Z') + 3 * 3600 * 1000;
+    const untilMs = sinceMs + 24 * 3600 * 1000;
+    const rows = await allRows("SELECT ts, lead_id, lead_name FROM followup_log WHERE ts >= ? AND ts < ? ORDER BY ts ASC", [sinceMs, untilMs]);
+    const byLead = {};
+    rows.forEach(r => {
+      const k = r.lead_id || ('n:' + r.lead_name);
+      const b = (byLead[k] = byLead[k] || { lead_id: r.lead_id || null, name: r.lead_name || '', count: 0, lastTs: 0 });
+      b.count++; if (r.ts > b.lastTs) b.lastTs = r.ts;
+    });
+    const people = Object.values(byLead).sort((a, b) => b.lastTs - a.lastTs);
+    res.json({ day, total: rows.length, people });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Dashboard: TEMPO MÉDIO DE RESPOSTA do VENDEDOR às mensagens dos clientes na coluna 1 do
 // "Tratamento inicial" (leads stage='tratamento', pré-venda). Mede só a resposta HUMANA:
 // cliente = `from='them'`; resposta = `from='me' AND ai=0` (a IA grava ai=1 e NÃO conta — senão
