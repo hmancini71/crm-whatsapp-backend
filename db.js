@@ -435,6 +435,17 @@ db.serialize(() => {
   db.run("UPDATE leads SET pos_stage = 'visto_mex_formulario'  WHERE pos_stage = 'visto_mexicano'");
   db.run("UPDATE leads SET pos_stage = 'ital_formulario'       WHERE pos_stage = 'aire_italiano'");
 
+  // Safe migration: 'client_dir' = link do diretório/pasta do cliente (mostrado no modal do PÓS-VENDA
+  // como hiperlink). Adicionado 2026-06-27.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'client_dir')) {
+      db.run("ALTER TABLE leads ADD COLUMN client_dir TEXT DEFAULT NULL", (e2) => {
+        if (e2) console.error("Failed to add client_dir column to leads:", e2);
+        else console.log("Migration: added 'client_dir' column to leads table.");
+      });
+    }
+  });
+
   // Seed do usuário do AMBIENTE PÓS-VENDA (Alexandre). Idempotente (INSERT OR IGNORE por id/email).
   // wa_type='pos' → vê apenas o 2030 e o pipeline pós-venda. Pedido explícito do Henry.
   try {
