@@ -1437,6 +1437,18 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       if (cleanP.length >= 8) {
         await runQuery("UPDATE leads SET priority = '' WHERE priority = 'novolead' AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [`%${cleanP.slice(-8)}%`]);
       }
+      // CARIMBA a LINHA da conversa no lead (account + recv_number) QUANDO o lead ainda está SEM linha —
+      // assim o card mostra "via <número>" da linha por onde a comunicação realmente acontece. (Não
+      // sobrescreve quem já tem linha, p/ não trocar o ambiente de quem já está atribuído.)
+      if (convo.account && convo.account !== 'ig') {
+        const accRow = await getRow("SELECT number FROM whatsapp_accounts WHERE id = ?", [convo.account]);
+        const accNum = (accRow && accRow.number) || '';
+        if (accNum) {
+          const EMPTY = "(account IS NULL OR TRIM(account) = '' OR recv_number IS NULL OR TRIM(recv_number) = '')";
+          if (convo.whatsapp_jid) await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE whatsapp_jid = ? AND " + EMPTY, [convo.account, accNum, convo.whatsapp_jid]);
+          if (cleanP.length >= 8) await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? AND " + EMPTY, [convo.account, accNum, `%${cleanP.slice(-8)}%`]);
+        }
+      }
     } catch (e) { /* ignore */ }
 
     // Instagram: envia pelo Direct e grava a mensagem
@@ -1568,6 +1580,11 @@ app.post('/api/leads/:leadId/start-conversation', authenticateToken, async (req,
       await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'followup' WHERE id = ? AND stage = 'novo'", [lead.id]);
       await runQuery("UPDATE leads SET priority = '' WHERE id = ? AND priority = 'novolead'", [lead.id]);
       await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [lead.id]);
+      // CARIMBA a LINHA usada no lead (account + recv_number) → o card passa a mostrar "via <número>".
+      // Você iniciou a conversa por esta linha, então é a linha de comunicação de fato do lead.
+      const accRow = await getRow("SELECT number FROM whatsapp_accounts WHERE id = ?", [accountId]);
+      const accNum = (accRow && accRow.number) || '';
+      if (accNum) await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE id = ?", [accountId, accNum, lead.id]);
     } catch (e) { /* ignore */ }
 
     res.json({ conversation: { ...convo, account: accountId }, message: messageObj });
