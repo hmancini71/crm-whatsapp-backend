@@ -600,10 +600,12 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
             : { stage: posStageFor(l) }));
       } else if (posSet.size) {
         // PRÉ/admin: exclui os leads do 2030 E os que foram movidos p/ uma coluna pós (hasPosStage),
-        // EXCETO os que estão na coluna-ponte (cross-visíveis). Os da ponte são remapeados p/ a coluna-
-        // ponte do board pré ('clientes_antigos').
+        // EXCETO: (a) os que estão na coluna-ponte (cross-visíveis) e (b) as VENDAS CONVERTIDAS. Uma venda
+        // convertida fica SEMPRE em "Venda convertida" no pré, mesmo depois de distribuída numa coluna do
+        // pós — mover o card no pós só mexe em pos_stage (stage continua 'convertida'), então o card do pré
+        // NÃO é alterado. ("Venda convertida" pré ↔ "Clientes concluídos" pós: cross-visíveis e independentes.)
         parsedLeads = parsedLeads
-          .filter(l => (!leadIsPos(l, posSet, posDigits) && !hasPosStage(l)) || inBridge(l))
+          .filter(l => (!leadIsPos(l, posSet, posDigits) && (!hasPosStage(l) || l.stage === 'convertida')) || inBridge(l))
           .map(l => inBridge(l) ? Object.assign({}, l, { stage: 'clientes_antigos', bridge_subject: bridgeSubject(l) }) : l);
       }
     } catch (e) { /* em caso de falha, não filtra */ }
