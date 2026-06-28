@@ -457,10 +457,25 @@ db.serialize(() => {
   // Safe migration: 'client_dir' = link do diretório/pasta do cliente (mostrado no modal do PÓS-VENDA
   // como hiperlink). Adicionado 2026-06-27.
   db.all("PRAGMA table_info(leads)", (err, cols) => {
-    if (!err && cols && !cols.find(c => c.name === 'client_dir')) {
+    if (err || !cols) return;
+    if (!cols.find(c => c.name === 'client_dir')) {
       db.run("ALTER TABLE leads ADD COLUMN client_dir TEXT DEFAULT NULL", (e2) => {
         if (e2) console.error("Failed to add client_dir column to leads:", e2);
         else console.log("Migration: added 'client_dir' column to leads table.");
+      });
+    }
+    // 'sale_date' = data da venda (padrão = dia da transferência p/ "Venda convertida", editável). 2026-06-28.
+    if (!cols.find(c => c.name === 'sale_date')) {
+      db.run("ALTER TABLE leads ADD COLUMN sale_date TEXT DEFAULT NULL", (e2) => {
+        if (e2) console.error("Failed to add sale_date column to leads:", e2);
+        else console.log("Migration: added 'sale_date' column to leads table.");
+      });
+    }
+    // 'decline_reason' = motivo do cancelamento/declínio (caso a coluna ainda não exista em bancos antigos).
+    if (!cols.find(c => c.name === 'decline_reason')) {
+      db.run("ALTER TABLE leads ADD COLUMN decline_reason TEXT DEFAULT NULL", (e2) => {
+        if (e2) console.error("Failed to add decline_reason column to leads:", e2);
+        else console.log("Migration: added 'decline_reason' column to leads table.");
       });
     }
   });

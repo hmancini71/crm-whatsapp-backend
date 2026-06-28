@@ -541,9 +541,14 @@ async function connectWhatsApp(id, isReconnect = false) {
           // Lead arquivado ("bloqueado") voltou a falar → restaura. Vai para "Novo Leads",
           // MAS preserva estágios terminais (convertida/declinado nunca viram 'novo').
           console.log(`[WhatsApp ${id}] Archived lead ${lead.name} sent a new message. Restoring.`);
-          // Reforço: leads nas 5 colunas "fixas" (Proposta, Follow-up, Convertida, Declinado, Clientes
-          // antigos) JAMAIS mudam de coluna automaticamente — mesmo ao serem reativados, mantêm a etapa.
-          await runQuery("UPDATE leads SET archived = 0, stage = CASE WHEN stage IN ('proposta','followup','convertida','declinado','clientes_antigos') THEN stage ELSE 'novo' END WHERE id = ?", [lead.id]);
+          // Reforço: leads em Proposta, Follow-up, Convertida e Clientes antigos mantêm a etapa ao reativar.
+          // EXCEÇÃO (regra do Henry): lead DECLINADO/CANCELADO que faz contato de novo "fecha a conexão" e
+          // RECOMEÇA na 1ª coluna (Novo Leads) — o motivo e a data do fechamento ficam guardados no
+          // histórico (lead_history), que sobrevive ao reset.
+          await runQuery("UPDATE leads SET archived = 0, stage = CASE WHEN stage IN ('proposta','followup','convertida','clientes_antigos') THEN stage ELSE 'novo' END WHERE id = ?", [lead.id]);
+          // Recomeçou em "novo" (ex.: era declinado): limpa o motivo antigo — um novo cancelamento exigirá
+          // um motivo novo. O motivo/data anteriores permanecem no histórico.
+          await runQuery("UPDATE leads SET decline_reason = NULL WHERE id = ? AND stage = 'novo'", [lead.id]);
           // Restore their conversation too
           const cleanPhone = phone.replace(/\D/g, '');
           if (cleanPhone.length >= 8) {

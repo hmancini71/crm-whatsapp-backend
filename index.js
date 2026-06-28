@@ -717,11 +717,43 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       console.log(`[stage] BLOQUEADO: "${cur.name}" está em '${cur.stage}' (terminal) — mudança p/ '${stage}' ignorada.`);
       return res.json({ ...cur, tags: cur.tags ? JSON.parse(cur.tags) : [], _locked: true });
     }
+    // REGRAS das colunas TERMINAIS — valida ANTES de transferir (vale p/ arrasto E combo):
+    // "Venda convertida" exige tipo de serviço (tag) + valor contratado.
+    if (stage === 'convertida' && cur.stage !== 'convertida') {
+      let tags = []; try { tags = cur.tags ? JSON.parse(cur.tags) : []; } catch (e) { tags = []; }
+      const hasServ = Array.isArray(tags) && tags.length > 0 && String(tags[0] || '').trim() !== '';
+      const hasValue = Number(cur.value) > 0;
+      if (!hasServ || !hasValue) {
+        const faltam = [];
+        if (!hasServ) faltam.push('o tipo de serviço (classificação)');
+        if (!hasValue) faltam.push('o valor contratado');
+        return res.status(422).json({ error: 'Não foi transferido para "Venda convertida": falta definir ' + faltam.join(' e ') + '.', _missing: { servico: !hasServ, valor: !hasValue } });
+      }
+    }
+    // "Lead declinou/cancelado" exige o motivo do cancelamento preenchido.
+    if (stage === 'declinado' && cur.stage !== 'declinado') {
+      if (String(cur.decline_reason || '').trim() === '') {
+        return res.status(422).json({ error: 'Não foi transferido para "Lead declinou/cancelado": preencha o motivo do cancelamento primeiro (abra o card → Etapa "Lead declinou/cancelado" → Motivo).', _missing: { motivo: true } });
+      }
+    }
     // PRÉ-VENDA: coluna pré (não-ponte) → grava stage, SAI da ponte (bridge=0) e LIMPA pos_stage. Limpar
     // o pos_stage é o que faz o card REALMENTE voltar ao pré (senão hasPosStage continuaria true e ele
     // ficaria preso no pós). Move pré ⇄ pós agora é simétrico e confiável.
     await runQuery("UPDATE leads SET stage = ?, pos_stage = NULL, bridge = 0 WHERE id = ?", [stage, id]);
     if (cur.stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '"', meta: { to: stage } });
+    // Pós-transferência das colunas TERMINAIS:
+    if (stage === 'convertida' && cur.stage !== 'convertida') {
+      // DATA DA VENDA: padrão = dia da transferência (editável depois no card). Só preenche se vazio.
+      const hoje = new Date().toISOString().slice(0, 10);
+      await runQuery("UPDATE leads SET sale_date = ? WHERE id = ? AND (sale_date IS NULL OR TRIM(sale_date) = '')", [hoje, id]);
+      const valStr = Number(cur.value) > 0 ? ' — valor R$ ' + Number(cur.value).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '';
+      logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'venda', detail: 'Venda convertida em ' + hoje.split('-').reverse().join('/') + valStr });
+    }
+    if (stage === 'declinado' && cur.stage !== 'declinado') {
+      // Registra o MOTIVO + a DATA DO FECHAMENTO no histórico (sobrevive ao recontato/reset).
+      const hoje = new Date().toISOString().slice(0, 10);
+      logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'cancelamento', detail: 'Cancelado/declinado em ' + hoje.split('-').reverse().join('/') + ' — motivo: ' + String(cur.decline_reason || '').trim() });
+    }
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.stage_changed', { ...lead, tags: lead.tags ? JSON.parse(lead.tags) : [] });
     res.json({
@@ -796,7 +828,7 @@ app.post('/api/leads/:id/history', authenticateToken, async (req, res) => {
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir } = req.body;
+  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date } = req.body;
   
   try {
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
@@ -849,6 +881,14 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
     if (followup_date !== undefined) {
       updates.push("followup_date = ?");
       params.push(followup_date || null);
+    }
+    if (decline_reason !== undefined) {
+      updates.push("decline_reason = ?");
+      params.push(decline_reason || null);
+    }
+    if (sale_date !== undefined) {
+      updates.push("sale_date = ?");
+      params.push(sale_date || null);
     }
     if (client_dir !== undefined) {
       updates.push("client_dir = ?");
