@@ -3100,6 +3100,114 @@ app.post('/api/ai/process-novo-backlog', authenticateToken, async (req, res) => 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// BOAS-VINDAS PROATIVAS: leads que preencheram o formulário mas ficaram SEM linha (o número estava
+// desconectado quando entraram) e NUNCA foram contatados. Atribui a linha (12) 98248-3094 e envia a 1ª
+// mensagem (texto fixo). Mantém o lead em 'novo' — a IA assume quando o cliente responder. MANUAL
+// (disparado pelo Henry), em horário comercial, linha conectada, idempotente e com teto. ?dryRun=1 só conta.
+const WELCOME_LINE_DIGITS = '5512982483094'; // (12) 98248-3094
+const WELCOME_TEXT = 'Bem-vindo à Vale Visto! Sou o Thiago, como posso ajudar?';
+function _digits(s) { return String(s || '').replace(/\D/g, ''); }
+async function resolveWelcomeAccount() {
+  const accs = await allRows("SELECT id, number FROM whatsapp_accounts");
+  const want = WELCOME_LINE_DIGITS.slice(-8);
+  const a = (accs || []).find(x => _digits(x.number).slice(-8) === want);
+  return a ? a.id : null;
+}
+function _inBusinessHours() {
+  try {
+    const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+    const wd = p.find(x => x.type === 'weekday').value;
+    const h = parseInt(p.find(x => x.type === 'hour').value, 10);
+    return (['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(wd) && h >= 9 && h < 18) || (wd === 'Sat' && h >= 9 && h < 13);
+  } catch (e) { return true; }
+}
+// Seleciona os leads ELEGÍVEIS: em 'novo', sem linha, com telefone e SEM conversa com mensagem (nunca
+// contatados nem escreveram — se já têm histórico, é o backlog da IA, não boas-vindas).
+async function _eligibleWelcomeLeads() {
+  const leads = await allRows("SELECT * FROM leads WHERE archived = 0 AND stage = 'novo' AND (account IS NULL OR TRIM(account) = '') AND phone IS NOT NULL AND TRIM(phone) <> '' ORDER BY createdAt ASC");
+  const out = [];
+  for (const l of leads) {
+    const digits = _digits(l.phone);
+    if (digits.length < 8) continue;
+    const tail = digits.slice(-8);
+    let convo = null;
+    if (l.whatsapp_jid) convo = await getRow("SELECT id FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [l.whatsapp_jid]);
+    if (!convo) convo = await getRow("SELECT id FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
+    if (convo) { const anyMsg = await getRow("SELECT id FROM messages WHERE conversationId = ? LIMIT 1", [convo.id]); if (anyMsg) continue; }
+    out.push(l);
+  }
+  return out;
+}
+app.post('/api/ai/welcome-form-leads', authenticateToken, async (req, res) => {
+  try {
+    const dryRun = String((req.query && req.query.dryRun) || (req.body && req.body.dryRun) || '') === '1';
+    const cap = Math.max(1, Math.min(50, Number(req.body && req.body.limit) || 25));
+    const accountId = await resolveWelcomeAccount();
+    if (!accountId) return res.status(400).json({ error: 'Linha de boas-vindas (12) 98248-3094 não encontrada nas contas conectadas.' });
+    const isOpen = !!(sessions[accountId] && sessions[accountId].ws && sessions[accountId].ws.isOpen);
+    const eligible = await _eligibleWelcomeLeads();
+    if (dryRun) {
+      return res.json({ ok: true, dryRun: true, count: eligible.length, lineConnected: isOpen, businessHours: _inBusinessHours(), sample: eligible.slice(0, 12).map(l => ({ id: l.id, name: l.name, phone: l.phone })) });
+    }
+    if (!_inBusinessHours()) return res.status(400).json({ error: 'Fora do horário comercial (Seg–Sex 9h–18h, Sáb 9h–13h). Envio bloqueado.' });
+    if (!isOpen) return res.status(409).json({ error: 'A linha (12) 98248-3094 está desconectada. Conecte-a e tente de novo.' });
+    let sent = 0; const errors = [];
+    const num = '+' + WELCOME_LINE_DIGITS;
+    for (const l of eligible) {
+      if (sent >= cap) break;
+      try {
+        const digits = _digits(l.phone); const tail = digits.slice(-8); const jidLead = l.whatsapp_jid || '';
+        let convo = null;
+        if (jidLead) convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [jidLead]);
+        if (!convo) convo = await getRow("SELECT * FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
+        if (!convo) {
+          const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
+          const nm = l.name || digits; const av = String(nm).slice(0, 2).toUpperCase();
+          const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+          await runQuery("INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [convoId, accountId, nm, String(l.phone || ''), av, timeStr, 0, 0, jidLead || null, 0]);
+          convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
+        } else {
+          await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [accountId, convo.id]);
+        }
+        await sendWhatsAppMessage(accountId, convo.id, WELCOME_TEXT);
+        await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE id = ?", [accountId, num, l.id]);
+        logLeadHistory({ leadId: l.id, phone: l.phone, name: l.name, type: 'nota', detail: 'Boas-vindas automáticas enviadas pela linha (12) 98248-3094.' });
+        sent++;
+      } catch (e) { errors.push((l.name || l.id) + ': ' + (e && e.message)); }
+    }
+    res.json({ ok: true, sent, eligibleTotal: eligible.length, remaining: Math.max(0, eligible.length - sent), errors });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// AUDITORIA: por linha CONECTADA (exceto pós/2030), conversas cuja ÚLTIMA mensagem é do cliente — ou
+// seja, cliente aguardando nossa resposta (possíveis mensagens "perdidas" que precisam de atenção).
+app.get('/api/audit/awaiting-reply', authenticateToken, async (req, res) => {
+  try {
+    let posSet = new Set();
+    try { const r = await getSaleLineFilter(); posSet = r.posSet || new Set(); } catch (e) {}
+    const accs = await allRows("SELECT id, number, label FROM whatsapp_accounts");
+    const numById = {}; const labelById = {};
+    (accs || []).forEach(a => { numById[a.id] = a.number; labelById[a.id] = a.label; });
+    const convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)");
+    const groups = {};
+    for (const c of convs) {
+      if (c.account === 'ig') continue;
+      if (posSet.has(c.account)) continue; // pós/2030 fora
+      const last = await getRow("SELECT `from`, text, time, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [c.id]);
+      if (!last || last.from !== 'them') continue; // só os que estão aguardando NOSSA resposta
+      const ts = Number(last.timestamp) || 0; const ms = ts > 0 ? (ts < 1e12 ? ts * 1000 : ts) : Date.now();
+      const key = c.account || 'sem_linha';
+      (groups[key] = groups[key] || { account: key, line: numById[key] || key, label: labelById[key] || '', connected: !!(sessions[key] && sessions[key].ws && sessions[key].ws.isOpen), items: [] }).items.push({
+        id: c.id, name: c.name, phone: c.phone, lastText: (last.text || '').slice(0, 120), at: new Date(ms).toISOString()
+      });
+    }
+    const out = Object.values(groups).map(g => { g.items.sort((a, b) => new Date(b.at) - new Date(a.at)); g.count = g.items.length; return g; })
+      .sort((a, b) => b.count - a.count);
+    res.json({ lines: out, total: out.reduce((s, g) => s + g.count, 0) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ===== IA: protocolo de FOLLOW-UP (colunas 2-3 do Tratamento inicial) =====
 // A cada 30 min procura leads em 'tratamento' SEM prioridade e SEM bolinha
 // (nós falamos por último) parados há X horas; manda follow-up gerado pela IA.
