@@ -3462,6 +3462,51 @@ app.post('/api/integrations/google-ads-daily', checkApiKey, async (req, res) => 
   } catch (e) { console.error('[google-ads-daily ingest]', e && e.message); res.status(500).json({ error: e.message }); }
 });
 
+// META ADS — gasto da conta por período (lê meta_ads_daily). Mesma estrutura do google-ads.
+app.get('/api/dashboard/meta-ads', authenticateToken, async (req, res) => {
+  try {
+    const days = daysRangeSP(req.query.from, req.query.to, 15);
+    const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
+    const rows = await allRows(
+      "SELECT date, spend, clicks, impressions, reach, results FROM meta_ads_daily WHERE date >= ? AND date <= ? ORDER BY date ASC",
+      [fromIso, toIso]
+    );
+    const byDate = {}; rows.forEach(r => { byDate[r.date] = r; });
+    const series = days.map(d => {
+      const r = byDate[d.iso] || {};
+      return { date: d.iso, label: d.label, spend: Number(r.spend || 0), clicks: Number(r.clicks || 0), impressions: Number(r.impressions || 0), reach: Number(r.reach || 0), results: Number(r.results || 0) };
+    });
+    const sum = (k) => series.reduce((a, x) => a + (Number(x[k]) || 0), 0);
+    const spend = sum('spend'), clicks = sum('clicks'), impressions = sum('impressions'), reach = sum('reach'), results = sum('results');
+    res.json({
+      from: fromIso, to: toIso, days: series,
+      totals: { spend, clicks, impressions, reach, results, cpc: clicks > 0 ? spend / clicks : 0, costPerResult: results > 0 ? spend / results : 0 }
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST (X-API-Key): sincronização (Pipeboard/Supermetrics → CRM) grava/atualiza o gasto do Meta por dia.
+// Body: { rows: [{ date:'YYYY-MM-DD', spend, clicks, impressions, reach, results }] }.
+app.post('/api/integrations/meta-ads-daily', checkApiKey, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body && req.body.rows) ? req.body.rows : [];
+    if (!rows.length) return res.status(400).json({ error: 'rows vazio' });
+    const now = new Date().toISOString();
+    let n = 0;
+    for (const r of rows) {
+      const date = String(r.date || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      await runQuery(
+        "INSERT INTO meta_ads_daily (date, spend, clicks, impressions, reach, results, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(date) DO UPDATE SET spend=excluded.spend, clicks=excluded.clicks, impressions=excluded.impressions, reach=excluded.reach, results=excluded.results, updated_at=excluded.updated_at",
+        [date, Number(r.spend) || 0, Math.round(Number(r.clicks) || 0), Math.round(Number(r.impressions) || 0), Math.round(Number(r.reach) || 0), Number(r.results) || 0, now]
+      );
+      n++;
+    }
+    res.json({ success: true, upserted: n });
+  } catch (e) { console.error('[meta-ads-daily ingest]', e && e.message); res.status(500).json({ error: e.message }); }
+});
+
 // Configurações de integração (admin)
 app.get('/api/settings/integrations', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });

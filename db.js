@@ -199,6 +199,18 @@ db.serialize(() => {
     updated_at TEXT
   )`);
 
+  // Meta Ads (Facebook/Instagram) — gasto diário da conta de anúncios. Alimentado por sincronização
+  // externa (Pipeboard/Supermetrics → POST /api/integrations/meta-ads-daily), igual ao Google Ads.
+  db.run(`CREATE TABLE IF NOT EXISTS meta_ads_daily (
+    date TEXT PRIMARY KEY,
+    spend REAL DEFAULT 0,
+    clicks INTEGER DEFAULT 0,
+    impressions INTEGER DEFAULT 0,
+    reach INTEGER DEFAULT 0,
+    results REAL DEFAULT 0,
+    updated_at TEXT
+  )`);
+
   // Check if tables are empty, and insert initial data
   db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
     if (row && row.count === 0) {
