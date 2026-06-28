@@ -3507,6 +3507,85 @@ app.post('/api/integrations/meta-ads-daily', checkApiKey, async (req, res) => {
   } catch (e) { console.error('[meta-ads-daily ingest]', e && e.message); res.status(500).json({ error: e.message }); }
 });
 
+// ===== CONEXÃO DIRETA com a conta do Meta Ads (API de Marketing) =====
+async function getMetaAdsCfg() {
+  const a = await getRow("SELECT value FROM app_settings WHERE key = 'meta_ad_account_id'");
+  const t = await getRow("SELECT value FROM app_settings WHERE key = 'meta_ads_token'");
+  return { account_id: (a && a.value) || '', token: (t && t.value) || '' };
+}
+async function setAppSetting(key, value) {
+  await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+}
+// Busca o gasto DIÁRIO na API de Marketing do Meta e faz upsert em meta_ads_daily. Retorna nº de dias.
+async function syncMetaAds(fromIso, toIso) {
+  const cfg = await getMetaAdsCfg();
+  if (!cfg.account_id || !cfg.token) throw new Error('Configure o ID da conta de anúncios e o token do Meta primeiro.');
+  const acct = /^act_/.test(cfg.account_id) ? cfg.account_id : ('act_' + String(cfg.account_id).replace(/\D/g, ''));
+  const until = (toIso && /^\d{4}-\d{2}-\d{2}$/.test(toIso)) ? toIso : new Date().toISOString().slice(0, 10);
+  const since = (fromIso && /^\d{4}-\d{2}-\d{2}$/.test(fromIso)) ? fromIso : new Date(Date.now() - 32 * 864e5).toISOString().slice(0, 10);
+  let next = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(acct) + '/insights'
+    + '?level=account&time_increment=1&limit=500'
+    + '&fields=spend,impressions,clicks,reach,actions'
+    + '&time_range=' + encodeURIComponent(JSON.stringify({ since, until }))
+    + '&access_token=' + encodeURIComponent(cfg.token);
+  let n = 0, guard = 0;
+  while (next && guard < 20) {
+    guard++;
+    const r = await fetch(next);
+    const d = await r.json();
+    if (d && d.error) throw new Error('Meta: ' + (d.error.message || JSON.stringify(d.error)));
+    const rows = (d && Array.isArray(d.data)) ? d.data : [];
+    for (const x of rows) {
+      const date = String(x.date_start || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      let results = 0;
+      if (Array.isArray(x.actions)) {
+        const msg = x.actions.find(a => /messaging_conversation_started|onsite_conversion\.messaging/i.test(a.action_type || ''));
+        results = msg ? (Number(msg.value) || 0) : 0;
+      }
+      await runQuery(
+        "INSERT INTO meta_ads_daily (date, spend, clicks, impressions, reach, results, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(date) DO UPDATE SET spend=excluded.spend, clicks=excluded.clicks, impressions=excluded.impressions, reach=excluded.reach, results=excluded.results, updated_at=excluded.updated_at",
+        [date, Number(x.spend) || 0, Math.round(Number(x.clicks) || 0), Math.round(Number(x.impressions) || 0), Math.round(Number(x.reach) || 0), results, new Date().toISOString()]
+      );
+      n++;
+    }
+    next = (d && d.paging && d.paging.next) ? d.paging.next : null;
+  }
+  return n;
+}
+// Config (admin). GET nunca devolve o token (só informa se está definido). POST grava conta e, se vier, o token.
+app.get('/api/settings/meta-ads', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  try { const cfg = await getMetaAdsCfg(); res.json({ account_id: cfg.account_id, has_token: !!cfg.token }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/settings/meta-ads', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  try {
+    const { account_id, token } = req.body || {};
+    if (account_id !== undefined) await setAppSetting('meta_ad_account_id', String(account_id || '').trim());
+    if (token !== undefined && String(token).trim() !== '') await setAppSetting('meta_ads_token', String(token).trim());
+    const cfg = await getMetaAdsCfg();
+    res.json({ ok: true, account_id: cfg.account_id, has_token: !!cfg.token });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/integrations/meta-ads/sync', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  try {
+    const { from, to } = req.body || {};
+    const n = await syncMetaAds(from, to);
+    res.json({ ok: true, synced: n });
+  } catch (e) { res.status(400).json({ error: (e && e.message) || 'Falha ao sincronizar com o Meta.' }); }
+});
+// Sincronização automática (no boot, se configurado, e a cada 6h).
+async function syncMetaAdsSafe() {
+  try { const cfg = await getMetaAdsCfg(); if (cfg.account_id && cfg.token) { const n = await syncMetaAds(); console.log('[meta-ads sync] ' + n + ' dia(s) atualizados.'); } }
+  catch (e) { console.error('[meta-ads sync]', e && e.message); }
+}
+setTimeout(syncMetaAdsSafe, 25000);
+setInterval(syncMetaAdsSafe, 6 * 60 * 60 * 1000);
+
 // Configurações de integração (admin)
 app.get('/api/settings/integrations', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
