@@ -131,6 +131,25 @@ db.serialize(() => {
     timestamp INTEGER
   )`);
 
+  // 5b. Lead History Table — HISTÓRICO da relação com o cliente (linha do tempo). É uma tabela
+  // INDEPENDENTE: nunca é apagada em cascata, então o histórico sobrevive mesmo que o card/contato
+  // seja deletado, arquivado ou tenha a comunicação encerrada. Vinculada por lead_id E por phone
+  // (os últimos dígitos reconectam o histórico se o lead for recriado com o mesmo número).
+  //   type: 'contato_inicial' | 'movimentacao' | 'mensagem' | 'nota'
+  db.run(`CREATE TABLE IF NOT EXISTS lead_history (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT,
+    phone TEXT,
+    name TEXT,
+    type TEXT,
+    detail TEXT,
+    meta TEXT,
+    created_at TEXT
+  )`);
+  db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_phone ON lead_history(phone)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_lead ON lead_history(lead_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_msgid ON lead_history(meta)");
+
   // 6. WhatsApp Accounts Table
   db.run(`CREATE TABLE IF NOT EXISTS whatsapp_accounts (
     id TEXT PRIMARY KEY,

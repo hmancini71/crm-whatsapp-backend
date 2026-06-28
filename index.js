@@ -698,6 +698,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     // bridge volta a 0 e o card some da ponte nos DOIS ambientes, retornando à sua coluna de origem.
     if (stage === 'clientes_antigos' || stage === 'clientes_antigos_pos') {
       await runQuery("UPDATE leads SET bridge = 1 WHERE id = ?", [id]);
+      if (cur.bridge !== 1) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para a coluna-ponte (Comunicação Pré/Pós-Venda)', meta: { to: 'ponte' } });
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
     }
@@ -705,6 +706,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     // 'stage' do pré-venda. (As colunas pós têm nomes próprios.)
     if (POS_STAGES.includes(stage)) {
       await runQuery("UPDATE leads SET pos_stage = ?, bridge = 0 WHERE id = ?", [stage, id]);
+      if (cur.pos_stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '" (pós-venda)', meta: { to: stage } });
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
     }
@@ -719,6 +721,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     // o pos_stage é o que faz o card REALMENTE voltar ao pré (senão hasPosStage continuaria true e ele
     // ficaria preso no pós). Move pré ⇄ pós agora é simétrico e confiável.
     await runQuery("UPDATE leads SET stage = ?, pos_stage = NULL, bridge = 0 WHERE id = ?", [stage, id]);
+    if (cur.stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '"', meta: { to: stage } });
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.stage_changed', { ...lead, tags: lead.tags ? JSON.parse(lead.tags) : [] });
     res.json({
@@ -728,6 +731,66 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// 4a. HISTÓRICO do lead (linha do tempo): contato inicial + movimentações + anotações + mensagens.
+// Mescla: (1) contato_inicial sintetizado de createdAt; (2) eventos do lead_history (por lead_id OU
+// telefone — reconecta após deletar/recriar); (3) mensagens AO VIVO da conversa atual (enquanto existir;
+// após deletar o contato, ficam só as do snapshot). Tudo ordenado por data/hora.
+app.get('/api/leads/:id/history', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    const digits = lead ? String(lead.phone || '').replace(/\D/g, '') : '';
+    const tail = digits.slice(-8);
+    const items = [];
+    if (lead && lead.createdAt) items.push({ type: 'contato_inicial', detail: 'Contato inicial' + (lead.source ? ' — origem: ' + lead.source : ''), at: lead.createdAt, who: '' });
+    const hist = await allRows(
+      "SELECT type, detail, meta, created_at FROM lead_history WHERE lead_id = ? OR (phone IS NOT NULL AND ? <> '' AND phone LIKE ?) ORDER BY created_at ASC",
+      [id, tail, '%' + tail + '%']
+    );
+    for (const h of hist) {
+      let who = '';
+      try { const mt = h.meta ? JSON.parse(h.meta) : null; if (mt && mt.from) who = mt.from; } catch (e) {}
+      items.push({ type: h.type, detail: h.detail || '', at: h.created_at, who });
+    }
+    // CANAL de chegada: se o lead não tem nenhum evento 'canal' gravado (ex.: não veio pelo formulário),
+    // sintetiza um a partir do tracking/source atual, ancorado na data de criação.
+    if (lead && !items.some(it => it.type === 'canal')) {
+      items.push({ type: 'canal', detail: 'Chegou pelo canal: ' + synthChannel(lead), at: lead.createdAt || new Date().toISOString(), who: '' });
+    }
+    // Mensagens ao vivo (degrada com elegância se algo falhar — o histórico de eventos ainda volta).
+    try {
+      let convs = [];
+      if (lead) {
+        if (lead.whatsapp_jid) convs = await allRows("SELECT id FROM conversations WHERE whatsapp_jid = ?", [lead.whatsapp_jid]);
+        if ((!convs || !convs.length) && tail.length >= 8) convs = await allRows("SELECT id FROM conversations WHERE phone LIKE ?", ['%' + tail + '%']);
+      }
+      for (const c of (convs || [])) {
+        const msgs = await allRows("SELECT `from`, text, type, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp ASC", [c.id]);
+        for (const m of msgs) {
+          const ts = Number(m.timestamp) || 0;
+          const ms = ts > 0 ? (ts < 1e12 ? ts * 1000 : ts) : Date.now();
+          const txt = m.text || (m.type && m.type !== 'text' ? '[' + m.type + ']' : '');
+          items.push({ type: 'mensagem', detail: txt, at: new Date(ms).toISOString(), who: m.from });
+        }
+      }
+    } catch (e) { console.error('[history] merge mensagens ao vivo falhou:', e && e.message); }
+    items.sort((a, b) => new Date(a.at) - new Date(b.at));
+    res.json(items);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// 4a-bis. Adiciona uma ANOTAÇÃO manual (com data/hora) ao histórico do lead.
+app.post('/api/leads/:id/history', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { note } = req.body || {};
+  if (!note || !String(note).trim()) return res.status(400).json({ error: 'Anotação vazia' });
+  try {
+    const lead = await getRow("SELECT id, name, phone FROM leads WHERE id = ?", [id]);
+    await logLeadHistory({ leadId: id, phone: lead ? lead.phone : '', name: lead ? lead.name : '', type: 'nota', detail: String(note).trim() });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // 4b. Leads Routes: Patch Lead Details
@@ -1598,6 +1661,27 @@ app.delete('/api/conversations/:id', authenticateToken, async (req, res) => {
   try {
     const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
     if (!convo) return res.status(404).json({ error: 'Conversa não encontrada' });
+    // SNAPSHOT do histórico de comunicação ANTES de apagar — o histórico do cliente NÃO pode ser perdido
+    // ao deletar o contato (requisito do Henry). Cada mensagem vira um evento 'mensagem' no lead_history
+    // (vinculado pelo telefone; e por lead_id se existir um lead com esse número). Como a leitura mescla
+    // mensagens AO VIVO só enquanto a conversa existe, não há duplicidade (após apagar, fica só o snapshot).
+    try {
+      const digits = String(convo.phone || '').replace(/\D/g, '');
+      const tail = digits.slice(-8);
+      let leadRow = null;
+      if (convo.whatsapp_jid) leadRow = await getRow("SELECT id FROM leads WHERE whatsapp_jid = ? LIMIT 1", [convo.whatsapp_jid]);
+      if (!leadRow && tail.length >= 8) leadRow = await getRow("SELECT id FROM leads WHERE phone LIKE ? LIMIT 1", ['%' + tail + '%']);
+      const msgs = await allRows("SELECT `from`, text, type, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp ASC", [id]);
+      for (const m of msgs) {
+        const ts = Number(m.timestamp) || 0;
+        const ms = ts > 0 ? (ts < 1e12 ? ts * 1000 : ts) : Date.now();
+        const txt = m.text || (m.type && m.type !== 'text' ? '[' + m.type + ']' : '');
+        await runQuery(
+          "INSERT INTO lead_history (id, lead_id, phone, name, type, detail, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [_histId(), (leadRow && leadRow.id) || null, digits || null, convo.name || null, 'mensagem', txt, JSON.stringify({ from: m.from, snapshot: 1 }), new Date(ms).toISOString()]
+        );
+      }
+    } catch (e) { console.error('[history] snapshot falhou:', e && e.message); }
     await runQuery("DELETE FROM messages WHERE conversationId = ?", [id]);
     await runQuery("DELETE FROM conversations WHERE id = ?", [id]);
     res.json({ ok: true, id });
@@ -1942,6 +2026,31 @@ function posStageFor(lead) {
   if (lead.stage === 'convertida') return 'vendas_concretizadas';
   if (lead.stage === 'clientes_antigos') return 'clientes_antigos_pos';
   return 'para_classificar';
+}
+
+// ===== HISTÓRICO do lead (linha do tempo) — ver tabela lead_history (db.js) =====
+function _histId() { return 'h_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+const PRE_STAGE_LABELS = {
+  novo: 'Novo Leads', tratamento: 'Tratamento inicial', proposta: 'Proposta enviada',
+  followup: 'Follow-up pagamento', convertida: 'Venda convertida', declinado: 'Declinou/cancelou',
+  clientes_antigos: 'Comunicação com ambiente Pós-Venda'
+};
+// Rótulo legível de uma etapa (pré OU pós), gravado no histórico no momento do evento.
+function stageLabel(id) {
+  if (!id) return '';
+  const pos = POS_STAGES_FULL.find(s => s.id === id);
+  if (pos) return pos.title;
+  return PRE_STAGE_LABELS[id] || id;
+}
+// Insere um evento no histórico. Nunca lança (histórico é best-effort, não pode quebrar a ação principal).
+async function logLeadHistory({ leadId, phone, name, type, detail, meta }) {
+  try {
+    const ph = String(phone || '').replace(/\D/g, '');
+    await runQuery(
+      "INSERT INTO lead_history (id, lead_id, phone, name, type, detail, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [_histId(), leadId || null, ph || null, name || null, type, detail || '', meta ? JSON.stringify(meta) : null, new Date().toISOString()]
+    );
+  } catch (e) { console.error('[history] log falhou:', e && e.message); }
 }
 
 app.get('/api/whatsapp/accounts', authenticateToken, async (req, res) => {
@@ -3227,6 +3336,49 @@ function leadChannelCat(l) {
   return 'semclass';
 }
 
+// ===== CANAL de chegada para o HISTÓRICO (Google / Meta / Orgânico / Outros) =====
+// Normaliza o canal derivado nos quatro baldes que o Henry pediu.
+function channelBucketLabel(ch) {
+  const c = String(ch || '').trim();
+  if (c === 'Google Ads') return 'Google Ads';
+  if (c === 'Meta Ads') return 'Meta Ads';
+  if (/^org/i.test(c)) return 'Orgânico';
+  return c ? ('Outros (' + c + ')') : 'Outros';
+}
+// Canal SINTETIZADO do lead (quando não há evento 'canal' gravado): tracking → source → Orgânico.
+function synthChannel(lead) {
+  let ch = '';
+  try { if (lead && lead.tracking) { const tk = JSON.parse(lead.tracking); if (tk && typeof tk === 'object' && Object.keys(tk).length) ch = deriveChannel(tk); } } catch (e) {}
+  if (!ch) {
+    const s = String((lead && lead.source) || '').trim().toLowerCase();
+    if (s === 'google ads') ch = 'Google Ads';
+    else if (s === 'meta ads' || s === 'facebook ads') ch = 'Meta Ads';
+    else if (s && s !== 'manual' && s !== 'marketing') ch = (lead && lead.source) || '';
+    else ch = 'Orgânico';
+  }
+  return channelBucketLabel(ch);
+}
+// Registra um evento 'canal' no histórico. De-dup: NÃO repete o MESMO canal se já houver um nos últimos
+// 30 min (evita duplicar dupla-submissão); canal DIFERENTE sempre registra (retorno por outro canal).
+async function logCanal({ leadId, phone, name, channel, isReturn }) {
+  try {
+    const bucket = channelBucketLabel(channel);
+    const digits = String(phone || '').replace(/\D/g, '');
+    const tail = digits.slice(-8);
+    const last = await getRow(
+      "SELECT detail, created_at FROM lead_history WHERE type = 'canal' AND (lead_id = ? OR (phone IS NOT NULL AND ? <> '' AND phone LIKE ?)) ORDER BY created_at DESC LIMIT 1",
+      [leadId, tail, '%' + tail + '%']
+    );
+    if (last) {
+      const same = String(last.detail || '').endsWith(bucket);
+      const ageMin = (Date.now() - new Date(last.created_at).getTime()) / 60000;
+      if (same && ageMin < 30) return; // mesma chegada recente — não duplica
+    }
+    const detail = (isReturn ? 'Voltou pelo canal: ' : 'Chegou pelo canal: ') + bucket;
+    await logLeadHistory({ leadId, phone, name, type: 'canal', detail, meta: { channel: bucket } });
+  } catch (e) { console.error('[history] logCanal falhou:', e && e.message); }
+}
+
 // API de ENTRADA: recebe leads/rastreamento do marketing digital.
 // Body: { name, phone, email, value, service, source, utm_source, utm_medium,
 //         utm_campaign, utm_term, utm_content, gclid, fbclid, landing_page }
@@ -3278,6 +3430,8 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
         await runQuery("UPDATE leads SET tracking = ? WHERE id = ?", [JSON.stringify(tracking), existing.id]);
       }
       const upd = await getRow("SELECT * FROM leads WHERE id = ?", [existing.id]);
+      // RETORNO: o cliente voltou a conectar (remarketing ou outro canal) → registra o canal no histórico.
+      await logCanal({ leadId: existing.id, phone: existing.phone || phone, name: existing.name, channel: tracking.channel, isReturn: true });
       sendWebhook('lead.updated', { ...upd, tags: upd.tags ? JSON.parse(upd.tags) : [], tracking });
       return res.json({ ok: true, action: 'tracking_stamped', leadId: existing.id });
     }
@@ -3295,6 +3449,8 @@ app.post('/api/integrations/lead', checkApiKey, async (req, res) => {
        'novo', leadSource, '', 'Marketing', JSON.stringify(tags), createdAt, 0, '', JSON.stringify(tracking), comments]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    // CHEGADA: primeiro contato deste lead — registra o canal de origem no histórico.
+    await logCanal({ leadId: id, phone, name, channel: tracking.channel, isReturn: false });
     sendWebhook('lead.created', { ...lead, tags, tracking });
     res.json({ ok: true, action: 'created', leadId: id });
   } catch (e) {
