@@ -1874,21 +1874,51 @@ function leadIsPos(l, posSet, posDigits) {
   return !!(rn && posDigits.some(d => rn.endsWith(d)));
 }
 // Colunas do pipeline PÓS-VENDA.
-const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar', 'visto_amer_agendamento', 'visto_amer_validacao', 'visto_amer_envio', 'visto_canadense', 'visto_portugues', 'visto_australiano', 'visto_mexicano', 'aire_italiano', 'outros'];
+const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar',
+  'visto_amer_agendamento', 'visto_amer_validacao', 'visto_amer_ds160', 'visto_amer_envio', 'visto_amer_busca',
+  'visto_cana_formulario', 'visto_cana_oficiais', 'visto_cana_aprovacao', 'visto_cana_envio',
+  'visto_port_formulario', 'visto_port_entrevista', 'visto_port_aprovacao',
+  'visto_aust_formulario', 'visto_aust_oficiais', 'visto_aust_pagamento',
+  'visto_mex_formulario', 'visto_mex_entrevista',
+  'visto_bra_documentacao', 'visto_bra_entrevista',
+  'ital_formulario', 'ital_aire', 'ital_passaporte',
+  'outros'];
 // Colunas do pipeline PÓS-VENDA (com título e cor) — o servidor entrega isto quando o usuário é 'pos'.
-// As 3 colunas com group='Grupo Visto Americano' são raias internas agrupadas no frontend sob um título único.
+// Colunas com 'group' são raias internas agrupadas no frontend sob um título único (banner). Títulos
+// são ÚNICOS (o frontend casa coluna→aba/banner por título); por isso o sufixo do visto onde repetiria.
 const POS_STAGES_FULL = [
   { id: 'clientes_antigos_pos',   title: 'Comunicação com ambiente Pré-Venda', color: '#6366f1' },
   { id: 'vendas_concretizadas',   title: 'Clientes concluídos',                color: '#16a34a' },
   { id: 'para_classificar',       title: 'Mensagens novas para organizar',     color: '#71717a' },
-  { id: 'visto_amer_agendamento', title: 'Agendamento',                        color: '#2563eb', group: 'Grupo Visto Americano' },
-  { id: 'visto_amer_validacao',   title: 'Validação',                          color: '#1d4ed8', group: 'Grupo Visto Americano' },
-  { id: 'visto_amer_envio',       title: 'Envio passaporte',                   color: '#7c3aed', group: 'Grupo Visto Americano' },
-  { id: 'visto_canadense',        title: 'Vistos canadenses',                  color: '#ef4444' },
-  { id: 'visto_portugues',        title: 'Vistos portugueses',                 color: '#15803d' },
-  { id: 'visto_australiano',      title: 'Vistos australianos',                color: '#0891b2' },
-  { id: 'visto_mexicano',         title: 'Vistos mexicanos',                   color: '#ca8a04' },
-  { id: 'aire_italiano',          title: 'Passaporte italiano / AIRE',         color: '#0ea5e9' },
+  // Grupo Visto Americano
+  { id: 'visto_amer_agendamento', title: 'VV faz agendamento CASV/entrevista e reunião de validação', color: '#2563eb', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_validacao',   title: 'Cliente participa da reunião de Validação (1º visto)',      color: '#2563eb', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_ds160',       title: 'VV faz DS-160 (renovação)',                                 color: '#2563eb', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_envio',       title: 'VV agenda envio pelos correios via consulado',              color: '#2563eb', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_busca',       title: 'VV busca o passaporte e envia pelos correios',              color: '#2563eb', group: 'Grupo Visto Americano' },
+  // Grupo Visto Canadense
+  { id: 'visto_cana_formulario',  title: 'Cliente preenche formulário (Canadense)',                                    color: '#ef4444', group: 'Grupo Visto Canadense' },
+  { id: 'visto_cana_oficiais',    title: 'VV faz formulários oficiais e agenda pagamento da taxa consular e biometria', color: '#ef4444', group: 'Grupo Visto Canadense' },
+  { id: 'visto_cana_aprovacao',   title: 'VV acompanha a aprovação pelo e-mail (Canadense)',                           color: '#ef4444', group: 'Grupo Visto Canadense' },
+  { id: 'visto_cana_envio',       title: 'VV avisa ao cliente do envio do passaporte (Canadense)',                     color: '#ef4444', group: 'Grupo Visto Canadense' },
+  // Grupo Visto Português
+  { id: 'visto_port_formulario',  title: 'Cliente preenche formulário (Português)', color: '#15803d', group: 'Grupo Visto Português' },
+  { id: 'visto_port_entrevista',  title: 'VV agenda entrevista (Português)',        color: '#15803d', group: 'Grupo Visto Português' },
+  { id: 'visto_port_aprovacao',   title: 'VV acompanha aprovação (Português)',      color: '#15803d', group: 'Grupo Visto Português' },
+  // Grupo Visto Australiano
+  { id: 'visto_aust_formulario',  title: 'Cliente preenche formulário (Australiano)',          color: '#0891b2', group: 'Grupo Visto Australiano' },
+  { id: 'visto_aust_oficiais',    title: 'VV preenche formulários oficiais (Australiano)',      color: '#0891b2', group: 'Grupo Visto Australiano' },
+  { id: 'visto_aust_pagamento',   title: 'Cliente paga taxa e aguarda aprovação (Australiano)', color: '#0891b2', group: 'Grupo Visto Australiano' },
+  // Grupo Visto Mexicano
+  { id: 'visto_mex_formulario',   title: 'Cliente preenche formulário (Mexicano)', color: '#ca8a04', group: 'Grupo Visto Mexicano' },
+  { id: 'visto_mex_entrevista',   title: 'VV agenda entrevista (Mexicano)',        color: '#ca8a04', group: 'Grupo Visto Mexicano' },
+  // Grupo Visto Brasileiro (novo)
+  { id: 'visto_bra_documentacao', title: 'Cliente disponibiliza documentação', color: '#059669', group: 'Grupo Visto Brasileiro' },
+  { id: 'visto_bra_entrevista',   title: 'VV agenda entrevista na PF',          color: '#059669', group: 'Grupo Visto Brasileiro' },
+  // Grupo Passaporte Italiano / AIRE
+  { id: 'ital_formulario',        title: 'Cliente preenche formulário (Italiano)', color: '#0ea5e9', group: 'Grupo Passaporte Italiano / AIRE' },
+  { id: 'ital_aire',              title: 'VV agenda AIRE',                         color: '#0ea5e9', group: 'Grupo Passaporte Italiano / AIRE' },
+  { id: 'ital_passaporte',        title: 'VV agenda passaporte (Italiano)',        color: '#0ea5e9', group: 'Grupo Passaporte Italiano / AIRE' },
   { id: 'outros',                 title: 'Outros',                             color: '#6b7280' }
 ];
 function posStageFor(lead) {

@@ -425,6 +425,16 @@ db.serialize(() => {
     }
   });
 
+  // Migração das COLUNAS PÓS-VENDA (pedido do Henry 2026-06-27): os grupos de visto passaram a ter
+  // várias colunas. Mapeia os pos_stage ANTIGOS (1 coluna por visto) para a 1ª coluna nova de cada
+  // grupo. Americano: todas as 3 antigas → a 1ª coluna nova (agendamento). Idempotente.
+  db.run("UPDATE leads SET pos_stage = 'visto_amer_agendamento' WHERE pos_stage IN ('visto_amer_validacao', 'visto_amer_envio')");
+  db.run("UPDATE leads SET pos_stage = 'visto_cana_formulario' WHERE pos_stage = 'visto_canadense'");
+  db.run("UPDATE leads SET pos_stage = 'visto_port_formulario' WHERE pos_stage = 'visto_portugues'");
+  db.run("UPDATE leads SET pos_stage = 'visto_aust_formulario' WHERE pos_stage = 'visto_australiano'");
+  db.run("UPDATE leads SET pos_stage = 'visto_mex_formulario'  WHERE pos_stage = 'visto_mexicano'");
+  db.run("UPDATE leads SET pos_stage = 'ital_formulario'       WHERE pos_stage = 'aire_italiano'");
+
   // Seed do usuário do AMBIENTE PÓS-VENDA (Alexandre). Idempotente (INSERT OR IGNORE por id/email).
   // wa_type='pos' → vê apenas o 2030 e o pipeline pós-venda. Pedido explícito do Henry.
   try {
