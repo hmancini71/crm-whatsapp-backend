@@ -579,23 +579,31 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       // nela por QUALQUER lado — stage='clientes_antigos' (pré) OU pos_stage='clientes_antigos_pos'
       // (pós). Quem está na ponte aparece nos DOIS ambientes, na coluna-ponte de cada board.
       const inBridge = (l) => l.bridge === 1;
+      // PERTENCE AO PÓS por ATRIBUIÇÃO: um lead que foi colocado numa coluna pós REAL (pos_stage de uma
+      // coluna do board pós, exceto a coluna-ponte) pertence ao ambiente PÓS — INDEPENDENTE da linha do
+      // WhatsApp. Esse é o sinal que faltava: antes o ambiente vinha SÓ de leadIsPos (linha 2030), então
+      // um card pré reclassificado p/ coluna pós perdia a ponte (bridge=0) e voltava SÓ p/ o pré. Agora
+      // a coluna escolhida (combo ou arrasto) decide o ambiente, de forma robusta e simétrica.
+      const hasPosStage = (l) => !!(l.pos_stage && POS_STAGES.includes(l.pos_stage) && l.pos_stage !== 'clientes_antigos_pos');
       // SELO da coluna-ponte: a DIREÇÃO é dada pela ORIGEM do card. Lead pós (2030) que foi p/ a ponte
       // veio do ambiente PÓS → assunto p/ o PRÉ ('pre'); lead pré que foi p/ a ponte → assunto p/ o PÓS
       // ('pos'). Derivado aqui (não persistido): classifica todos automaticamente e some fora da ponte.
       const bridgeSubject = (l) => leadIsPos(l, posSet, posDigits) ? 'pre' : 'pos';
       if (isPos) {
-        // PÓS: vê os leads do 2030, as vendas convertidas e os da ponte. Os da ponte vão p/ a coluna-
-        // ponte do board pós ('clientes_antigos_pos'); os demais, pela regra normal (posStageFor).
+        // PÓS: vê os leads do 2030, as vendas convertidas, os ATRIBUÍDOS a uma coluna pós e os da ponte.
+        // Os da ponte vão p/ a coluna-ponte do board pós ('clientes_antigos_pos'); os demais, pela regra
+        // normal (posStageFor).
         parsedLeads = parsedLeads
-          .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida' || inBridge(l))
+          .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida' || hasPosStage(l) || inBridge(l))
           .map(l => Object.assign({}, l, inBridge(l)
             ? { stage: 'clientes_antigos_pos', bridge_subject: bridgeSubject(l) }
             : { stage: posStageFor(l) }));
       } else if (posSet.size) {
-        // PRÉ/admin: exclui os leads do 2030, EXCETO os que estão na coluna-ponte (cross-visíveis).
-        // Os da ponte são remapeados p/ a coluna-ponte do board pré ('clientes_antigos').
+        // PRÉ/admin: exclui os leads do 2030 E os que foram movidos p/ uma coluna pós (hasPosStage),
+        // EXCETO os que estão na coluna-ponte (cross-visíveis). Os da ponte são remapeados p/ a coluna-
+        // ponte do board pré ('clientes_antigos').
         parsedLeads = parsedLeads
-          .filter(l => !leadIsPos(l, posSet, posDigits) || inBridge(l))
+          .filter(l => (!leadIsPos(l, posSet, posDigits) && !hasPosStage(l)) || inBridge(l))
           .map(l => inBridge(l) ? Object.assign({}, l, { stage: 'clientes_antigos', bridge_subject: bridgeSubject(l) }) : l);
       }
     } catch (e) { /* em caso de falha, não filtra */ }
@@ -705,8 +713,10 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       console.log(`[stage] BLOQUEADO: "${cur.name}" está em '${cur.stage}' (terminal) — mudança p/ '${stage}' ignorada.`);
       return res.json({ ...cur, tags: cur.tags ? JSON.parse(cur.tags) : [], _locked: true });
     }
-    // PRÉ-VENDA: coluna pré (não-ponte) → grava stage e SAI da ponte (bridge=0).
-    await runQuery("UPDATE leads SET stage = ?, bridge = 0 WHERE id = ?", [stage, id]);
+    // PRÉ-VENDA: coluna pré (não-ponte) → grava stage, SAI da ponte (bridge=0) e LIMPA pos_stage. Limpar
+    // o pos_stage é o que faz o card REALMENTE voltar ao pré (senão hasPosStage continuaria true e ele
+    // ficaria preso no pós). Move pré ⇄ pós agora é simétrico e confiável.
+    await runQuery("UPDATE leads SET stage = ?, pos_stage = NULL, bridge = 0 WHERE id = ?", [stage, id]);
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.stage_changed', { ...lead, tags: lead.tags ? JSON.parse(lead.tags) : [] });
     res.json({
