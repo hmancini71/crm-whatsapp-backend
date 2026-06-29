@@ -147,6 +147,13 @@ function isWithinBusinessHours(cfg) {
   } catch (e) { return true; } // em dúvida, NÃO responde (considera dentro)
 }
 
+// Número (linha) NOSSA a partir do socket conectado — carimbado em cada mensagem que enviamos,
+// para o histórico saber de QUAL número saiu cada mensagem (imune a futuras trocas de linha).
+function sockNumber(sock) {
+  try { if (sock && sock.user && sock.user.id) return '+' + sock.user.id.split(':')[0].split('@')[0]; } catch (e) {}
+  return '';
+}
+
 // Envia a mensagem fora do horário, se habilitada, fora do expediente e respeitando cooldown.
 async function maybeAutoReply(sock, fromJid, convoId) {
   try {
@@ -163,7 +170,7 @@ async function maybeAutoReply(sock, fromJid, convoId) {
     await sock.sendMessage(fromJid, { text: cfg.message });
     const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
     const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
-    await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)", [msgId, convoId, 'me', cfg.message, timeStr, Date.now()]);
+    await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, our_number) VALUES (?, ?, ?, ?, ?, ?, ?)", [msgId, convoId, 'me', cfg.message, timeStr, Date.now(), sockNumber(sock)]);
     await runQuery("UPDATE conversations SET lastTime = ?, last_autoreply = ? WHERE id = ?", [timeStr, Date.now(), convoId]);
     console.log(`[autoReply] mensagem fora do horário ENVIADA para ${fromJid}`);
   } catch (e) { console.error('[autoReply] erro:', e && e.message); }
@@ -498,8 +505,8 @@ async function connectWhatsApp(id, isReconnect = false) {
         const msgId = incomingMsgId;
         console.log(`[WhatsApp ${id}] Saving message to DB: msgId=${msgId}, convoId=${convoId}, type=${incomingType}`);
         await runQuery(
-          "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          [msgId, convoId, isMine ? 'me' : 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath]
+          "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [msgId, convoId, isMine ? 'me' : 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath, isMine ? sockNumber(sock) : null]
         );
 
         // Regras de lead só valem para mensagens RECEBIDAS (do cliente), não para as nossas
@@ -623,8 +630,8 @@ async function connectWhatsApp(id, isReconnect = false) {
               if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }
               const tAi = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
               await runQuery(
-                "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, ai) VALUES (?, ?, ?, ?, ?, ?, 1)",
-                [aiMsgId, convoId, 'me', replyText, tAi, Date.now()]
+                "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, ai, our_number) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                [aiMsgId, convoId, 'me', replyText, tAi, Date.now(), sockNumber(sock)]
               );
               await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convoId]);
               // IA respondeu → zera o controle de tempo (fomos os últimos a falar)
@@ -752,8 +759,8 @@ async function sendWhatsAppMessage(accountId, convoId, text) {
 
   // Insert into DB (status >= 2 = enviado/1 tick; messages.update sobe p/ entregue/lido)
   await runQuery(
-    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    [msgId, convoId, 'me', text, timeStr, Date.now(), Math.max(2, (sent && sent.status) || 0)]
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, status, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', text, timeStr, Date.now(), Math.max(2, (sent && sent.status) || 0), sockNumber(sock)]
   );
 
   // Update conversation lastMessage
@@ -799,8 +806,8 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
   try { fs.writeFileSync(mediaPath, oggBuffer); } catch (e) { console.error('Falha ao salvar áudio enviado:', e); }
 
   await runQuery(
-    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    [msgId, convoId, 'me', '[Mensagem de voz]', timeStr, Date.now(), 'audio', mediaPath]
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', '[Mensagem de voz]', timeStr, Date.now(), 'audio', mediaPath, sockNumber(sock)]
   );
 
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
@@ -828,8 +835,8 @@ async function sendWhatsAppMedia(accountId, convoId, buffer, mimetype, fileName)
   const mediaPath = path.join(MEDIA_DIR, msgId + ext);
   try { fs.writeFileSync(mediaPath, buffer); } catch (e) { console.error('Falha ao salvar mídia enviada:', e); }
   await runQuery(
-    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    [msgId, convoId, 'me', label, timeStr, Date.now(), type, mediaPath]
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', label, timeStr, Date.now(), type, mediaPath, sockNumber(sock)]
   );
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
   return { id: msgId, from: 'me', text: label, time: timeStr, type: type };
@@ -951,8 +958,8 @@ async function processNovoBacklog(limit) {
       if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }
       const tAi = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       await runQuery(
-        "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, status, ai) VALUES (?, ?, 'me', ?, ?, ?, 2, 1)",
-        [aiMsgId, convo.id, replyText, tAi, Date.now()]
+        "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, status, ai, our_number) VALUES (?, ?, 'me', ?, ?, ?, 2, 1, ?)",
+        [aiMsgId, convo.id, replyText, tAi, Date.now(), sockNumber(sock)]
       );
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convo.id]);
       await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [lead.id]);

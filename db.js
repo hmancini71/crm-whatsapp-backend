@@ -635,6 +635,17 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: 'our_number' em messages — a linha NOSSA que enviou cada mensagem (histórico,
+  // mostrado entre parênteses no balão verde; imune a futuras trocas de linha da conversa).
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'our_number')) {
+      db.run("ALTER TABLE messages ADD COLUMN our_number TEXT", (e) => {
+        if (e) console.error("Failed to add our_number column to messages:", e);
+        else console.log("Migration: added 'our_number' column to messages table.");
+      });
+    }
+  });
+
   // Safe migration: add 'archived' column to conversations if it doesn't exist yet
   db.all("PRAGMA table_info(conversations)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'archived')) {
