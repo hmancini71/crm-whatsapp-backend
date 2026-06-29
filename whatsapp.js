@@ -154,6 +154,20 @@ function sockNumber(sock) {
   return '';
 }
 
+// Registra um evento na linha do tempo do lead (best-effort; nunca quebra a ação principal).
+// Espelha o logLeadHistory do index.js para que as movimentações AUTOMÁTICAS (IA) também
+// apareçam no "Histórico do cliente".
+async function logHistory(leadId, phone, name, type, detail, meta) {
+  try {
+    const id = 'h_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    const ph = String(phone || '').replace(/\D/g, '');
+    await runQuery(
+      "INSERT INTO lead_history (id, lead_id, phone, name, type, detail, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, leadId || null, ph || null, name || null, type, detail || '', meta ? JSON.stringify(meta) : null, new Date().toISOString()]
+    );
+  } catch (e) { console.error('[history] log falhou:', e && e.message); }
+}
+
 // Envia a mensagem fora do horário, se habilitada, fora do expediente e respeitando cooldown.
 async function maybeAutoReply(sock, fromJid, convoId) {
   try {
@@ -641,6 +655,7 @@ async function connectWhatsApp(id, isReconnect = false) {
                 // grava a TAG do serviço, marca "Novo lead" e move p/ o Tratamento inicial (1ª coluna).
                 // "Novo lead" sai quando um humano responder.
                 await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead', tags = ? WHERE id = ? AND stage = 'novo'", [JSON.stringify([ai.visa_tag]), aiLead.id]);
+                await logHistory(aiLead.id, aiLead.phone, aiLead.name, 'movimentacao', 'Movido para "Tratamento inicial" (atendimento automático da IA)', { to: 'tratamento' });
                 // Registra nos comentários o horário que o cliente informou para o consultor ligar (se houver).
                 if (ai.horario_contato) {
                   const note = '📞 Horário p/ ligar (informado pelo cliente): ' + String(ai.horario_contato).slice(0, 200);
@@ -966,6 +981,7 @@ async function processNovoBacklog(limit) {
       sent++; done++;
       if (ai.dados_coletados && ai.visa_tag) {
         await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead', tags = ? WHERE id = ? AND stage = 'novo'", [JSON.stringify([ai.visa_tag]), lead.id]);
+        await logHistory(lead.id, lead.phone, lead.name, 'movimentacao', 'Movido para "Tratamento inicial" (atendimento automático da IA)', { to: 'tratamento' });
         moved++;
       }
       console.log(`[IA backlog] respondido: "${lead.name}"${(ai.dados_coletados && ai.visa_tag) ? ' (→ Tratamento)' : ''}.`);
