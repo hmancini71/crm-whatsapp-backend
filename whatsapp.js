@@ -12,6 +12,7 @@ const ffmpegPath = require('ffmpeg-static');
 const ffmpeg = require('fluent-ffmpeg');
 const { runQuery, getRow, allRows, isGoogleAdsFirstMsg } = require('./db');
 const { getNovoLeadReply, getAiSettings } = require('./ai');
+const antiban = require('./antiban'); // governador anti-banimento (caps, warm-up, pacing, humano)
 // ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
 const _aiSentIds = new Set();
 
@@ -638,7 +639,9 @@ async function connectWhatsApp(id, isReconnect = false) {
               if (ai.dados_coletados && ai.visa_tag && outOfHours) {
                 replyText += '\n\n⏰ Nosso horário de atendimento é de segunda a sexta, das 9h às 18h, e aos sábados, das 9h às 13h. No momento estamos fora do horário, mas em breve um de nossos consultores dará continuidade ao seu atendimento. 🙏';
               }
+              await antiban.humanize(sock, fromJid, msg.key); // marca lido + "digitando" + pausa
               const sentAi = await sock.sendMessage(fromJid, { text: replyText });
+              antiban.recordSend(id); // contabiliza no cap do número (saúde anti-ban)
               const aiMsgId = (sentAi && sentAi.key && sentAi.key.id) || ('m_' + Math.random().toString(36).substr(2, 9));
               _aiSentIds.add(aiMsgId);
               if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }
@@ -967,7 +970,10 @@ async function processNovoBacklog(limit) {
       if (ai.dados_coletados && ai.visa_tag && outOfHours) {
         replyText += '\n\n⏰ Nosso horário de atendimento é de segunda a sexta, das 9h às 18h, e aos sábados, das 9h às 13h. No momento estamos fora do horário, mas em breve um de nossos consultores dará continuidade ao seu atendimento. 🙏';
       }
+      await antiban.pace(account);              // espaça com jitter (sem rajada no lote)
+      await antiban.humanize(sock, jid, null);  // "digitando" + pausa antes de responder
       const sentAi = await sock.sendMessage(jid, { text: replyText });
+      antiban.recordSend(account);              // contabiliza no cap do número
       const aiMsgId = (sentAi && sentAi.key && sentAi.key.id) || ('m_' + Math.random().toString(36).substr(2, 9));
       _aiSentIds.add(aiMsgId);
       if (_aiSentIds.size > 500) { const first = _aiSentIds.values().next().value; _aiSentIds.delete(first); }

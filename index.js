@@ -14,6 +14,7 @@ const nodemailer = require('nodemailer');
 const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
 const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
+const antiban = require('./antiban'); // governador anti-banimento (caps, warm-up, pacing, horário, variação)
 const {
   connectWhatsApp,
   disconnectWhatsApp,
@@ -3232,6 +3233,9 @@ app.post('/api/ai/welcome-form-leads', authenticateToken, async (req, res) => {
     const num = '+' + WELCOME_LINE_DIGITS;
     for (const l of eligible) {
       if (sent >= cap) break;
+      if (!antiban.isBusinessHours()) { errors.push('fora do horário comercial — boas-vindas pausadas'); break; }
+      const _g = await antiban.canSendProactive(accountId);
+      if (!_g.ok) { errors.push('número protegido: ' + _g.reason + ' — pausado'); break; }
       try {
         const digits = _digits(l.phone); const tail = digits.slice(-8); const jidLead = l.whatsapp_jid || '';
         let convo = null;
@@ -3247,7 +3251,9 @@ app.post('/api/ai/welcome-form-leads', authenticateToken, async (req, res) => {
         } else {
           await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [accountId, convo.id]);
         }
-        await sendWhatsAppMessage(accountId, convo.id, WELCOME_TEXT);
+        await antiban.pace(accountId);                                   // espaça com jitter (20–60s)
+        await sendWhatsAppMessage(accountId, convo.id, antiban.varyText(WELCOME_TEXT)); // texto variado
+        await antiban.recordSend(accountId);                             // contabiliza no cap/warm-up
         await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE id = ?", [accountId, num, l.id]);
         logLeadHistory({ leadId: l.id, phone: l.phone, name: l.name, type: 'nota', detail: 'Boas-vindas automáticas enviadas pela linha (12) 98248-3094.' });
         sent++;
@@ -3350,14 +3356,16 @@ async function aiFollowUpSweep() {
         const tentativa = (l.ai_fu_count || 0) + 1;
         const texto = await getFollowUpReply(conv.id, l.name, tentativa);
         if (!texto) continue;
-        await sendWhatsAppMessage(conv.account, conv.id, texto);
+        const _gate = await antiban.canSendProactive(conv.account); // cap diário/horário + warm-up do número
+        if (!_gate.ok) { console.log(`[IA follow-up] número ${conv.account}: ${_gate.reason} — pausando a rodada.`); break; }
+        await antiban.pace(conv.account);                           // intervalo + jitter (20–60s) anti-rajada
+        await sendWhatsAppMessage(conv.account, conv.id, antiban.varyText(texto)); // texto variado
+        await antiban.recordSend(conv.account);
         const fuTs = Date.now();
         await runQuery("UPDATE leads SET ai_fu_count = ?, ai_fu_last = ? WHERE id = ?", [tentativa, fuTs, l.id]);
         try { await runQuery("INSERT INTO followup_log (ts, lead_id, lead_name) VALUES (?, ?, ?)", [fuTs, l.id, l.name]); } catch (e) {}
         processed++;
         console.log(`[IA follow-up] "${l.name}": tentativa ${tentativa} enviada (${processed}/${PER_RUN_CAP}).`);
-        // intervalo humano entre os envios (5–13 s) para não parecer disparo em massa
-        await new Promise(r => setTimeout(r, 5000 + Math.floor(Math.random() * 8000)));
       } catch (e) { console.error('[IA follow-up]', l && l.name, e && e.message); }
     }
   } catch (e) { console.error('[IA follow-up sweep]', e && e.message); }

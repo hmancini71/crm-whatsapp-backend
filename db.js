@@ -646,6 +646,18 @@ db.serialize(() => {
     }
   });
 
+  // Anti-banimento: estatísticas de envio por número (caps diários + warm-up). Persistente.
+  db.run(`CREATE TABLE IF NOT EXISTS wa_send_stats (
+    account_id TEXT,
+    ymd TEXT,
+    count INTEGER DEFAULT 0,
+    PRIMARY KEY (account_id, ymd)
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS wa_account_age (
+    account_id TEXT PRIMARY KEY,
+    first_send_at TEXT
+  )`);
+
   // Safe migration: add 'archived' column to conversations if it doesn't exist yet
   db.all("PRAGMA table_info(conversations)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'archived')) {
