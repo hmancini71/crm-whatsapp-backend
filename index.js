@@ -23,7 +23,6 @@ const {
   processNovoBacklog,
   initSessions,
   sessionQrs,
-  sessionPairCodes,
   sessions,
   MEDIA_DIR, sendWhatsAppMedia,
   editWhatsAppMessage, deleteWhatsAppMessage,
@@ -2132,10 +2131,8 @@ app.get('/api/whatsapp/accounts', authenticateToken, async (req, res) => {
 // 11. Channels Routes: Trigger Connect
 app.post('/api/whatsapp/accounts/:id/connect', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  // Se vier um telefone no corpo, conecta por CODIGO DE PAREAMENTO (digitado no celular) em vez do QR.
-  const phone = (req.body && req.body.phone) ? String(req.body.phone) : null;
   try {
-    const statusInfo = await connectWhatsApp(id, false, phone);
+    const statusInfo = await connectWhatsApp(id);
     res.json(statusInfo);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2159,8 +2156,7 @@ app.get('/api/whatsapp/accounts/:id/status', authenticateToken, async (req, res)
     res.json({
       id,
       status,
-      qr: sessionQrs[id] || null,
-      pairCode: sessionPairCodes[id] || null
+      qr: sessionQrs[id] || null
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
