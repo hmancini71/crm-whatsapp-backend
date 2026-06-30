@@ -48,6 +48,7 @@ if (ffmpegPath) {
 
 const sessions = {};
 const sessionQrs = {};
+const sessionPairCodes = {}; // codigo de pareamento por conta (conexao por numero, alternativa ao QR)
 
 // Directory where voice notes / media are stored (ephemeral on Render)
 const MEDIA_DIR = path.join(__dirname, 'media');
@@ -198,14 +199,15 @@ const connectionRetries = {};
 // conectado estourar o keep-alive (408) quando um número novo conectava.
 let _cachedWaVersion = null;
 
-async function connectWhatsApp(id, isReconnect = false) {
+async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
   if (sessions[id]) {
     const sock = sessions[id];
     // Return status
     return {
       id,
       status: sock.ws.isOpen ? 'connected' : 'connecting',
-      qr: sessionQrs[id] || null
+      qr: sessionQrs[id] || null,
+      pairCode: sessionPairCodes[id] || null
     };
   }
 
@@ -248,6 +250,22 @@ async function connectWhatsApp(id, isReconnect = false) {
 
   sessions[id] = sock;
   sessionQrs[id] = null;
+  sessionPairCodes[id] = null;
+  // Conexao por CODIGO DE PAREAMENTO (alternativa ao QR): se veio um numero e a sessao ainda
+  // NAO esta registrada, pede o codigo de 8 digitos que o usuario digita no celular em
+  // "Conectar com numero de telefone". Util quando o WhatsApp exige a chave de acesso.
+  if (pairPhone && !(sock.authState && sock.authState.creds && sock.authState.creds.registered)) {
+    const digits = String(pairPhone).replace(/\D/g, '');
+    if (digits.length >= 10) {
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(digits);
+          sessionPairCodes[id] = String(code || '').toUpperCase();
+          console.log('[pair] codigo de pareamento de ' + id + ': ' + sessionPairCodes[id]);
+        } catch (e) { console.error('[pair] falha ao gerar codigo de pareamento:', e && e.message); }
+      }, 2500);
+    }
+  }
 
   // Set status in DB
   await runQuery("UPDATE whatsapp_accounts SET status = ?, connect_at = ? WHERE id = ?", ['connecting', new Date().toISOString(), id]);
@@ -268,6 +286,7 @@ async function connectWhatsApp(id, isReconnect = false) {
     if (connection === 'open') {
       console.log(`WhatsApp Account ${id} Connected!`);
       sessionQrs[id] = null;
+      sessionPairCodes[id] = null;
       connectionRetries[id] = 0;
       
       // Get own number
@@ -1010,6 +1029,7 @@ module.exports = {
   initSessions,
   sessions,
   sessionQrs,
+  sessionPairCodes,
   MEDIA_DIR,
   AVATAR_DIR,
   avatarFileForJid,
