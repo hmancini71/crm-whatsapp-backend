@@ -202,13 +202,23 @@ let _cachedWaVersion = null;
 async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
   if (sessions[id]) {
     const sock = sessions[id];
-    // Return status
-    return {
-      id,
-      status: sock.ws.isOpen ? 'connected' : 'connecting',
-      qr: sessionQrs[id] || null,
-      pairCode: sessionPairCodes[id] || null
-    };
+    const isOpen = !!(sock.ws && sock.ws.isOpen);
+    // Se o usuario pediu conectar por CODIGO e a sessao atual ainda nao abriu (estava em
+    // modo QR pendente), derruba essa sessao e recria pedindo o codigo. Sem isso, o
+    // early-return impedia o codigo de pareamento de ser gerado.
+    if (pairPhone && !isOpen) {
+      try { sock.end(); } catch (e) {}
+      delete sessions[id];
+      delete sessionQrs[id];
+      delete sessionPairCodes[id];
+    } else {
+      return {
+        id,
+        status: isOpen ? 'connected' : 'connecting',
+        qr: sessionQrs[id] || null,
+        pairCode: sessionPairCodes[id] || null
+      };
+    }
   }
 
   if (!isReconnect) {
