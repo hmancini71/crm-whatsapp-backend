@@ -1441,14 +1441,25 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     if (!convo) {
       return res.status(404).json({ error: "Conversa não encontrada" });
     }
-    // Trava de ambiente: pós-venda SÓ envia pelo 2030; pré/admin NÃO enviam pelo 2030.
+    // Ambiente pós-venda: envia pela(s) linha(s) classificada(s) como 'pos'. Qualquer celular
+    // marcado como pós é autorizado. Se a conversa ainda está numa linha pré, em vez de
+    // bloquear, roteia automaticamente por uma linha do pós que esteja CONECTADA.
     try {
       const { posSet } = await getSaleLineFilter();
       if (posSet.size) {
         const isPos = await userIsPos(req);
-        const convPos = posSet.has(convo.account);
-        if (isPos && !convPos) return res.status(403).json({ error: 'No pós-venda só é permitido enviar pelo número 2030.' });
-        if (!isPos && convPos) return res.status(403).json({ error: 'Este número (2030) é do ambiente pós-venda.' });
+        let convPos = posSet.has(convo.account);
+        if (isPos && !convPos) {
+          const posConn = [...posSet].find(a => sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
+          if (posConn) {
+            await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [posConn, id]);
+            convo.account = posConn;
+            convPos = true;
+          } else {
+            return res.status(409).json({ error: 'Nenhuma linha do pós-venda está conectada. Conecte o número do pós-venda em Conexões.' });
+          }
+        }
+        if (!isPos && convPos) return res.status(403).json({ error: 'Esta linha é do ambiente pós-venda.' });
       }
     } catch (e) { /* não bloqueia em falha de checagem */ }
 
@@ -1589,6 +1600,14 @@ app.post('/api/leads/:leadId/start-conversation', authenticateToken, async (req,
       const connected = Object.keys(sessions).find(isOpen);
       if (connected) accountId = connected;
     }
+    // Ambiente PÓS: conversa nova deve sair por uma linha do pós CONECTADA (não por uma linha pré).
+    try {
+      const { posSet: _ps } = await getSaleLineFilter();
+      if (_ps.size && (await userIsPos(req)) && !_ps.has(accountId)) {
+        const _posConn = [...(_ps)].find(isOpen);
+        if (_posConn) accountId = _posConn;
+      }
+    } catch (e) { /* não bloqueia em falha de checagem */ }
     if (!isOpen(accountId)) {
       return res.status(409).json({ error: 'A linha de WhatsApp escolhida não está conectada. Conecte-a em Conexões e tente de novo.' });
     }
