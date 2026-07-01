@@ -5,6 +5,14 @@ const bcrypt = require('bcryptjs');
 const DB_PATH = path.join(__dirname, 'database.db');
 const db = new sqlite3.Database(DB_PATH);
 
+// Performance/concorrência: WAL deixa LEITURAS e ESCRITAS pararem de se bloquear —
+// crítico aqui porque o frontend faz polling de vários endpoints a cada 1-3s enquanto
+// o Baileys grava as mensagens que chegam. synchronous=NORMAL é seguro com WAL e mais
+// rápido; busy_timeout faz o escritor esperar em vez de estourar "database is locked".
+db.run("PRAGMA journal_mode = WAL");
+db.run("PRAGMA synchronous = NORMAL");
+db.run("PRAGMA busy_timeout = 5000");
+
 // ── Regra de origem "Google Ads" ────────────────────────────────────────────
 // A mensagem inicial pré-preenchida pelo clique vindo do site (campanhas do
 // Google Ads) chega SEMPRE com esta frase exata. Quando a 1ª mensagem do cliente
@@ -149,6 +157,12 @@ db.serialize(() => {
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_phone ON lead_history(phone)");
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_lead ON lead_history(lead_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_msgid ON lead_history(meta)");
+  // Índices de performance (busca por conversa/lead/linha usados no dia a dia).
+  db.run("CREATE INDEX IF NOT EXISTS idx_msgs_convo ON messages(conversationId)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_msgs_ts ON messages(timestamp)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_leads_jid ON leads(whatsapp_jid)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_conv_account ON conversations(account)");
 
   // 6. WhatsApp Accounts Table
   db.run(`CREATE TABLE IF NOT EXISTS whatsapp_accounts (

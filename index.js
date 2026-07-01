@@ -1463,11 +1463,12 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       }
     } catch (e) { /* não bloqueia em falha de checagem */ }
 
-    // NÓS respondemos → conversa "lida": zera a bolinha (como no WhatsApp Web).
+    // Bookkeeping do envio (zera a bolinha, move lead p/ "tratamento", tira "novo lead",
+    // carimba a linha). Roda DEPOIS de responder o card (fire-and-forget) — assim o envio
+    // não espera estas consultas, várias das quais varrem a tabela inteira (phone LIKE com
+    // função, sem índice). A chamada está logo após o res.json.
+    const doSendBookkeeping = async () => {
     await runQuery("UPDATE conversations SET unread = 0 WHERE id = ?", [id]);
-
-    // NÓS respondemos pelo CRM → zera o lastClientReply do lead correspondente
-    // (o "controle de tempo" só aparece enquanto o cliente foi o último a falar).
     try {
       if (convo.whatsapp_jid) {
         await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ?", [convo.whatsapp_jid]);
@@ -1503,6 +1504,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
         }
       }
     } catch (e) { /* ignore */ }
+    };
 
     // Instagram: envia pelo Direct e grava a mensagem
     if (convo.account === 'ig') {
@@ -1537,7 +1539,9 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       }
       await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)", [msgId, id, 'me', text, timeStr, Date.now()]);
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
-      return res.json({ id: msgId, conversationId: id, from: 'me', text: text, time: timeStr, timestamp: Date.now() });
+      res.json({ id: msgId, conversationId: id, from: 'me', text: text, time: timeStr, timestamp: Date.now() });
+      doSendBookkeeping().catch(() => {});
+      return;
     }
 
     const accountId = convo.account;
@@ -1569,6 +1573,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     }
 
     res.json(messageObj);
+    doSendBookkeeping().catch(() => {});
   } catch (err) {
     console.error("Error sending message:", err);
     res.status(500).json({ error: err.message });
