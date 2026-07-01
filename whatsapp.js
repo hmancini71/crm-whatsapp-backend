@@ -307,6 +307,37 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
         "UPDATE whatsapp_accounts SET status = ?, number = ?, connect_at = ? WHERE id = ?",
         ['connected', '+' + userNumber, new Date().toISOString(), id]
       );
+
+      // DEDUP: se o MESMO número existir em outro slot DESCONECTADO (slot-fantasma), remove-o
+      // e repronta as conversas/leads dele para este slot conectado. Sem isso, um número
+      // duplicado (um conectado, outro caído) fazia o envio ir pra linha caída e a mensagem
+      // ficava "pendente" (relógio) para sempre.
+      try {
+        const myNum = '+' + userNumber;
+        const ghosts = await allRows(
+          "SELECT id FROM whatsapp_accounts WHERE number = ? AND id != ? AND (status IS NULL OR status != 'connected')",
+          [myNum, id]
+        );
+        for (const g of ghosts) {
+          await runQuery("UPDATE conversations SET account = ? WHERE account = ?", [id, g.id]);
+          await runQuery("UPDATE leads SET account = ? WHERE account = ?", [id, g.id]);
+          await runQuery("DELETE FROM whatsapp_accounts WHERE id = ?", [g.id]);
+          // remove o slot-fantasma do mapa pré/pós (wa_sale_types), se estiver lá
+          try {
+            const row = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
+            if (row && row.value) {
+              const map = JSON.parse(row.value);
+              if (map[g.id] !== undefined) {
+                delete map[g.id];
+                await runQuery("UPDATE app_settings SET value = ? WHERE key = 'wa_sale_types'", [JSON.stringify(map)]);
+              }
+            }
+          } catch (e2) {}
+          try { if (sessions[g.id]) { sessions[g.id].end && sessions[g.id].end(); delete sessions[g.id]; } } catch (e3) {}
+          delete sessionQrs[g.id]; delete sessionPairCodes[g.id];
+          console.log('[dedup] slot-fantasma removido: ' + g.id + ' (mesmo número ' + myNum + ' já conectado em ' + id + ')');
+        }
+      } catch (e) { console.error('[dedup] erro ao limpar slot duplicado:', e && e.message); }
     }
 
     if (connection === 'close') {

@@ -1449,13 +1449,18 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       if (posSet.size) {
         const isPos = await userIsPos(req);
         let convPos = posSet.has(convo.account);
-        if (isPos && !convPos) {
+        const lineOpen = !!(sessions[convo.account] && sessions[convo.account].ws && sessions[convo.account].ws.isOpen);
+        // Pós numa linha que NÃO é do pós, OU numa linha do pós que está DESCONECTADA
+        // (ex.: número duplicado em dois slots — um caiu): roteia por uma linha do pós
+        // CONECTADA. Sem isso, o envio ia pra linha caída e caía no fallback offline,
+        // deixando a mensagem "pendente" (relógio) para sempre.
+        if (isPos && (!convPos || !lineOpen)) {
           const posConn = [...posSet].find(a => sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
-          if (posConn) {
+          if (posConn && posConn !== convo.account) {
             await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [posConn, id]);
             convo.account = posConn;
             convPos = true;
-          } else {
+          } else if (!posConn) {
             return res.status(409).json({ error: 'Nenhuma linha do pós-venda está conectada. Conecte o número do pós-venda em Conexões.' });
           }
         }
@@ -1553,10 +1558,13 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       // Send real WhatsApp message
       messageObj = await sendWhatsAppMessage(accountId, id, text);
     } else {
-      // Offline fallback: Save message locally and mock it
+      // Linha desconectada: NÃO grava mensagem fantasma (antes ela ficava com o relógio
+      // "pendente" para sempre, dando impressão de que enviou). Avisa para reconectar.
+      return res.status(409).json({ error: 'A linha do WhatsApp desta conversa está desconectada. Reconecte-a em Conexões e tente enviar de novo.' });
+      // (bloco antigo de fallback offline removido)
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
-      
+
       await runQuery(
         "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
         [msgId, id, 'me', text, timeStr, Date.now()]
