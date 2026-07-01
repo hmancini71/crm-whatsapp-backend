@@ -786,6 +786,17 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
   };
 }
 
+// Monta o jid de ENVIO. NUNCA envia para um @lid (identificador de privacidade novo do
+// WhatsApp — enviar direto pra ele quebra o jidDecode do Baileys, dando "Falha ao enviar").
+// Prefere sempre o número real (@s.whatsapp.net) quando houver telefone.
+function sendableJid(convo) {
+  const j = convo && convo.whatsapp_jid;
+  if (j && String(j).includes('@') && !/@lid$/i.test(String(j))) return j;
+  const p = convo && convo.phone;
+  if (p && String(p).includes('@')) return p;
+  return sanitizePhoneNumber(p) + '@s.whatsapp.net';
+}
+
 async function disconnectWhatsApp(id) {
   console.log(`Disconnecting WhatsApp Account ${id}`);
   const sock = sessions[id];
@@ -822,7 +833,7 @@ async function sendWhatsAppMessage(accountId, convoId, text) {
   const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
   if (!convo) throw new Error("Conversation not found");
 
-  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
+  const jid = sendableJid(convo);
   
   const sock = sessions[accountId];
   if (!sock) {
@@ -860,7 +871,7 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
   const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
   if (!convo) throw new Error("Conversation not found");
 
-  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
+  const jid = sendableJid(convo);
 
   const sock = sessions[accountId];
   if (!sock) {
@@ -897,7 +908,7 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
 async function sendWhatsAppMedia(accountId, convoId, buffer, mimetype, fileName) {
   const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
   if (!convo) throw new Error("Conversation not found");
-  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
+  const jid = sendableJid(convo);
   const sock = sessions[accountId];
   if (!sock) throw new Error("WhatsApp account not connected");
   const mime = String(mimetype || 'application/octet-stream').toLowerCase();
@@ -924,7 +935,7 @@ async function sendWhatsAppMedia(accountId, convoId, buffer, mimetype, fileName)
 async function editWhatsAppMessage(accountId, convoId, msgId, newText) {
   const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
   if (!convo) throw new Error("Conversation not found");
-  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
+  const jid = sendableJid(convo);
   const sock = sessions[accountId];
   if (!sock) throw new Error("WhatsApp account not connected");
   const key = { remoteJid: jid, fromMe: true, id: msgId };
@@ -937,7 +948,7 @@ async function editWhatsAppMessage(accountId, convoId, msgId, newText) {
 async function deleteWhatsAppMessage(accountId, convoId, msgId) {
   const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
   if (!convo) throw new Error("Conversation not found");
-  const jid = convo.whatsapp_jid ? convo.whatsapp_jid : (convo.phone.includes('@') ? convo.phone : `${sanitizePhoneNumber(convo.phone)}@s.whatsapp.net`);
+  const jid = sendableJid(convo);
   const sock = sessions[accountId];
   if (!sock) throw new Error("WhatsApp account not connected");
   const key = { remoteJid: jid, fromMe: true, id: msgId };
@@ -1014,8 +1025,7 @@ async function processNovoBacklog(limit) {
       if (await isPosLine(account)) continue; // IA atua só no pré-venda (nunca no 2030/pós)
       const sock = sessions[account];
       if (!sock) { skipped.push((lead.name || lead.id) + ' — linha desconectada'); done++; continue; }
-      const jid = convo.whatsapp_jid ? convo.whatsapp_jid
-        : (String(convo.phone || '').includes('@') ? convo.phone : sanitizePhoneNumber(convo.phone) + '@s.whatsapp.net');
+      const jid = sendableJid(convo);
       const ai = await getNovoLeadReply(convo.id, lead.name);
       if (!ai || !ai.reply) { skipped.push((lead.name || lead.id) + ' — IA não retornou resposta'); done++; continue; }
       let outOfHours = false;
