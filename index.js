@@ -1441,21 +1441,21 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     if (!convo) {
       return res.status(404).json({ error: "Conversa não encontrada" });
     }
-    // Ambiente pós-venda: envia pela(s) linha(s) classificada(s) como 'pos'. Qualquer celular
-    // marcado como pós é autorizado. Se a conversa ainda está numa linha pré, em vez de
-    // bloquear, roteia automaticamente por uma linha do pós que esteja CONECTADA.
+    // Roteamento de linha no envio (vale para TODOS os celulares/ambientes):
+    // - Pós: envia sempre por uma linha do pós CONECTADA (mesmo que a linha da conversa seja
+    //   pré ou tenha caído — ex.: número duplicado com um slot caído).
+    // - Pré/admin: não usa linha do pós; e se a linha da conversa CAIU, roteia para outra linha
+    //   do mesmo ambiente (não-pós) que esteja conectada. Assim o envio não falha só porque
+    //   aquela linha específica está desconectada (evita o "Falha ao enviar").
     try {
       const { posSet } = await getSaleLineFilter();
-      if (posSet.size) {
-        const isPos = await userIsPos(req);
-        let convPos = posSet.has(convo.account);
-        const lineOpen = !!(sessions[convo.account] && sessions[convo.account].ws && sessions[convo.account].ws.isOpen);
-        // Pós numa linha que NÃO é do pós, OU numa linha do pós que está DESCONECTADA
-        // (ex.: número duplicado em dois slots — um caiu): roteia por uma linha do pós
-        // CONECTADA. Sem isso, o envio ia pra linha caída e caía no fallback offline,
-        // deixando a mensagem "pendente" (relógio) para sempre.
-        if (isPos && (!convPos || !lineOpen)) {
-          const posConn = [...posSet].find(a => sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
+      const isOpenLine = (a) => !!(sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
+      const isPos = posSet.size ? await userIsPos(req) : false;
+      let convPos = posSet.has(convo.account);
+      const lineOpen = isOpenLine(convo.account);
+      if (posSet.size && isPos) {
+        if (!convPos || !lineOpen) {
+          const posConn = [...posSet].find(isOpenLine);
           if (posConn && posConn !== convo.account) {
             await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [posConn, id]);
             convo.account = posConn;
@@ -1464,7 +1464,15 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
             return res.status(409).json({ error: 'Nenhuma linha do pós-venda está conectada. Conecte o número do pós-venda em Conexões.' });
           }
         }
-        if (!isPos && convPos) return res.status(403).json({ error: 'Esta linha é do ambiente pós-venda.' });
+      } else {
+        if (posSet.size && convPos) return res.status(403).json({ error: 'Esta linha é do ambiente pós-venda.' });
+        if (!lineOpen) {
+          const preConn = Object.keys(sessions).find(a => isOpenLine(a) && !posSet.has(a));
+          if (preConn && preConn !== convo.account) {
+            await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [preConn, id]);
+            convo.account = preConn;
+          }
+        }
       }
     } catch (e) { /* não bloqueia em falha de checagem */ }
 
