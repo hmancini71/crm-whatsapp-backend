@@ -2902,6 +2902,22 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
       dup = await getRow("SELECT * FROM leads WHERE archived = 0 AND email IS NOT NULL AND LOWER(TRIM(email)) = ? LIMIT 1", [_em]);
     }
     if (dup) {
+      // REAPROVEITAMENTO AUTOMÁTICO (aprovado pelo Henry, 2026-07-02, caso Maria Eduarda): se quem
+      // cadastra escolheu uma etapa do PÓS e o card existente é um lead TERMINAL do pré (declinado/
+      // convertida) que ainda não pertence ao pós, o card é MOVIDO para a etapa pedida — antes ele só
+      // era devolvido e o usuário pós "criava" sem ver nada. Negociação ATIVA do pré nunca é puxada.
+      const _wantsPos = POS_STAGES.includes(stage) && stage !== 'clientes_antigos_pos';
+      const _dupInPos = (dup.bridge === 1) || (dup.pos_stage && POS_STAGES.includes(dup.pos_stage) && dup.pos_stage !== 'clientes_antigos_pos');
+      const _dupTerminalPre = ['declinado', 'convertida'].includes(dup.stage);
+      if (_wantsPos && !_dupInPos && _dupTerminalPre) {
+        await runQuery("UPDATE leads SET pos_stage = ?, bridge = 0 WHERE id = ?", [stage, dup.id]);
+        // Complementa dados VAZIOS/mais pobres com o que foi digitado (nunca apaga nada existente).
+        if (email && !(dup.email || '').trim()) await runQuery("UPDATE leads SET email = ? WHERE id = ?", [String(email).trim(), dup.id]);
+        if (name && String(name).trim().length > String(dup.name || '').trim().length) await runQuery("UPDATE leads SET name = ? WHERE id = ?", [String(name).trim(), dup.id]);
+        try { logLeadHistory({ leadId: dup.id, phone: dup.phone, name: dup.name, type: 'movimentacao', detail: 'Recadastrado no pós-venda — card do pré (' + dup.stage + ') reaproveitado e movido para "' + stageLabel(stage) + '"', meta: { to: stage } }); } catch (e) {}
+        const upd = await getRow("SELECT * FROM leads WHERE id = ?", [dup.id]);
+        return res.json({ ...upd, tags: upd.tags ? JSON.parse(upd.tags) : [], existed: true, movedToPos: true });
+      }
       return res.json({ ...dup, tags: dup.tags ? JSON.parse(dup.tags) : [], existed: true });
     }
     const id = 'l_' + Math.random().toString(36).substr(2, 9);
