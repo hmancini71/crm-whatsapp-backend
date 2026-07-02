@@ -2327,6 +2327,13 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
     await client.connect();
     const q = String(req.query.q || '').trim();
     const want = String(req.query.box || 'inbox').toLowerCase();
+    // PAGINAÇÃO (pedido do Henry): 100 por página. A janela crua cresce com a página (e é maior que
+    // a página p/ compensar os filtrados pelo anti-propaganda); rawSat = ainda há mensagens mais
+    // antigas fora da janela → habilita o botão "Próxima" mesmo sem saber a contagem exata.
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const PAGE = 100;
+    const RAW = Math.min(1500, page * PAGE * 2 + 100);
+    let rawSat = false;
     // ANTI-PROPAGANDA (pedido do Henry): e-mails com marcadores de marketing/spam saem da ENTRADA e
     // aparecem na aba SPAM. Sinais: assunto "[SPAM]" (SpamAssassin), X-Spam-Flag, List-Unsubscribe
     // (newsletters/propaganda), Precedence bulk/list e Auto-Submitted. NUNCA esconde remetente que é
@@ -2380,14 +2387,17 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
         if (q) {
           let uids = [];
           try { uids = await client.search({ text: q }, { uid: true }); } catch (e) { uids = []; }
-          uids = (Array.isArray(uids) ? uids : []).slice(-90);
+          if (!Array.isArray(uids)) uids = [];
+          if (uids.length > RAW) rawSat = true;
+          uids = uids.slice(-RAW);
           if (uids.length) {
             for await (const msg of client.fetch(uids.join(','), FETCH_OPTS, { uid: true })) { if (!keep || keep(msg)) _push(msg, boxTag); }
           }
         } else {
           const total = (client.mailbox && client.mailbox.exists) || 0;
+          if (total > RAW) rawSat = true;
           if (total > 0) {
-            const start = Math.max(1, total - 89);
+            const start = Math.max(1, total - (RAW - 1));
             for await (const msg of client.fetch(start + ':*', FETCH_OPTS)) { if (!keep || keep(msg)) _push(msg, boxTag); }
           }
         }
@@ -2406,7 +2416,8 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
     }
     try { await client.logout(); } catch (e) {}
     out.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-    res.json(out.slice(0, 30));
+    const _start = (page - 1) * PAGE;
+    res.json({ messages: out.slice(_start, _start + PAGE), page: page, hasMore: rawSat || out.length > page * PAGE });
   } catch (err) {
     console.error("IMAP error:", err && err.message);
     res.status(500).json({ error: (err && err.message) || "Falha ao ler e-mails" });
