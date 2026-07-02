@@ -3499,15 +3499,23 @@ app.get('/api/dashboard/google-ads', authenticateToken, async (req, res) => {
 });
 
 // POST (X-API-Key): a sincronização (Supermetrics → CRM) grava/atualiza os dias (upsert por data).
+// Aceita também os DETALHAMENTOS (opcionais, mesma chamada ou chamadas separadas):
+//   campaigns: [{date, campaign, clicks, cost, conversions, impressions}]  → google_ads_campaign_daily
+//   keywords:  [{date, keyword,  clicks, cost, conversions, impressions}]  → google_ads_keyword_daily
+//   searches:  [{date, term, clicks}]                                      → google_ads_search_daily
 app.post('/api/integrations/google-ads-daily', checkApiKey, async (req, res) => {
   try {
-    const rows = Array.isArray(req.body && req.body.rows) ? req.body.rows : [];
-    if (!rows.length) return res.status(400).json({ error: 'rows vazio' });
+    const b = req.body || {};
+    const rows = Array.isArray(b.rows) ? b.rows : [];
+    const campaigns = Array.isArray(b.campaigns) ? b.campaigns : [];
+    const keywords = Array.isArray(b.keywords) ? b.keywords : [];
+    const searches = Array.isArray(b.searches) ? b.searches : [];
+    if (!rows.length && !campaigns.length && !keywords.length && !searches.length) return res.status(400).json({ error: 'rows/campaigns/keywords/searches vazios' });
     const now = new Date().toISOString();
+    const okDate = (r) => { const d = String(r.date || '').slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null; };
     let n = 0;
     for (const r of rows) {
-      const date = String(r.date || '').slice(0, 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      const date = okDate(r); if (!date) continue;
       await runQuery(
         "INSERT INTO google_ads_daily (date, clicks, cost, conversions, impressions, updated_at) VALUES (?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(date) DO UPDATE SET clicks=excluded.clicks, cost=excluded.cost, conversions=excluded.conversions, impressions=excluded.impressions, updated_at=excluded.updated_at",
@@ -3515,8 +3523,71 @@ app.post('/api/integrations/google-ads-daily', checkApiKey, async (req, res) => 
       );
       n++;
     }
-    res.json({ success: true, upserted: n });
+    let nc = 0;
+    for (const r of campaigns) {
+      const date = okDate(r); const name = String(r.campaign || '').trim().slice(0, 200);
+      if (!date || !name) continue;
+      await runQuery(
+        "INSERT INTO google_ads_campaign_daily (date, campaign, clicks, cost, conversions, impressions, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(date, campaign) DO UPDATE SET clicks=excluded.clicks, cost=excluded.cost, conversions=excluded.conversions, impressions=excluded.impressions, updated_at=excluded.updated_at",
+        [date, name, Math.round(Number(r.clicks) || 0), Number(r.cost) || 0, Number(r.conversions) || 0, Math.round(Number(r.impressions) || 0), now]
+      );
+      nc++;
+    }
+    let nk = 0;
+    for (const r of keywords) {
+      const date = okDate(r); const name = String(r.keyword || '').trim().slice(0, 200);
+      if (!date || !name) continue;
+      await runQuery(
+        "INSERT INTO google_ads_keyword_daily (date, keyword, clicks, cost, conversions, impressions, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(date, keyword) DO UPDATE SET clicks=excluded.clicks, cost=excluded.cost, conversions=excluded.conversions, impressions=excluded.impressions, updated_at=excluded.updated_at",
+        [date, name, Math.round(Number(r.clicks) || 0), Number(r.cost) || 0, Number(r.conversions) || 0, Math.round(Number(r.impressions) || 0), now]
+      );
+      nk++;
+    }
+    let ns = 0;
+    for (const r of searches) {
+      const date = okDate(r); const term = String(r.term || '').trim().slice(0, 200);
+      if (!date || !term) continue;
+      await runQuery(
+        "INSERT INTO google_ads_search_daily (date, term, clicks, updated_at) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT(date, term) DO UPDATE SET clicks=excluded.clicks, updated_at=excluded.updated_at",
+        [date, term, Math.round(Number(r.clicks) || 0), now]
+      );
+      ns++;
+    }
+    res.json({ success: true, upserted: n, campaigns: nc, keywords: nk, searches: ns });
   } catch (e) { console.error('[google-ads-daily ingest]', e && e.message); res.status(500).json({ error: e.message }); }
+});
+
+// GET: detalhamento do Google Ads AGREGADO no período — campanhas, palavras-chave e principais
+// buscas — para as tabelas do painel verde do dashboard. Tx conv = conversões ÷ cliques.
+app.get('/api/dashboard/google-ads-breakdown', authenticateToken, async (req, res) => {
+  try {
+    const days = daysRangeSP(req.query.from, req.query.to, 15);
+    const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
+    const lim = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 50);
+    const campaigns = await allRows(
+      "SELECT campaign AS name, SUM(clicks) AS clicks, SUM(cost) AS cost, SUM(conversions) AS conversions, SUM(impressions) AS impressions " +
+      "FROM google_ads_campaign_daily WHERE date >= ? AND date <= ? GROUP BY campaign HAVING SUM(clicks) > 0 OR SUM(cost) > 0 ORDER BY SUM(cost) DESC LIMIT ?",
+      [fromIso, toIso, lim]
+    );
+    const keywords = await allRows(
+      "SELECT keyword AS name, SUM(clicks) AS clicks, SUM(cost) AS cost, SUM(conversions) AS conversions, SUM(impressions) AS impressions " +
+      "FROM google_ads_keyword_daily WHERE date >= ? AND date <= ? GROUP BY keyword HAVING SUM(clicks) > 0 OR SUM(cost) > 0 ORDER BY SUM(cost) DESC LIMIT ?",
+      [fromIso, toIso, lim]
+    );
+    const searches = await allRows(
+      "SELECT term AS name, SUM(clicks) AS clicks FROM google_ads_search_daily WHERE date >= ? AND date <= ? GROUP BY term HAVING SUM(clicks) > 0 ORDER BY SUM(clicks) DESC LIMIT ?",
+      [fromIso, toIso, lim]
+    );
+    const enrich = (r) => ({
+      name: r.name, clicks: Number(r.clicks) || 0, cost: Number(r.cost) || 0, conversions: Number(r.conversions) || 0,
+      cpl: (Number(r.conversions) || 0) > 0 ? (Number(r.cost) || 0) / Number(r.conversions) : 0,
+      txConv: (Number(r.clicks) || 0) > 0 ? (Number(r.conversions) || 0) / Number(r.clicks) * 100 : 0
+    });
+    res.json({ from: fromIso, to: toIso, campaigns: campaigns.map(enrich), keywords: keywords.map(enrich), searches: searches.map(s => ({ name: s.name, clicks: Number(s.clicks) || 0 })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // META ADS — gasto da conta por período (lê meta_ads_daily). Mesma estrutura do google-ads.

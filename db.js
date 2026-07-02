@@ -213,6 +213,40 @@ db.serialize(() => {
     updated_at TEXT
   )`);
 
+  // Google Ads — detalhamento por CAMPANHA, por dia (mesma sincronização Supermetrics → CRM).
+  // Alimenta as tabelas "Campanha" do painel verde do dashboard.
+  db.run(`CREATE TABLE IF NOT EXISTS google_ads_campaign_daily (
+    date TEXT NOT NULL,
+    campaign TEXT NOT NULL,
+    clicks INTEGER DEFAULT 0,
+    cost REAL DEFAULT 0,
+    conversions REAL DEFAULT 0,
+    impressions INTEGER DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (date, campaign)
+  )`);
+
+  // Google Ads — detalhamento por PALAVRA-CHAVE, por dia. Alimenta a tabela "Palavra Chave".
+  db.run(`CREATE TABLE IF NOT EXISTS google_ads_keyword_daily (
+    date TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    clicks INTEGER DEFAULT 0,
+    cost REAL DEFAULT 0,
+    conversions REAL DEFAULT 0,
+    impressions INTEGER DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (date, keyword)
+  )`);
+
+  // Google Ads — TERMOS DE BUSCA reais digitados (cliques por termo, por dia). "Principais buscas".
+  db.run(`CREATE TABLE IF NOT EXISTS google_ads_search_daily (
+    date TEXT NOT NULL,
+    term TEXT NOT NULL,
+    clicks INTEGER DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (date, term)
+  )`);
+
   // Meta Ads (Facebook/Instagram) — gasto diário da conta de anúncios. Alimentado por sincronização
   // externa (Pipeboard/Supermetrics → POST /api/integrations/meta-ads-daily), igual ao Google Ads.
   db.run(`CREATE TABLE IF NOT EXISTS meta_ads_daily (
