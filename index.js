@@ -3712,6 +3712,38 @@ app.post('/api/integrations/meta-ads/sync', authenticateToken, async (req, res) 
     res.json({ ok: true, synced: n });
   } catch (e) { res.status(400).json({ error: (e && e.message) || 'Falha ao sincronizar com o Meta.' }); }
 });
+
+// CAMPANHAS ATIVAS do Meta (nome, status, orçamento e ids p/ links do Gerenciador) — busca ao vivo
+// na Graph API com cache de 10 min. Orçamento: da campanha (CBO) ou soma dos conjuntos ativos.
+let _metaCampCache = { at: 0, data: null };
+app.get('/api/dashboard/meta-campaigns', authenticateToken, async (req, res) => {
+  try {
+    if (_metaCampCache.data && (Date.now() - _metaCampCache.at) < 10 * 60 * 1000) return res.json(_metaCampCache.data);
+    const cfg = await getMetaAdsCfg();
+    if (!cfg.account_id || !cfg.token) return res.json({ account: '', campaigns: [] });
+    const acct = /^act_/.test(cfg.account_id) ? cfg.account_id : ('act_' + String(cfg.account_id).replace(/\D/g, ''));
+    const url = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(acct) + '/campaigns'
+      + '?fields=' + encodeURIComponent('id,name,effective_status,daily_budget,lifetime_budget,adsets.limit(50){daily_budget,lifetime_budget,effective_status}')
+      + '&limit=100&access_token=' + encodeURIComponent(cfg.token);
+    const r = await fetch(url);
+    const d = await r.json();
+    if (d && d.error) throw new Error('Meta: ' + (d.error.message || JSON.stringify(d.error)));
+    const list = (Array.isArray(d.data) ? d.data : []).map(c => {
+      let daily = Number(c.daily_budget) || 0, life = Number(c.lifetime_budget) || 0, budgetLevel = 'campanha';
+      if (!daily && !life && c.adsets && Array.isArray(c.adsets.data)) {
+        budgetLevel = 'conjuntos';
+        c.adsets.data.forEach(s => {
+          if (String(s.effective_status || '') === 'ACTIVE') { daily += Number(s.daily_budget) || 0; life += Number(s.lifetime_budget) || 0; }
+        });
+      }
+      // Orçamentos da Graph API vêm em CENTAVOS.
+      return { id: c.id, name: c.name, status: c.effective_status, dailyBudget: daily / 100, lifetimeBudget: life / 100, budgetLevel };
+    });
+    const out = { account: acct.replace(/^act_/, ''), campaigns: list.filter(c => String(c.status) === 'ACTIVE') };
+    _metaCampCache = { at: Date.now(), data: out };
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // Sincronização automática (no boot, se configurado, e a cada 6h).
 async function syncMetaAdsSafe() {
   try { const cfg = await getMetaAdsCfg(); if (cfg.account_id && cfg.token) { const n = await syncMetaAds(); console.log('[meta-ads sync] ' + n + ' dia(s) atualizados.'); } }
