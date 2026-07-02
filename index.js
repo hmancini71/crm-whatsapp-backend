@@ -2305,18 +2305,31 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
     await client.connect();
     const lock = await client.getMailboxLock('INBOX');
     try {
-      const total = (client.mailbox && client.mailbox.exists) || 0;
-      if (total > 0) {
-        const start = Math.max(1, total - 29);
-        for await (const msg of client.fetch(start + ':*', { envelope: true, internalDate: true })) {
-          const f = msg.envelope && msg.envelope.from && msg.envelope.from[0];
-          out.push({
-            uid: msg.uid,
-            subject: (msg.envelope && msg.envelope.subject) || '(sem assunto)',
-            from: f ? (f.name || f.address) : '',
-            fromAddress: f ? f.address : '',
-            date: msg.internalDate || (msg.envelope && msg.envelope.date) || null
-          });
+      const _push = (msg) => {
+        const f = msg.envelope && msg.envelope.from && msg.envelope.from[0];
+        out.push({
+          uid: msg.uid,
+          subject: (msg.envelope && msg.envelope.subject) || '(sem assunto)',
+          from: f ? (f.name || f.address) : '',
+          fromAddress: f ? f.address : '',
+          date: msg.internalDate || (msg.envelope && msg.envelope.date) || null
+        });
+      };
+      const q = String(req.query.q || '').trim();
+      if (q) {
+        // FILTRO (pedido do Henry): usa a BUSCA DO PRÓPRIO SERVIDOR IMAP — o critério TEXT varre
+        // remetente, TODOS os cabeçalhos e o CORPO da mensagem. Devolve os 30 mais recentes que casam.
+        let uids = [];
+        try { uids = await client.search({ text: q }, { uid: true }); } catch (e) { uids = []; }
+        uids = (Array.isArray(uids) ? uids : []).slice(-30);
+        if (uids.length) {
+          for await (const msg of client.fetch(uids.join(','), { envelope: true, internalDate: true }, { uid: true })) _push(msg);
+        }
+      } else {
+        const total = (client.mailbox && client.mailbox.exists) || 0;
+        if (total > 0) {
+          const start = Math.max(1, total - 29);
+          for await (const msg of client.fetch(start + ':*', { envelope: true, internalDate: true })) _push(msg);
         }
       }
     } finally {
