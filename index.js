@@ -2283,6 +2283,20 @@ app.get('/api/email/status', authenticateToken, async (req, res) => {
 });
 
 // 16. Email Routes: List inbox messages (IMAP)
+// Resolve o CAMINHO real da pasta no servidor IMAP — os nomes variam por servidor
+// (Sent/INBOX.Sent/Enviados; spam/Junk/Lixo Eletrônico). Usa a flag special-use quando existe.
+async function resolveMailboxPath(client, box) {
+  const want = String(box || 'inbox').toLowerCase();
+  if (want !== 'sent' && want !== 'spam') return 'INBOX';
+  try {
+    const boxes = await client.list();
+    const bySpecial = (flag) => { const b = (boxes || []).find(x => x && x.specialUse === flag); return b && b.path; };
+    const byName = (re) => { const b = (boxes || []).find(x => x && re.test(String(x.path || ''))); return b && b.path; };
+    if (want === 'sent') return bySpecial('\\Sent') || byName(/sent|enviad/i) || 'INBOX';
+    return bySpecial('\\Junk') || byName(/spam|junk|lixo/i) || 'INBOX';
+  } catch (e) { return 'INBOX'; }
+}
+
 app.get('/api/email/messages', authenticateToken, async (req, res) => {
   try {
     const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
@@ -2303,15 +2317,20 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
 
     const out = [];
     await client.connect();
-    const lock = await client.getMailboxLock('INBOX');
+    // Pasta: inbox (padrão), sent (Enviados) ou spam — o resolver acha o nome real no servidor.
+    const _mbox = await resolveMailboxPath(client, req.query.box);
+    const lock = await client.getMailboxLock(_mbox);
     try {
       const _push = (msg) => {
         const f = msg.envelope && msg.envelope.from && msg.envelope.from[0];
+        const t = msg.envelope && msg.envelope.to && msg.envelope.to[0];
         out.push({
           uid: msg.uid,
           subject: (msg.envelope && msg.envelope.subject) || '(sem assunto)',
           from: f ? (f.name || f.address) : '',
           fromAddress: f ? f.address : '',
+          to: t ? (t.name || t.address) : '',
+          toAddress: t ? t.address : '',
           date: msg.internalDate || (msg.envelope && msg.envelope.date) || null
         });
       };
@@ -2359,7 +2378,8 @@ app.get('/api/email/message/:uid', authenticateToken, async (req, res) => {
       logger: false, tls: { rejectUnauthorized: false }
     });
     await client.connect();
-    const lock = await client.getMailboxLock('INBOX');
+    const _mbox = await resolveMailboxPath(client, req.query.box);
+    const lock = await client.getMailboxLock(_mbox);
     let parsed = null;
     try {
       const msg = await client.fetchOne(String(req.params.uid), { source: true }, { uid: true });
