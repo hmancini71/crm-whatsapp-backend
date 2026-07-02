@@ -97,6 +97,9 @@ function transcodeToOpusOgg(inputBuffer) {
       .audioBitrate('32k')
       .audioChannels(1)
       .audioFrequency(48000)
+      // iOS/WA-Windows: sem estes flags o iPhone mostra "áudio não está mais disponível"
+      // (Baileys #768). Receita do evolution-api: timestamps normalizados + sem metadata.
+      .outputOptions(['-avoid_negative_ts', 'make_zero', '-map_metadata', '-1'])
       .format('ogg')
       .on('end', () => {
         try {
@@ -881,10 +884,15 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
   // Convert the browser audio to Opus/OGG that WhatsApp accepts as a voice note
   const oggBuffer = await transcodeToOpusOgg(inputBuffer);
 
+  // Duração estimada (32 kbps ≈ 4000 bytes/s). O campo `seconds` é OBRIGATÓRIO para o iOS
+  // reproduzir o PTT — sem ele o iPhone acusa "áudio não está mais disponível" (Baileys #768).
+  const seconds = Math.max(1, Math.round(oggBuffer.length / 4000));
+
   const sent = await sock.sendMessage(jid, {
     audio: oggBuffer,
     ptt: true,
-    mimetype: 'audio/ogg; codecs=opus'
+    mimetype: 'audio/ogg; codecs=opus',
+    seconds
   });
 
   const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
