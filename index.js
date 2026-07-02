@@ -591,12 +591,20 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       // veio do ambiente PÓS → assunto p/ o PRÉ ('pre'); lead pré que foi p/ a ponte → assunto p/ o PÓS
       // ('pos'). Derivado aqui (não persistido): classifica todos automaticamente e some fora da ponte.
       const bridgeSubject = (l) => leadIsPos(l, posSet, posDigits) ? 'pre' : 'pos';
+      // LINHA RECLASSIFICADA (caso 3094→pós, 2026-07-02): a linha só define o ambiente enquanto o
+      // lead ainda não foi TRABALHADO no pré. Se ele tem etapa pré ativa (tratamento/proposta/
+      // followup/declinado) e nenhuma coluna pós, ele é do PRÉ — mesmo que a linha dele (account/
+      // recv_number) tenha virado pós depois. Sem isso, leads antigos da 3094 sumiam do pré e
+      // inundavam "Mensagens novas para organizar" no pós (caso JD Crawford). Leads 'novo' seguem
+      // a linha (chegada genuína pelo WhatsApp do pós precisa aparecer lá).
+      const WORKED_PRE = ['tratamento', 'proposta', 'followup', 'declinado'];
+      const isPosByLine = (l) => leadIsPos(l, posSet, posDigits) && !(WORKED_PRE.includes(l.stage) && !hasPosStage(l) && l.bridge !== 1);
       if (isPos) {
         // PÓS: vê os leads do 2030, as vendas convertidas, os ATRIBUÍDOS a uma coluna pós e os da ponte.
         // Os da ponte vão p/ a coluna-ponte do board pós ('clientes_antigos_pos'); os demais, pela regra
         // normal (posStageFor).
         parsedLeads = parsedLeads
-          .filter(l => leadIsPos(l, posSet, posDigits) || l.stage === 'convertida' || hasPosStage(l) || inBridge(l))
+          .filter(l => isPosByLine(l) || l.stage === 'convertida' || hasPosStage(l) || inBridge(l))
           .map(l => Object.assign({}, l, inBridge(l)
             ? { stage: 'clientes_antigos_pos', bridge_subject: bridgeSubject(l) }
             : { stage: posStageFor(l) }));
@@ -607,7 +615,7 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
         // pós — mover o card no pós só mexe em pos_stage (stage continua 'convertida'), então o card do pré
         // NÃO é alterado. ("Venda convertida" pré ↔ "Clientes concluídos" pós: cross-visíveis e independentes.)
         parsedLeads = parsedLeads
-          .filter(l => (!leadIsPos(l, posSet, posDigits) && (!hasPosStage(l) || l.stage === 'convertida')) || inBridge(l))
+          .filter(l => (!isPosByLine(l) && (!hasPosStage(l) || l.stage === 'convertida')) || inBridge(l))
           .map(l => inBridge(l) ? Object.assign({}, l, { stage: 'clientes_antigos', bridge_subject: bridgeSubject(l) }) : l);
       }
     } catch (e) { /* em caso de falha, não filtra */ }
