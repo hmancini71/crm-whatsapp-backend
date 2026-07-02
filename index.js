@@ -2923,6 +2923,12 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
     let posStage = null;
     let bridgeVal = 0;
     const _isBridge = (stage === 'clientes_antigos' || stage === 'clientes_antigos_pos');
+    // VALIDAÇÃO: etapa desconhecida NUNCA entra no banco (gravava no 'stage' do pré e o card sumia
+    // dos dois boards — bug do visto_amer_busca, opção fantasma no dropdown do frontend, 2026-07-02).
+    const _PRE_OK = ['novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos'];
+    if (stage && !_isBridge && !_PRE_OK.includes(stage) && !POS_STAGES.includes(stage)) {
+      return res.status(400).json({ error: 'Etapa inválida ("' + stage + '") — atualize a página (Ctrl+F5) e escolha uma etapa da lista.' });
+    }
     // Função auxiliar: carimba uma linha 2030 no recv_number (p/ o lead pertencer ao ambiente pós).
     const _stampPos = async () => {
       if (recvNumber) return;

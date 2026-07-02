@@ -638,7 +638,15 @@ db.serialize(() => {
     db.run("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
     // ATENÇÃO: 'convertida' e 'clientes_antigos' PRECISAM estar nesta lista. Sem elas, todo restart
     // do backend resetava esses leads para 'novo' (sumiam da coluna). BUG corrigido.
-    db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
+    // RESGATE (antes do reset abaixo): leads com etapa fora do conjunto pré e SEM pos_stage são
+    // cards do PÓS gravados errado (etapa fantasma do dropdown — ex.: visto_amer_busca, 2026-07-02).
+    // Viram convertida + pos_stage (a própria etapa se for coluna pós válida; senão vão para
+    // "Mensagens novas para organizar"), ficando VISÍVEIS no board pós em vez de vazarem p/ o pré.
+    db.run("UPDATE leads SET pos_stage = CASE WHEN stage IN ('clientes_antigos_pos','vendas_concretizadas','para_classificar','visto_amer_agendamento','visto_amer_validacao','visto_amer_ds160','visto_amer_envio','visto_cana_formulario','visto_cana_oficiais','visto_cana_aprovacao','visto_cana_envio','visto_cana_biometria','visto_cana_finalizado','visto_port_formulario','visto_port_entrevista','visto_port_aprovacao','visto_port_agendamento','visto_port_finalizado','visto_aust_formulario','visto_aust_oficiais','visto_aust_pagamento','visto_aust_finalizado','visto_mex_formulario','visto_mex_entrevista','visto_mex_finalizado','visto_bra_documentacao','visto_bra_entrevista','ital_formulario','ital_aire','ital_passaporte','outros') THEN stage ELSE 'para_classificar' END, stage = 'convertida' WHERE (pos_stage IS NULL OR pos_stage = '') AND stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')", (rErr) => {
+      if (rErr) console.error('Resgate de leads com etapa fantasma:', rErr.message);
+      // Só DEPOIS do resgate o reset de segurança pode rodar (agora sem engolir cards do pós).
+      db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
+    });
   });
 
   // Safe migration: add 'type' column to messages (text | audio | image | other)
