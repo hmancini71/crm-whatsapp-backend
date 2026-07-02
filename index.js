@@ -3596,19 +3596,23 @@ app.get('/api/dashboard/meta-ads', authenticateToken, async (req, res) => {
     const days = daysRangeSP(req.query.from, req.query.to, 15);
     const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
     const rows = await allRows(
-      "SELECT date, spend, clicks, impressions, reach, results FROM meta_ads_daily WHERE date >= ? AND date <= ? ORDER BY date ASC",
+      "SELECT date, spend, clicks, impressions, reach, results, engagements FROM meta_ads_daily WHERE date >= ? AND date <= ? ORDER BY date ASC",
       [fromIso, toIso]
     );
     const byDate = {}; rows.forEach(r => { byDate[r.date] = r; });
     const series = days.map(d => {
       const r = byDate[d.iso] || {};
-      return { date: d.iso, label: d.label, spend: Number(r.spend || 0), clicks: Number(r.clicks || 0), impressions: Number(r.impressions || 0), reach: Number(r.reach || 0), results: Number(r.results || 0) };
+      return { date: d.iso, label: d.label, spend: Number(r.spend || 0), clicks: Number(r.clicks || 0), impressions: Number(r.impressions || 0), reach: Number(r.reach || 0), results: Number(r.results || 0), engagements: Number(r.engagements || 0) };
     });
     const sum = (k) => series.reduce((a, x) => a + (Number(x[k]) || 0), 0);
-    const spend = sum('spend'), clicks = sum('clicks'), impressions = sum('impressions'), reach = sum('reach'), results = sum('results');
+    const spend = sum('spend'), clicks = sum('clicks'), impressions = sum('impressions'), reach = sum('reach'), results = sum('results'), engagements = sum('engagements');
     res.json({
       from: fromIso, to: toIso, days: series,
-      totals: { spend, clicks, impressions, reach, results, cpc: clicks > 0 ? spend / clicks : 0, costPerResult: results > 0 ? spend / results : 0 }
+      totals: {
+        spend, clicks, impressions, reach, results, engagements,
+        cpc: clicks > 0 ? spend / clicks : 0, costPerResult: results > 0 ? spend / results : 0,
+        ctr: impressions > 0 ? clicks / impressions * 100 : 0, frequency: reach > 0 ? impressions / reach : 0
+      }
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3625,9 +3629,9 @@ app.post('/api/integrations/meta-ads-daily', checkApiKey, async (req, res) => {
       const date = String(r.date || '').slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
       await runQuery(
-        "INSERT INTO meta_ads_daily (date, spend, clicks, impressions, reach, results, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT(date) DO UPDATE SET spend=excluded.spend, clicks=excluded.clicks, impressions=excluded.impressions, reach=excluded.reach, results=excluded.results, updated_at=excluded.updated_at",
-        [date, Number(r.spend) || 0, Math.round(Number(r.clicks) || 0), Math.round(Number(r.impressions) || 0), Math.round(Number(r.reach) || 0), Number(r.results) || 0, now]
+        "INSERT INTO meta_ads_daily (date, spend, clicks, impressions, reach, results, engagements, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(date) DO UPDATE SET spend=excluded.spend, clicks=excluded.clicks, impressions=excluded.impressions, reach=excluded.reach, results=excluded.results, engagements=excluded.engagements, updated_at=excluded.updated_at",
+        [date, Number(r.spend) || 0, Math.round(Number(r.clicks) || 0), Math.round(Number(r.impressions) || 0), Math.round(Number(r.reach) || 0), Number(r.results) || 0, Math.round(Number(r.engagements) || 0), now]
       );
       n++;
     }
@@ -3666,15 +3670,17 @@ async function syncMetaAds(fromIso, toIso) {
     for (const x of rows) {
       const date = String(x.date_start || '').slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
-      let results = 0;
+      let results = 0, engagements = 0;
       if (Array.isArray(x.actions)) {
         const msg = x.actions.find(a => /messaging_conversation_started|onsite_conversion\.messaging/i.test(a.action_type || ''));
         results = msg ? (Number(msg.value) || 0) : 0;
+        const eng = x.actions.find(a => String(a.action_type || '') === 'post_engagement');
+        engagements = eng ? (Number(eng.value) || 0) : 0;
       }
       await runQuery(
-        "INSERT INTO meta_ads_daily (date, spend, clicks, impressions, reach, results, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT(date) DO UPDATE SET spend=excluded.spend, clicks=excluded.clicks, impressions=excluded.impressions, reach=excluded.reach, results=excluded.results, updated_at=excluded.updated_at",
-        [date, Number(x.spend) || 0, Math.round(Number(x.clicks) || 0), Math.round(Number(x.impressions) || 0), Math.round(Number(x.reach) || 0), results, new Date().toISOString()]
+        "INSERT INTO meta_ads_daily (date, spend, clicks, impressions, reach, results, engagements, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(date) DO UPDATE SET spend=excluded.spend, clicks=excluded.clicks, impressions=excluded.impressions, reach=excluded.reach, results=excluded.results, engagements=excluded.engagements, updated_at=excluded.updated_at",
+        [date, Number(x.spend) || 0, Math.round(Number(x.clicks) || 0), Math.round(Number(x.impressions) || 0), Math.round(Number(x.reach) || 0), results, engagements, new Date().toISOString()]
       );
       n++;
     }

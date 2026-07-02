@@ -259,6 +259,12 @@ db.serialize(() => {
     updated_at TEXT
   )`);
 
+  // Migração idempotente: ENGAJAMENTOS (post_engagement da API do Meta) para o painel verde.
+  db.all("PRAGMA table_info(meta_ads_daily)", (piErr, cols) => {
+    if (piErr || !Array.isArray(cols)) return;
+    if (!cols.find(c => c.name === 'engagements')) db.run("ALTER TABLE meta_ads_daily ADD COLUMN engagements INTEGER DEFAULT 0");
+  });
+
   // Check if tables are empty, and insert initial data
   db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
     if (row && row.count === 0) {
