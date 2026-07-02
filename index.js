@@ -3699,7 +3699,23 @@ app.post('/api/settings/meta-ads', authenticateToken, async (req, res) => {
   try {
     const { account_id, token } = req.body || {};
     if (account_id !== undefined) await setAppSetting('meta_ad_account_id', String(account_id || '').trim());
-    if (token !== undefined && String(token).trim() !== '') await setAppSetting('meta_ads_token', String(token).trim());
+    // Token: SANITIZA (remove espaços/quebras de linha internos, prefixo "Bearer" e aspas — tokens
+    // colados de e-mail/WhatsApp vêm quebrados) e VALIDA na Graph API ANTES de salvar. Isso evita o
+    // "Cannot parse access token" por token deformado ou por autofill do navegador no campo password.
+    const rawTok = token !== undefined ? String(token) : '';
+    const cleanTok = rawTok.replace(/^\s*Bearer\s+/i, '').replace(/["'‘’“”]/g, '').replace(/\s+/g, '');
+    if (cleanTok !== '') {
+      if (!/^[A-Za-z0-9_\-|.]{40,}$/.test(cleanTok)) {
+        return res.status(400).json({ error: 'Token inválido: não parece um token do Meta (verifique se copiou o token inteiro, sem senha do navegador no lugar).' });
+      }
+      const vr = await fetch('https://graph.facebook.com/v21.0/me?access_token=' + encodeURIComponent(cleanTok));
+      const vd = await vr.json();
+      if (vd && vd.error) {
+        return res.status(400).json({ error: 'Meta recusou o token: ' + (vd.error.message || 'inválido') + ' — gere um novo token de System User com ads_read e cole de novo.' });
+      }
+      await setAppSetting('meta_ads_token', cleanTok);
+      _metaCampCache = { at: 0, data: null }; // limpa o cache de campanhas p/ usar o token novo
+    }
     const cfg = await getMetaAdsCfg();
     res.json({ ok: true, account_id: cfg.account_id, has_token: !!cfg.token });
   } catch (e) { res.status(500).json({ error: e.message }); }
