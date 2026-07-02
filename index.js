@@ -2317,46 +2317,81 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
 
     const out = [];
     await client.connect();
-    // Pasta: inbox (padrão), sent (Enviados) ou spam — o resolver acha o nome real no servidor.
-    const _mbox = await resolveMailboxPath(client, req.query.box);
-    const lock = await client.getMailboxLock(_mbox);
-    try {
-      const _push = (msg) => {
-        const f = msg.envelope && msg.envelope.from && msg.envelope.from[0];
-        const t = msg.envelope && msg.envelope.to && msg.envelope.to[0];
-        out.push({
-          uid: msg.uid,
-          subject: (msg.envelope && msg.envelope.subject) || '(sem assunto)',
-          from: f ? (f.name || f.address) : '',
-          fromAddress: f ? f.address : '',
-          to: t ? (t.name || t.address) : '',
-          toAddress: t ? t.address : '',
-          date: msg.internalDate || (msg.envelope && msg.envelope.date) || null
-        });
-      };
-      const q = String(req.query.q || '').trim();
-      if (q) {
-        // FILTRO (pedido do Henry): usa a BUSCA DO PRÓPRIO SERVIDOR IMAP — o critério TEXT varre
-        // remetente, TODOS os cabeçalhos e o CORPO da mensagem. Devolve os 30 mais recentes que casam.
-        let uids = [];
-        try { uids = await client.search({ text: q }, { uid: true }); } catch (e) { uids = []; }
-        uids = (Array.isArray(uids) ? uids : []).slice(-30);
-        if (uids.length) {
-          for await (const msg of client.fetch(uids.join(','), { envelope: true, internalDate: true }, { uid: true })) _push(msg);
+    const q = String(req.query.q || '').trim();
+    const want = String(req.query.box || 'inbox').toLowerCase();
+    // ANTI-PROPAGANDA (pedido do Henry): e-mails com marcadores de marketing/spam saem da ENTRADA e
+    // aparecem na aba SPAM. Sinais: assunto "[SPAM]" (SpamAssassin), X-Spam-Flag, List-Unsubscribe
+    // (newsletters/propaganda), Precedence bulk/list e Auto-Submitted. NUNCA esconde remetente que é
+    // LEAD do CRM nem os domínios da casa (allowlist) — propaganda some da entrada, cliente não.
+    const HDRS = ['x-spam-flag', 'list-unsubscribe', 'precedence', 'auto-submitted'];
+    const FETCH_OPTS = { envelope: true, internalDate: true, headers: HDRS };
+    let _known = new Set();
+    try { (await allRows("SELECT DISTINCT LOWER(TRIM(email)) AS e FROM leads WHERE email IS NOT NULL AND TRIM(email) <> ''")).forEach(r => { if (r && r.e) _known.add(r.e); }); } catch (e) {}
+    const _fromAddr = (msg) => {
+      const f = msg.envelope && msg.envelope.from && msg.envelope.from[0];
+      return String((f && f.address) || '').toLowerCase();
+    };
+    const _isPromo = (msg) => {
+      const a = _fromAddr(msg);
+      if (_known.has(a) || /@(valevisto|eccere)\./.test(a)) return false; // allowlist
+      const subj = String((msg.envelope && msg.envelope.subject) || '');
+      if (/^\s*\[spam\]/i.test(subj)) return true;
+      let h = ''; try { h = msg.headers ? msg.headers.toString('utf8') : ''; } catch (e) {}
+      if (/^x-spam-flag:\s*yes/mi.test(h)) return true;
+      if (/^list-unsubscribe:/mi.test(h)) return true;
+      if (/^precedence:\s*(bulk|list|junk)/mi.test(h)) return true;
+      if (/^auto-submitted:\s*auto/mi.test(h)) return true;
+      return false;
+    };
+    const _push = (msg, boxTag) => {
+      const f = msg.envelope && msg.envelope.from && msg.envelope.from[0];
+      const t = msg.envelope && msg.envelope.to && msg.envelope.to[0];
+      out.push({
+        uid: msg.uid,
+        box: boxTag || 'inbox',
+        subject: (msg.envelope && msg.envelope.subject) || '(sem assunto)',
+        from: f ? (f.name || f.address) : '',
+        fromAddress: f ? f.address : '',
+        to: t ? (t.name || t.address) : '',
+        toAddress: t ? t.address : '',
+        date: msg.internalDate || (msg.envelope && msg.envelope.date) || null
+      });
+    };
+    // Lê os últimos e-mails de uma pasta (com busca TEXT do servidor quando há filtro digitado),
+    // aplicando o predicado `keep` de cada visão. Busca mais fundo (90) p/ compensar os filtrados.
+    const readBox = async (path, keep, boxTag) => {
+      const lock = await client.getMailboxLock(path);
+      try {
+        if (q) {
+          let uids = [];
+          try { uids = await client.search({ text: q }, { uid: true }); } catch (e) { uids = []; }
+          uids = (Array.isArray(uids) ? uids : []).slice(-90);
+          if (uids.length) {
+            for await (const msg of client.fetch(uids.join(','), FETCH_OPTS, { uid: true })) { if (!keep || keep(msg)) _push(msg, boxTag); }
+          }
+        } else {
+          const total = (client.mailbox && client.mailbox.exists) || 0;
+          if (total > 0) {
+            const start = Math.max(1, total - 89);
+            for await (const msg of client.fetch(start + ':*', FETCH_OPTS)) { if (!keep || keep(msg)) _push(msg, boxTag); }
+          }
         }
-      } else {
-        const total = (client.mailbox && client.mailbox.exists) || 0;
-        if (total > 0) {
-          const start = Math.max(1, total - 29);
-          for await (const msg of client.fetch(start + ':*', { envelope: true, internalDate: true })) _push(msg);
-        }
-      }
-    } finally {
-      lock.release();
+      } finally { lock.release(); }
+    };
+    if (want === 'sent') {
+      await readBox(await resolveMailboxPath(client, 'sent'), null, 'sent');
+    } else if (want === 'spam') {
+      // Aba Spam = propaganda detectada NA ENTRADA + a pasta de spam do servidor.
+      await readBox('INBOX', (m) => _isPromo(m), 'inbox');
+      const junk = await resolveMailboxPath(client, 'spam');
+      if (junk !== 'INBOX') await readBox(junk, null, 'spam');
+    } else {
+      // Entrada SEM propaganda.
+      await readBox('INBOX', (m) => !_isPromo(m), 'inbox');
     }
     try { await client.logout(); } catch (e) {}
-    out.reverse();
-    res.json(out);
+    out.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+    res.json(out.slice(0, 30));
   } catch (err) {
     console.error("IMAP error:", err && err.message);
     res.status(500).json({ error: (err && err.message) || "Falha ao ler e-mails" });
