@@ -265,6 +265,21 @@ db.serialize(() => {
     if (!cols.find(c => c.name === 'engagements')) db.run("ALTER TABLE meta_ads_daily ADD COLUMN engagements INTEGER DEFAULT 0");
   });
 
+  // REFORMA do Grupo Visto Americano (2026-07-02, planilha do Henry): 5 colunas novas.
+  // (a) campos novos do card: datas CASV/Consulado/Reunião de validação + e-mail de acesso.
+  db.all("PRAGMA table_info(leads)", (liErr, lcols) => {
+    if (liErr || !Array.isArray(lcols)) return;
+    const has = (n) => lcols.find(c => c.name === n);
+    if (!has('casv_date')) db.run("ALTER TABLE leads ADD COLUMN casv_date TEXT DEFAULT ''");
+    if (!has('consulate_date')) db.run("ALTER TABLE leads ADD COLUMN consulate_date TEXT DEFAULT ''");
+    if (!has('validation_date')) db.run("ALTER TABLE leads ADD COLUMN validation_date TEXT DEFAULT ''");
+    if (!has('access_email')) db.run("ALTER TABLE leads ADD COLUMN access_email TEXT DEFAULT ''");
+  });
+  // (b) migração das colunas antigas (decisão do Henry: tudo → "Sem conta", exceto Finalizados →
+  // "Concluído"). Idempotente: os ids antigos nunca voltam a existir.
+  db.run("UPDATE leads SET pos_stage = 'visto_amer_concluido' WHERE pos_stage = 'visto_amer_envio'");
+  db.run("UPDATE leads SET pos_stage = 'visto_amer_semconta' WHERE pos_stage IN ('visto_amer_agendamento', 'visto_amer_validacao', 'visto_amer_ds160')");
+
   // Check if tables are empty, and insert initial data
   db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
     if (row && row.count === 0) {
@@ -642,7 +657,7 @@ db.serialize(() => {
     // cards do PÓS gravados errado (etapa fantasma do dropdown — ex.: visto_amer_busca, 2026-07-02).
     // Viram convertida + pos_stage (a própria etapa se for coluna pós válida; senão vão para
     // "Mensagens novas para organizar"), ficando VISÍVEIS no board pós em vez de vazarem p/ o pré.
-    db.run("UPDATE leads SET pos_stage = CASE WHEN stage IN ('clientes_antigos_pos','vendas_concretizadas','para_classificar','visto_amer_agendamento','visto_amer_validacao','visto_amer_ds160','visto_amer_envio','visto_cana_formulario','visto_cana_oficiais','visto_cana_aprovacao','visto_cana_envio','visto_cana_biometria','visto_cana_finalizado','visto_port_formulario','visto_port_entrevista','visto_port_aprovacao','visto_port_agendamento','visto_port_finalizado','visto_aust_formulario','visto_aust_oficiais','visto_aust_pagamento','visto_aust_finalizado','visto_mex_formulario','visto_mex_entrevista','visto_mex_finalizado','visto_bra_documentacao','visto_bra_entrevista','ital_formulario','ital_aire','ital_passaporte','outros') THEN stage ELSE 'para_classificar' END, stage = 'convertida' WHERE (pos_stage IS NULL OR pos_stage = '') AND stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')", (rErr) => {
+    db.run("UPDATE leads SET pos_stage = CASE WHEN stage IN ('clientes_antigos_pos','vendas_concretizadas','para_classificar','visto_amer_semconta','visto_amer_comconta','visto_amer_agendado','visto_amer_envio_passaporte','visto_amer_concluido','visto_cana_formulario','visto_cana_oficiais','visto_cana_aprovacao','visto_cana_envio','visto_cana_biometria','visto_cana_finalizado','visto_port_formulario','visto_port_entrevista','visto_port_aprovacao','visto_port_agendamento','visto_port_finalizado','visto_aust_formulario','visto_aust_oficiais','visto_aust_pagamento','visto_aust_finalizado','visto_mex_formulario','visto_mex_entrevista','visto_mex_finalizado','visto_bra_documentacao','visto_bra_entrevista','ital_formulario','ital_aire','ital_passaporte','outros') THEN stage ELSE 'para_classificar' END, stage = 'convertida' WHERE (pos_stage IS NULL OR pos_stage = '') AND stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')", (rErr) => {
       if (rErr) console.error('Resgate de leads com etapa fantasma:', rErr.message);
       // Só DEPOIS do resgate o reset de segurança pode rodar (agora sem engolir cards do pós).
       db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");

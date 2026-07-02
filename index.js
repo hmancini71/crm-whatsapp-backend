@@ -838,7 +838,7 @@ app.post('/api/leads/:id/history', authenticateToken, async (req, res) => {
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date } = req.body;
+  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email } = req.body;
   
   try {
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
@@ -904,6 +904,12 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
       updates.push("client_dir = ?");
       params.push(client_dir || null);
     }
+    // Campos do Grupo Visto Americano (reforma 2026-07-02): datas CASV/Consulado/Reunião de
+    // validação e e-mail de acesso (texto livre: aceitam data ou "ñ agendado").
+    if (casv_date !== undefined) { updates.push("casv_date = ?"); params.push(String(casv_date || '')); }
+    if (consulate_date !== undefined) { updates.push("consulate_date = ?"); params.push(String(consulate_date || '')); }
+    if (validation_date !== undefined) { updates.push("validation_date = ?"); params.push(String(validation_date || '')); }
+    if (access_email !== undefined) { updates.push("access_email = ?"); params.push(String(access_email || '')); }
 
     if (updates.length > 0) {
       params.push(id);
@@ -2105,7 +2111,7 @@ function leadIsPos(l, posSet, posDigits) {
 }
 // Colunas do pipeline PÓS-VENDA.
 const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar',
-  'visto_amer_agendamento', 'visto_amer_validacao', 'visto_amer_ds160', 'visto_amer_envio',
+  'visto_amer_semconta', 'visto_amer_comconta', 'visto_amer_agendado', 'visto_amer_envio_passaporte', 'visto_amer_concluido',
   'visto_cana_formulario', 'visto_cana_oficiais', 'visto_cana_aprovacao', 'visto_cana_envio', 'visto_cana_biometria', 'visto_cana_finalizado',
   'visto_port_formulario', 'visto_port_entrevista', 'visto_port_aprovacao', 'visto_port_agendamento', 'visto_port_finalizado',
   'visto_aust_formulario', 'visto_aust_oficiais', 'visto_aust_pagamento', 'visto_aust_finalizado',
@@ -2120,11 +2126,12 @@ const POS_STAGES_FULL = [
   { id: 'clientes_antigos_pos',   title: 'Comunicação com ambiente Pré-Venda', color: '#6366f1' },
   { id: 'vendas_concretizadas',   title: 'Clientes concluídos',                color: '#16a34a' },
   { id: 'para_classificar',       title: 'Mensagens novas para organizar',     color: '#71717a' },
-  // Grupo Visto Americano
-  { id: 'visto_amer_agendamento', title: 'Contratados',          color: '#2563eb', group: 'Grupo Visto Americano' },
-  { id: 'visto_amer_validacao',   title: 'Validação',            color: '#2563eb', group: 'Grupo Visto Americano' },
-  { id: 'visto_amer_ds160',       title: 'Entrevista Agendadas', color: '#2563eb', group: 'Grupo Visto Americano' },
-  { id: 'visto_amer_envio',       title: 'Finalizados',          color: '#2563eb', group: 'Grupo Visto Americano' },
+  // Grupo Visto Americano (reforma 2026-07-02, planilha do Henry: branca/laranja/azul/verde/preta)
+  { id: 'visto_amer_semconta',         title: 'Sem conta',               color: '#9ca3af', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_comconta',         title: 'Com conta e sem agendar', color: '#f97316', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_agendado',         title: 'Agendado',                color: '#1d4ed8', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_envio_passaporte', title: 'Envio de passaporte',     color: '#166534', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_concluido',        title: 'Concluído (Americano)',   color: '#000000', group: 'Grupo Visto Americano' },
   // Grupo Visto Canadense
   { id: 'visto_cana_formulario',  title: 'Formulário preenchido', color: '#ef4444', group: 'Grupo Visto Canadense' },
   { id: 'visto_cana_oficiais',    title: 'Formulário assinado',   color: '#ef4444', group: 'Grupo Visto Canadense' },
@@ -4197,7 +4204,7 @@ async function migrateVistoAmerToGroupOnce() {
     const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
     if (done && done.value) return;
     const r = await runQuery(
-      "UPDATE leads SET pos_stage = 'visto_amer_agendamento' " +
+      "UPDATE leads SET pos_stage = 'visto_amer_semconta' " + // reforma 2026-07-02: 1ª coluna agora é "Sem conta"
       "WHERE pos_stage IN ('visto_americano', 'visto_amer_primeiro', 'visto_amer_renov', 'visto_amer_renov_sem')"
     );
     await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
