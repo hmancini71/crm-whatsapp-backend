@@ -2327,13 +2327,20 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
     const FETCH_OPTS = { envelope: true, internalDate: true, headers: HDRS };
     let _known = new Set();
     try { (await allRows("SELECT DISTINCT LOWER(TRIM(email)) AS e FROM leads WHERE email IS NOT NULL AND TRIM(email) <> ''")).forEach(r => { if (r && r.e) _known.add(r.e); }); } catch (e) {}
+    // Regras MANUAIS por domínio (botões 🚫/✅ da lista): 'ham' nunca filtra; 'spam' sempre filtra.
+    let _domSpam = [], _domHam = [];
+    try { const r1 = await getRow("SELECT value FROM app_settings WHERE key = 'email_spam_domains'"); const a1 = JSON.parse((r1 && r1.value) || '[]'); if (Array.isArray(a1)) _domSpam = a1; } catch (e) {}
+    try { const r2 = await getRow("SELECT value FROM app_settings WHERE key = 'email_ham_domains'"); const a2 = JSON.parse((r2 && r2.value) || '[]'); if (Array.isArray(a2)) _domHam = a2; } catch (e) {}
     const _fromAddr = (msg) => {
       const f = msg.envelope && msg.envelope.from && msg.envelope.from[0];
       return String((f && f.address) || '').toLowerCase();
     };
     const _isPromo = (msg) => {
       const a = _fromAddr(msg);
-      if (_known.has(a) || /@(valevisto|eccere)\./.test(a)) return false; // allowlist
+      const dom = String(a.split('@')[1] || '');
+      if (dom && _domHam.includes(dom)) return false;             // "não é spam" manual (vence tudo)
+      if (_known.has(a) || /@(valevisto|eccere)\./.test(a)) return false; // allowlist (leads + casa)
+      if (dom && _domSpam.includes(dom)) return true;             // domínio marcado como spam
       const subj = String((msg.envelope && msg.envelope.subject) || '');
       if (/^\s*\[spam\]/i.test(subj)) return true;
       let h = ''; try { h = msg.headers ? msg.headers.toString('utf8') : ''; } catch (e) {}
@@ -2396,6 +2403,31 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
     console.error("IMAP error:", err && err.message);
     res.status(500).json({ error: (err && err.message) || "Falha ao ler e-mails" });
   }
+});
+
+// Regras manuais de DOMÍNIO para o anti-propaganda (botões 🚫 "é spam" / ✅ "não é spam" da lista).
+// Guardadas em app_settings: email_spam_domains e email_ham_domains (JSON arrays). Adicionar num
+// lado remove do outro (as listas nunca conflitam).
+app.get('/api/email/domain-rules', authenticateToken, async (req, res) => {
+  try {
+    const g = async (k) => { const r = await getRow("SELECT value FROM app_settings WHERE key = ?", [k]); try { const a = JSON.parse((r && r.value) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
+    res.json({ spam: await g('email_spam_domains'), ham: await g('email_ham_domains') });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/email/domain-rules', authenticateToken, async (req, res) => {
+  try {
+    const dom = String((req.body && req.body.domain) || '').trim().toLowerCase().replace(/^@/, '');
+    const action = String((req.body && req.body.action) || '');
+    if (!dom || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(dom)) return res.status(400).json({ error: 'Domínio inválido' });
+    if (action !== 'spam' && action !== 'ham') return res.status(400).json({ error: "action deve ser 'spam' ou 'ham'" });
+    const g = async (k) => { const r = await getRow("SELECT value FROM app_settings WHERE key = ?", [k]); try { const a = JSON.parse((r && r.value) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
+    let spam = await g('email_spam_domains'), ham = await g('email_ham_domains');
+    if (action === 'spam') { if (!spam.includes(dom)) spam.push(dom); ham = ham.filter(d => d !== dom); }
+    else { if (!ham.includes(dom)) ham.push(dom); spam = spam.filter(d => d !== dom); }
+    await setAppSetting('email_spam_domains', JSON.stringify(spam));
+    await setAppSetting('email_ham_domains', JSON.stringify(ham));
+    res.json({ ok: true, spam, ham });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // 17. Email Routes: Read full message body (IMAP + parse)
