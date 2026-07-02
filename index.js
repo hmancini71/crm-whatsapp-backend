@@ -2331,8 +2331,8 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
     // a página p/ compensar os filtrados pelo anti-propaganda); rawSat = ainda há mensagens mais
     // antigas fora da janela → habilita o botão "Próxima" mesmo sem saber a contagem exata.
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const PAGE = 100;
-    const RAW = Math.min(1500, page * PAGE * 2 + 100);
+    const PAGE = 30; // 30 por página (pedido do Henry: voltou ao tamanho anterior, com "Próxima ›")
+    const RAW = Math.min(900, page * PAGE * 2 + 60);
     let rawSat = false;
     // ANTI-PROPAGANDA (pedido do Henry): e-mails com marcadores de marketing/spam saem da ENTRADA e
     // aparecem na aba SPAM. Sinais: assunto "[SPAM]" (SpamAssassin), X-Spam-Flag, List-Unsubscribe
