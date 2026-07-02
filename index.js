@@ -1904,7 +1904,30 @@ app.get('/api/media/:msgId', async (req, res) => {
       '.txt':'text/plain', '.zip':'application/zip'
     };
     const ctype = ctypeMap[ext] || 'application/octet-stream';
+    // Cabeçalhos que fazem o áudio TOCAR NA HORA (antes demorava): Content-Length + Accept-Ranges
+    // (o Chrome pede só o pedaço que precisa e calcula a duração sem baixar tudo — sumia o
+    // "0:00/0:00") e Cache-Control (mídia é imutável: o re-render do chat não re-baixa nada).
+    const st = fs.statSync(msg.mediaPath);
     res.setHeader('Content-Type', ctype);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    const range = req.headers.range;
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(String(range));
+      let start = (m && m[1]) ? parseInt(m[1], 10) : 0;
+      let end = (m && m[2]) ? parseInt(m[2], 10) : st.size - 1;
+      if (isNaN(start) || start < 0) start = 0;
+      if (isNaN(end) || end >= st.size) end = st.size - 1;
+      if (start > end) {
+        res.setHeader('Content-Range', 'bytes */' + st.size);
+        return res.status(416).end();
+      }
+      res.status(206);
+      res.setHeader('Content-Range', 'bytes ' + start + '-' + end + '/' + st.size);
+      res.setHeader('Content-Length', end - start + 1);
+      return fs.createReadStream(msg.mediaPath, { start: start, end: end }).pipe(res);
+    }
+    res.setHeader('Content-Length', st.size);
     fs.createReadStream(msg.mediaPath).pipe(res);
   } catch (err) {
     res.status(500).json({ error: err.message });
