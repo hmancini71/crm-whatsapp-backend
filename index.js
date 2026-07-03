@@ -2129,7 +2129,10 @@ function leadIsPos(l, posSet, posDigits) {
   return !!(rn && posDigits.some(d => rn.endsWith(d)));
 }
 // Colunas do pipeline PÓS-VENDA.
-const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar', 'on_hold',
+// 'para_classificar' ("Mensagens novas para organizar") foi EXTINTA em 2026-07-03 (pedido do
+// Henry): cards foram movidos manualmente p/ as colunas certas; qualquer resto/novo cai em
+// 'vendas_concretizadas' (Recém Contratados) — ver posStageFor e a migração do db.js.
+const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'on_hold',
   'visto_amer_semconta', 'visto_amer_comconta', 'visto_amer_agendado', 'visto_amer_envio_passaporte', 'visto_amer_concluido',
   'visto_cana_formulario', 'visto_cana_oficiais', 'visto_cana_aprovacao', 'visto_cana_envio', 'visto_cana_biometria', 'visto_cana_finalizado',
   'visto_port_formulario', 'visto_port_entrevista', 'visto_port_aprovacao', 'visto_port_agendamento', 'visto_port_finalizado',
@@ -2143,8 +2146,7 @@ const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classi
 // são ÚNICOS (o frontend casa coluna→aba/banner por título); por isso o sufixo do visto onde repetiria.
 const POS_STAGES_FULL = [
   { id: 'clientes_antigos_pos',   title: 'Comunicação com ambiente Pré-Venda', color: '#6366f1' },
-  { id: 'vendas_concretizadas',   title: 'Clientes concluídos',                color: '#16a34a' },
-  { id: 'para_classificar',       title: 'Mensagens novas para organizar',     color: '#71717a' },
+  { id: 'vendas_concretizadas',   title: 'Recém Contratados',                  color: '#16a34a' },
   // On-hold (pedido do Henry 2026-07-02): clientes pausados — coluna vermelho forte nos Cards Comuns.
   { id: 'on_hold',                title: 'On-hold',                             color: '#b91c1c' },
   // Grupo Visto Americano (reforma 2026-07-02, planilha do Henry: branca/laranja/azul/verde/preta)
@@ -2188,7 +2190,8 @@ function posStageFor(lead) {
   if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) return lead.pos_stage;
   if (lead.stage === 'convertida') return 'vendas_concretizadas';
   if (lead.stage === 'clientes_antigos') return 'clientes_antigos_pos';
-  return 'para_classificar';
+  // "Mensagens novas para organizar" foi extinta: o fallback agora é Recém Contratados.
+  return 'vendas_concretizadas';
 }
 
 // ===== HISTÓRICO do lead (linha do tempo) — ver tabela lead_history (db.js) =====
