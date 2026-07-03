@@ -1034,10 +1034,13 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const whatsappAccounts = await allRows("SELECT id, label, number, color, status, unread FROM whatsapp_accounts");
 
     // Novos leads REAIS por dia no período (from/to; padrão últimos 15 dias, fuso de São Paulo).
+    // IMPORTANTE (pedido do Henry, 2026-07-02): leads importados da planilha Excel do americano
+    // (source='Planilha Americano') são LEGADO — ficam FORA das estatísticas por dia (barras,
+    // canal e popup), senão o dia da importação vira um pico falso de 200+ "leads novos".
     const _range = daysRangeSP(req.query.from, req.query.to, 15);
     const weeklyLeads = [];
     for (const dia of _range) {
-      const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ? AND archived = 0", [dia.iso]);
+      const r = await getRow("SELECT COUNT(*) as count FROM leads WHERE substr(createdAt,1,10) = ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'", [dia.iso]);
       weeklyLeads.push({ day: dia.label, value: (r && r.count) || 0 });
     }
 
@@ -1046,7 +1049,7 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const _byDay = {};
     _range.forEach(d => { _byDay[d.iso] = { day: d.label, ga: 0, meta: 0, org: 0, semclass: 0, total: 0 }; });
     const _allInRange = await allRows(
-      "SELECT createdAt, tracking, source FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0",
+      "SELECT createdAt, tracking, source FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'",
       [_range[0].iso, _range[_range.length - 1].iso]
     );
     _allInRange.forEach(l => {
@@ -1089,7 +1092,8 @@ app.get('/api/dashboard/channel-leads', authenticateToken, async (req, res) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || ['ga', 'meta', 'org', 'semclass'].indexOf(channel) < 0) {
       return res.status(400).json({ error: 'Parâmetros: date=YYYY-MM-DD e channel=ga|meta|org|semclass' });
     }
-    const rows = await allRows("SELECT * FROM leads WHERE substr(createdAt,1,10) = ? AND archived = 0", [date]);
+    // Importados da planilha (legado) fora — mesma exclusão do gráfico, p/ o popup bater.
+    const rows = await allRows("SELECT * FROM leads WHERE substr(createdAt,1,10) = ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'", [date]);
     const leads = rows
       .filter(l => leadChannelCat(l) === channel)
       .map(l => Object.assign({}, l, { tags: l.tags ? (function () { try { return JSON.parse(l.tags); } catch (e) { return []; } })() : [] }));
@@ -2110,7 +2114,7 @@ function leadIsPos(l, posSet, posDigits) {
   return !!(rn && posDigits.some(d => rn.endsWith(d)));
 }
 // Colunas do pipeline PÓS-VENDA.
-const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar',
+const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'para_classificar', 'on_hold',
   'visto_amer_semconta', 'visto_amer_comconta', 'visto_amer_agendado', 'visto_amer_envio_passaporte', 'visto_amer_concluido',
   'visto_cana_formulario', 'visto_cana_oficiais', 'visto_cana_aprovacao', 'visto_cana_envio', 'visto_cana_biometria', 'visto_cana_finalizado',
   'visto_port_formulario', 'visto_port_entrevista', 'visto_port_aprovacao', 'visto_port_agendamento', 'visto_port_finalizado',
@@ -2126,6 +2130,8 @@ const POS_STAGES_FULL = [
   { id: 'clientes_antigos_pos',   title: 'Comunicação com ambiente Pré-Venda', color: '#6366f1' },
   { id: 'vendas_concretizadas',   title: 'Clientes concluídos',                color: '#16a34a' },
   { id: 'para_classificar',       title: 'Mensagens novas para organizar',     color: '#71717a' },
+  // On-hold (pedido do Henry 2026-07-02): clientes pausados — coluna vermelho forte nos Cards Comuns.
+  { id: 'on_hold',                title: 'On-hold',                             color: '#b91c1c' },
   // Grupo Visto Americano (reforma 2026-07-02, planilha do Henry: branca/laranja/azul/verde/preta)
   { id: 'visto_amer_semconta',         title: 'Sem conta',               color: '#9ca3af', group: 'Grupo Visto Americano' },
   { id: 'visto_amer_comconta',         title: 'Com conta e sem agendar', color: '#f97316', group: 'Grupo Visto Americano' },
