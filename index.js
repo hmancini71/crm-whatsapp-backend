@@ -731,6 +731,14 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     // 'stage' do pré-venda. (As colunas pós têm nomes próprios.)
     if (POS_STAGES.includes(stage)) {
       await runQuery("UPDATE leads SET pos_stage = ?, bridge = 0 WHERE id = ?", [stage, id]);
+      // Regra do Henry (2026-07-03): TODO card na coluna On-hold carrega a prioridade ⛔ 'onhold'
+      // (tarja vermelha + fim da ordenação). Entrar na coluna aplica; sair dela remove (só se a
+      // prioridade ainda for 'onhold' — não mexe se alguém trocou à mão depois).
+      if (stage === 'on_hold') {
+        await runQuery("UPDATE leads SET priority = 'onhold' WHERE id = ?", [id]);
+      } else if (cur.pos_stage === 'on_hold' && cur.priority === 'onhold') {
+        await runQuery("UPDATE leads SET priority = '' WHERE id = ?", [id]);
+      }
       if (cur.pos_stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '" (pós-venda)', meta: { to: stage } });
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });

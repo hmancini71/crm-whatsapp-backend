@@ -677,6 +677,10 @@ db.serialize(() => {
     // p/ Recém Contratados — sem isso ficaria INVISÍVEL no board. Idempotente, roda a cada boot.
     // (Só o pos_stage: o 'stage' com esse valor é tratado pelo resgate acima.)
     db.run("UPDATE leads SET pos_stage = 'vendas_concretizadas' WHERE pos_stage = 'para_classificar'");
+    // Regra do Henry (2026-07-03): TODO card da coluna On-hold (pós) carrega a prioridade 'onhold'
+    // (tarja vermelha, fim da ordenação). Roda a cada boot — cobre os 80 importados e qualquer
+    // card que tenha entrado na coluna por outro caminho. O PATCH de etapa mantém em tempo real.
+    db.run("UPDATE leads SET priority = 'onhold' WHERE pos_stage = 'on_hold' AND COALESCE(priority,'') <> 'onhold'");
   });
 
   // Safe migration: add 'type' column to messages (text | audio | image | other)
