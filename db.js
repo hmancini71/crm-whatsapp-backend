@@ -668,7 +668,7 @@ db.serialize(() => {
     // Viram convertida + pos_stage (a própria etapa se for coluna pós válida; senão vão para
     // "Recém Contratados" — a coluna "Mensagens novas para organizar"/para_classificar foi EXTINTA
     // em 2026-07-03 a pedido do Henry), ficando VISÍVEIS no board pós em vez de vazarem p/ o pré.
-    db.run("UPDATE leads SET pos_stage = CASE WHEN stage IN ('clientes_antigos_pos','vendas_concretizadas','on_hold','visto_amer_semconta','visto_amer_comconta','visto_amer_agendado','visto_amer_envio_passaporte','visto_amer_concluido','visto_cana_formulario','visto_cana_oficiais','visto_cana_aprovacao','visto_cana_envio','visto_cana_biometria','visto_cana_finalizado','visto_port_formulario','visto_port_entrevista','visto_port_aprovacao','visto_port_agendamento','visto_port_finalizado','visto_aust_formulario','visto_aust_oficiais','visto_aust_pagamento','visto_aust_finalizado','visto_mex_formulario','visto_mex_entrevista','visto_mex_finalizado','visto_bra_documentacao','visto_bra_entrevista','ital_formulario','ital_aire','ital_passaporte','outros') THEN stage ELSE 'vendas_concretizadas' END, stage = 'convertida' WHERE (pos_stage IS NULL OR pos_stage = '') AND stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')", (rErr) => {
+    db.run("UPDATE leads SET pos_stage = CASE WHEN stage IN ('clientes_antigos_pos','vendas_concretizadas','visto_amer_semconta','visto_amer_comconta','visto_amer_agendado','visto_amer_envio_passaporte','visto_amer_concluido','visto_cana_formulario','visto_cana_oficiais','visto_cana_aprovacao','visto_cana_envio','visto_cana_biometria','visto_cana_finalizado','visto_port_formulario','visto_port_entrevista','visto_port_aprovacao','visto_port_agendamento','visto_port_finalizado','visto_aust_formulario','visto_aust_oficiais','visto_aust_pagamento','visto_aust_finalizado','visto_mex_formulario','visto_mex_entrevista','visto_mex_finalizado','visto_bra_documentacao','visto_bra_entrevista','ital_formulario','ital_aire','ital_passaporte','outros') THEN stage ELSE 'vendas_concretizadas' END, stage = 'convertida' WHERE (pos_stage IS NULL OR pos_stage = '') AND stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')", (rErr) => {
       if (rErr) console.error('Resgate de leads com etapa fantasma:', rErr.message);
       // Só DEPOIS do resgate o reset de segurança pode rodar (agora sem engolir cards do pós).
       db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
@@ -677,10 +677,12 @@ db.serialize(() => {
     // p/ Recém Contratados — sem isso ficaria INVISÍVEL no board. Idempotente, roda a cada boot.
     // (Só o pos_stage: o 'stage' com esse valor é tratado pelo resgate acima.)
     db.run("UPDATE leads SET pos_stage = 'vendas_concretizadas' WHERE pos_stage = 'para_classificar'");
-    // Regra do Henry (2026-07-03): TODO card da coluna On-hold (pós) carrega a prioridade 'onhold'
-    // (tarja vermelha, fim da ordenação). Roda a cada boot — cobre os 80 importados e qualquer
-    // card que tenha entrado na coluna por outro caminho. O PATCH de etapa mantém em tempo real.
-    db.run("UPDATE leads SET priority = 'onhold' WHERE pos_stage = 'on_hold' AND COALESCE(priority,'') <> 'onhold'");
+    // COLUNA On-hold EXTINTA (2026-07-03, pedido do Henry): o conceito virou a PRIORIDADE 'onhold'
+    // (tarja vermelha ⛔). Henry moveu os cards p/ "Com conta e sem agendar"; qualquer resto ganha
+    // a prioridade e vai p/ a mesma coluna (ordem importa: prioridade ANTES de mover). Idempotente.
+    db.run("UPDATE leads SET priority = 'onhold' WHERE pos_stage = 'on_hold' AND COALESCE(priority,'') <> 'onhold'", () => {
+      db.run("UPDATE leads SET pos_stage = 'visto_amer_comconta' WHERE pos_stage = 'on_hold'");
+    });
   });
 
   // Safe migration: add 'type' column to messages (text | audio | image | other)

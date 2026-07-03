@@ -731,14 +731,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     // 'stage' do pré-venda. (As colunas pós têm nomes próprios.)
     if (POS_STAGES.includes(stage)) {
       await runQuery("UPDATE leads SET pos_stage = ?, bridge = 0 WHERE id = ?", [stage, id]);
-      // Regra do Henry (2026-07-03): TODO card na coluna On-hold carrega a prioridade ⛔ 'onhold'
-      // (tarja vermelha + fim da ordenação). Entrar na coluna aplica; sair dela remove (só se a
-      // prioridade ainda for 'onhold' — não mexe se alguém trocou à mão depois).
-      if (stage === 'on_hold') {
-        await runQuery("UPDATE leads SET priority = 'onhold' WHERE id = ?", [id]);
-      } else if (cur.pos_stage === 'on_hold' && cur.priority === 'onhold') {
-        await runQuery("UPDATE leads SET priority = '' WHERE id = ?", [id]);
-      }
+      // (A coluna On-hold foi extinta em 2026-07-03 — o conceito vive na PRIORIDADE 'onhold'.)
       if (cur.pos_stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '" (pós-venda)', meta: { to: stage } });
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
@@ -2140,7 +2133,9 @@ function leadIsPos(l, posSet, posDigits) {
 // 'para_classificar' ("Mensagens novas para organizar") foi EXTINTA em 2026-07-03 (pedido do
 // Henry): cards foram movidos manualmente p/ as colunas certas; qualquer resto/novo cai em
 // 'vendas_concretizadas' (Recém Contratados) — ver posStageFor e a migração do db.js.
-const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'on_hold',
+// 'on_hold' (coluna) também foi EXTINTA em 2026-07-03: o conceito virou a PRIORIDADE 'onhold'
+// (tarja vermelha ⛔ no card); os cards foram movidos p/ 'visto_amer_comconta' (migração db.js).
+const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas',
   'visto_amer_semconta', 'visto_amer_comconta', 'visto_amer_agendado', 'visto_amer_envio_passaporte', 'visto_amer_concluido',
   'visto_cana_formulario', 'visto_cana_oficiais', 'visto_cana_aprovacao', 'visto_cana_envio', 'visto_cana_biometria', 'visto_cana_finalizado',
   'visto_port_formulario', 'visto_port_entrevista', 'visto_port_aprovacao', 'visto_port_agendamento', 'visto_port_finalizado',
@@ -2155,8 +2150,6 @@ const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas', 'on_hold',
 const POS_STAGES_FULL = [
   { id: 'clientes_antigos_pos',   title: 'Comunicação com ambiente Pré-Venda', color: '#6366f1' },
   { id: 'vendas_concretizadas',   title: 'Recém Contratados',                  color: '#16a34a' },
-  // On-hold (pedido do Henry 2026-07-02): clientes pausados — coluna vermelho forte nos Cards Comuns.
-  { id: 'on_hold',                title: 'On-hold',                             color: '#b91c1c' },
   // Grupo Visto Americano (reforma 2026-07-02, planilha do Henry: branca/laranja/azul/verde/preta)
   { id: 'visto_amer_semconta',         title: 'Sem conta',               color: '#9ca3af', group: 'Grupo Visto Americano' },
   { id: 'visto_amer_comconta',         title: 'Com conta e sem agendar', color: '#f97316', group: 'Grupo Visto Americano' },
