@@ -196,15 +196,21 @@ app.post('/api/auth/login', async (req, res) => {
 // 2. Auth Route: Me
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   // wa_type define o AMBIENTE do login: 'pos' (Alexandre → só 2030/pós-venda) vs pré/ambos.
-  let wa_type = 'ambos';
-  try { const u = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]); if (u && u.wa_type) wa_type = u.wa_type; } catch (e) {}
+  // allowed_stages: colunas do pipeline que este usuário pode VER ([] = todas do ambiente).
+  let wa_type = 'ambos', allowed_stages = [];
+  try {
+    const u = await getRow("SELECT wa_type, allowed_stages FROM users WHERE id = ?", [req.user.sub]);
+    if (u && u.wa_type) wa_type = u.wa_type;
+    if (u && u.allowed_stages) { try { const a = JSON.parse(u.allowed_stages); if (Array.isArray(a)) allowed_stages = a; } catch (e) {} }
+  } catch (e) {}
   res.json({
     id: req.user.sub,
     name: req.user.name,
     email: req.user.email,
     role: req.user.role,
     avatar: req.user.avatar,
-    wa_type
+    wa_type,
+    allowed_stages
   });
 });
 
@@ -220,8 +226,12 @@ function requireAdmin(req, res) {
 app.get('/api/users', authenticateToken, async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const users = await allRows("SELECT id, name, email, role, avatar, wa_type FROM users ORDER BY name");
-    res.json(users);
+    const users = await allRows("SELECT id, name, email, role, avatar, wa_type, allowed_stages FROM users ORDER BY name");
+    res.json(users.map(u => {
+      let a = [];
+      if (u.allowed_stages) { try { const p = JSON.parse(u.allowed_stages); if (Array.isArray(p)) a = p; } catch (e) {} }
+      return Object.assign({}, u, { allowed_stages: a });
+    }));
   } catch (e) { res.status(500).json({ detail: String(e) }); }
 });
 
@@ -247,7 +257,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
 app.patch('/api/users/:id', authenticateToken, async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const { id } = req.params;
-  const { name, role, password, wa_type } = req.body;
+  const { name, role, password, wa_type, allowed_stages } = req.body;
   try {
     const u = await getRow("SELECT * FROM users WHERE id = ?", [id]);
     if (!u) return res.status(404).json({ detail: "Usuário não encontrado" });
@@ -258,6 +268,11 @@ app.patch('/api/users/:id', authenticateToken, async (req, res) => {
     }
     if (role !== undefined) { updates.push("role = ?"); params.push(role === 'Vendedor' ? 'Vendedor' : 'Administrador'); }
     if (wa_type !== undefined) { updates.push("wa_type = ?"); params.push(['pre', 'pos', 'ambos'].includes(wa_type) ? wa_type : 'ambos'); }
+    // Colunas visíveis do pipeline (pedido do Henry): array de ids; [] = sem restrição (todas).
+    if (allowed_stages !== undefined) {
+      const arr = Array.isArray(allowed_stages) ? allowed_stages.map(s => String(s)).filter(Boolean).slice(0, 60) : [];
+      updates.push("allowed_stages = ?"); params.push(arr.length ? JSON.stringify(arr) : '');
+    }
     if (password) { updates.push("password_hash = ?"); params.push(bcrypt.hashSync(String(password), 10)); }
     if (updates.length) { params.push(id); await runQuery("UPDATE users SET " + updates.join(", ") + " WHERE id = ?", params); }
     res.json({ ok: true });

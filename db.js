@@ -495,6 +495,16 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: colunas do pipeline que o usuário pode VER (pedido do Henry, 2026-07-02).
+  // JSON array de ids de etapa; '' ou '[]' = SEM restrição (vê todas as colunas do ambiente).
+  db.all("PRAGMA table_info(users)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'allowed_stages')) {
+      db.run("ALTER TABLE users ADD COLUMN allowed_stages TEXT DEFAULT ''", (alterErr) => {
+        if (alterErr) console.error("Failed to add allowed_stages column to users:", alterErr);
+      });
+    }
+  });
+
   // Safe migration: 'pos_stage' = coluna do pipeline PÓS-VENDA (ambiente do 2030). Independente do
   // 'stage' (pré-venda). Valores: vendas_concretizadas | para_classificar | visto_americano |
   // visto_canadense | visto_portugues | aire_italiano | outros.
