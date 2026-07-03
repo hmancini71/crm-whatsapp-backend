@@ -768,17 +768,38 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
   // Status de entrega/leitura das NOSSAS mensagens (ticks). A Meta envia messages.update com
   // update.status: 2=enviado(1 tick), 3=entregue(2 ticks), 4=lido(2 ticks azuis), 5=tocado.
   // Como gravamos a mensagem com id = key.id, dá pra atualizar direto por id (só sobe, nunca desce).
+  // COALESCE: linhas antigas/mídia podem ter status NULL — e "NULL < ?" é falso no SQLite, o que
+  // TRAVAVA o tick p/ sempre. (Fix 2026-07-03, "por que não aparece o ✓✓".)
+  const bumpMsgStatus = async (mid, st) => {
+    if (!mid || typeof st !== 'number' || st < 2) return;
+    await runQuery("UPDATE messages SET status = ? WHERE id = ? AND COALESCE(status,0) < ?", [st, mid, st]);
+  };
   sock.ev.on('messages.update', async (updates) => {
     try {
       for (const u of (updates || [])) {
-        const st = u && u.update && u.update.status;
-        const mid = u && u.key && u.key.id;
-        if (mid && typeof st === 'number' && st >= 2) {
-          await runQuery("UPDATE messages SET status = ? WHERE id = ? AND status < ?", [st, mid, st]);
-        }
+        await bumpMsgStatus(u && u.key && u.key.id, u && u.update && u.update.status);
       }
     } catch (err) {
       console.error(`[WhatsApp ${id}] Error in messages.update handler:`, err);
+    }
+  });
+  // No Baileys 7 os acks de ENTREGA/LEITURA das conversas individuais chegam (também/só) por
+  // message-receipt.update — sem este handler o tick ficava parado no ✓ mesmo com o cliente
+  // recebendo (bug relatado pelo Henry, 2026-07-03). receipt.readTimestamp=lido, receiptTimestamp=entregue.
+  sock.ev.on('message-receipt.update', async (events) => {
+    try {
+      for (const ev of (events || [])) {
+        const mid = ev && ev.key && ev.key.id;
+        const r = (ev && ev.receipt) || {};
+        let st = 0;
+        if (r.readTimestamp) st = 4;
+        else if (r.receiptTimestamp) st = 3;
+        else if (r.type === 'read' || r.type === 'read-self') st = 4;
+        else if (r.type === 'delivery') st = 3;
+        if (st) await bumpMsgStatus(mid, st);
+      }
+    } catch (err) {
+      console.error(`[WhatsApp ${id}] Error in message-receipt.update handler:`, err);
     }
   });
 
@@ -902,9 +923,10 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
   const mediaPath = path.join(MEDIA_DIR, msgId + '.ogg');
   try { fs.writeFileSync(mediaPath, oggBuffer); } catch (e) { console.error('Falha ao salvar áudio enviado:', e); }
 
+  // status 2 = enviado (✓); os handlers de ack sobem p/ entregue/lido — mesmo padrão do WhatsApp.
   await runQuery(
-    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [msgId, convoId, 'me', '[Mensagem de voz]', timeStr, Date.now(), 'audio', mediaPath, sockNumber(sock)]
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', '[Mensagem de voz]', timeStr, Date.now(), 'audio', mediaPath, sockNumber(sock), Math.max(2, (sent && sent.status) || 0)]
   );
 
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
@@ -931,9 +953,10 @@ async function sendWhatsAppMedia(accountId, convoId, buffer, mimetype, fileName)
   if (!ext) ext = type === 'image' ? '.jpg' : type === 'video' ? '.mp4' : '.bin';
   const mediaPath = path.join(MEDIA_DIR, msgId + ext);
   try { fs.writeFileSync(mediaPath, buffer); } catch (e) { console.error('Falha ao salvar mídia enviada:', e); }
+  // status 2 = enviado (✓); os handlers de ack sobem p/ entregue/lido — mesmo padrão do WhatsApp.
   await runQuery(
-    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [msgId, convoId, 'me', label, timeStr, Date.now(), type, mediaPath, sockNumber(sock)]
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', label, timeStr, Date.now(), type, mediaPath, sockNumber(sock), Math.max(2, (sent && sent.status) || 0)]
   );
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
   return { id: msgId, from: 'me', text: label, time: timeStr, type: type };
