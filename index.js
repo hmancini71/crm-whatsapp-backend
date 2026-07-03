@@ -2937,7 +2937,10 @@ app.get('/api/contracts/:id', authenticateToken, async (req, res) => {
     delete c.client_signature; delete c.admin_signature;
     // monta URL do PDF assinado (quando concluído) e do anexo do cliente
     const pdfUrl = (c.status === 'completed') ? (DS160_BASE + '/uploads/contracts/' + encodeURIComponent(id) + '/contrato_assinado_' + encodeURIComponent(id) + '.pdf') : null;
-    const attachmentUrl = c.client_attachment_path ? (DS160_BASE.replace(/\/api$/, '') + '/' + String(c.client_attachment_path).replace(/^\/+/, '')) : null;
+    // FIX 2026-07-03 ("Documento do cliente dava 404"): o anexo é salvo DENTRO da pasta da API
+    // (__DIR__/uploads/... em contracts.php) → a URL certa é /api/uploads/... como a do pdfUrl
+    // acima. A versão antiga tirava o /api da base e caía em /uploads/... (404 do HostGator).
+    const attachmentUrl = c.client_attachment_path ? (DS160_BASE + '/' + String(c.client_attachment_path).replace(/^\/+/, '')) : null;
     res.json({ ...c, pdfUrl, attachmentUrl });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
