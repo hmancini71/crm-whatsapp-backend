@@ -2192,7 +2192,7 @@ const POS_STAGES_FULL = [
   // Grupo Visto Americano (reforma 2026-07-02, planilha do Henry: branca/laranja/azul/verde/preta)
   // + triagem cinza (2026-07-04): mensagens não lidas das linhas do pós sem coluna caem aqui.
   { id: 'amer_msgs_novas',             title: 'Mensagens novas não classificadas', color: '#6b7280', group: 'Grupo Visto Americano' },
-  { id: 'visto_amer_semconta',         title: 'Sem conta',               color: '#9ca3af', group: 'Grupo Visto Americano' },
+  { id: 'visto_amer_semconta',         title: 'Conta para ser Criada',   color: '#ffffff', group: 'Grupo Visto Americano' },
   { id: 'visto_amer_comconta',         title: 'Com conta e sem agendar', color: '#f97316', group: 'Grupo Visto Americano' },
   { id: 'visto_amer_agendado',         title: 'Agendado',                color: '#1d4ed8', group: 'Grupo Visto Americano' },
   { id: 'visto_amer_envio_passaporte', title: 'Envio de passaporte',     color: '#166534', group: 'Grupo Visto Americano' },
