@@ -2175,7 +2175,7 @@ function leadIsPos(l, posSet, posDigits) {
 // 'on_hold' (coluna) também foi EXTINTA em 2026-07-03: o conceito virou a PRIORIDADE 'onhold'
 // (tarja vermelha ⛔ no card); os cards foram movidos p/ 'visto_amer_comconta' (migração db.js).
 const POS_STAGES = ['clientes_antigos_pos', 'vendas_concretizadas',
-  'visto_amer_semconta', 'visto_amer_comconta', 'visto_amer_agendado', 'visto_amer_envio_passaporte', 'visto_amer_concluido',
+  'amer_msgs_novas', 'visto_amer_semconta', 'visto_amer_comconta', 'visto_amer_agendado', 'visto_amer_envio_passaporte', 'visto_amer_concluido',
   'visto_cana_formulario', 'visto_cana_oficiais', 'visto_cana_aprovacao', 'visto_cana_envio', 'visto_cana_biometria', 'visto_cana_finalizado',
   'visto_port_formulario', 'visto_port_entrevista', 'visto_port_aprovacao', 'visto_port_agendamento', 'visto_port_finalizado',
   'visto_aust_formulario', 'visto_aust_oficiais', 'visto_aust_pagamento', 'visto_aust_finalizado',
@@ -2190,6 +2190,8 @@ const POS_STAGES_FULL = [
   { id: 'clientes_antigos_pos',   title: 'Comunicação com ambiente Pré-Venda', color: '#6366f1' },
   { id: 'vendas_concretizadas',   title: 'Recém Contratados',                  color: '#16a34a' },
   // Grupo Visto Americano (reforma 2026-07-02, planilha do Henry: branca/laranja/azul/verde/preta)
+  // + triagem cinza (2026-07-04): mensagens não lidas das linhas do pós sem coluna caem aqui.
+  { id: 'amer_msgs_novas',             title: 'Mensagens novas não classificadas', color: '#6b7280', group: 'Grupo Visto Americano' },
   { id: 'visto_amer_semconta',         title: 'Sem conta',               color: '#9ca3af', group: 'Grupo Visto Americano' },
   { id: 'visto_amer_comconta',         title: 'Com conta e sem agendar', color: '#f97316', group: 'Grupo Visto Americano' },
   { id: 'visto_amer_agendado',         title: 'Agendado',                color: '#1d4ed8', group: 'Grupo Visto Americano' },
@@ -3264,6 +3266,43 @@ async function reconcileReplyDots() {
 }
 // Autocorreção contínua: a cada 60s (além da chamada no boot).
 setInterval(() => { reconcileReplyDots().catch(() => {}); }, 60 * 1000);
+
+// Coluna "Mensagens novas não classificadas" (Grupo Visto Americano — pedido do Henry 2026-07-04):
+// toda conversa NÃO LIDA numa linha do PÓS cujo contato não está em NENHUMA coluna do pós vira
+// card nessa coluna (cinza, antes da Sem conta). Regras de segurança:
+//  • sem lead → CRIA o card (padrão do POST: stage='convertida' + pos_stage) já com jid/telefone;
+//  • lead já classificado no pós (pos_stage válido) ou na ponte → NÃO mexe;
+//  • lead que o PRÉ está trabalhando (tratamento/proposta/followup) → NÃO rouba (lição JD Crawford).
+async function sweepPosUnclassified() {
+  try {
+    const { posSet } = await getSaleLineFilter();
+    if (!posSet.size) return;
+    const convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0) AND unread > 0");
+    for (const c of convs) {
+      if (!posSet.has(c.account)) continue;
+      const tail = String(c.phone || String(c.whatsapp_jid || '').split('@')[0] || '').replace(/\D/g, '').slice(-8);
+      let lead = null;
+      if (c.whatsapp_jid) lead = await getRow("SELECT * FROM leads WHERE archived = 0 AND whatsapp_jid = ? LIMIT 1", [c.whatsapp_jid]);
+      if (!lead && tail.length === 8) lead = await getRow("SELECT * FROM leads WHERE archived = 0 AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
+      if (!lead) {
+        const id = 'l_' + Math.random().toString(36).substr(2, 9);
+        await runQuery(
+          "INSERT INTO leads (id, name, company, phone, email, value, stage, pos_stage, bridge, source, account, owner, tags, createdAt, archived, priority, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [id, (c.name || c.phone || 'Contato WhatsApp'), '', c.phone || '', '', 0, 'convertida', 'amer_msgs_novas', 0, 'WhatsApp', c.account || '', 'CRM', '[]', new Date().toISOString(), 0, '', c.whatsapp_jid || null]
+        );
+        try { logLeadHistory({ leadId: id, phone: c.phone, name: c.name, type: 'movimentacao', detail: 'Card criado em "Mensagens novas não classificadas" (mensagem não lida na linha do pós)', meta: { to: 'amer_msgs_novas' } }); } catch (e) {}
+        continue;
+      }
+      if (lead.bridge === 1) continue;
+      if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) continue;
+      if (['tratamento', 'proposta', 'followup'].includes(lead.stage)) continue;
+      await runQuery("UPDATE leads SET pos_stage = 'amer_msgs_novas' WHERE id = ?", [lead.id]);
+      try { logLeadHistory({ leadId: lead.id, phone: lead.phone, name: lead.name, type: 'movimentacao', detail: 'Movido para "Mensagens novas não classificadas" (mensagem não lida na linha do pós)', meta: { to: 'amer_msgs_novas' } }); } catch (e) {}
+    }
+  } catch (e) { console.error('sweepPosUnclassified:', e && e.message); }
+}
+setInterval(() => { sweepPosUnclassified().catch(() => {}); }, 60 * 1000);
+setTimeout(() => { sweepPosUnclassified().catch(() => {}); }, 20 * 1000); // 1ª passada logo após o boot
 
 // "A última mensagem do cliente não é uma demanda": marca de forma PERSISTENTE até quando
 // o controle de tempo deve ficar zerado (= timestamp da última msg do cliente). Só volta a
