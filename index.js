@@ -1499,12 +1499,16 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
           }
         }
       } else {
-        if (posSet.size && convPos) return res.status(403).json({ error: 'Esta linha é do ambiente pós-venda.' });
-        if (!lineOpen) {
+        // PRÉ/ADMIN: conversa presa numa linha do PÓS (card migrou de ambiente — fix 2026-07-04,
+        // caso Yasmim/Levi: "Esta linha é do ambiente pós-venda" bloqueava o envio) OU linha
+        // caída → roteia p/ uma linha do pré conectada, ESPELHO do que o pós já fazia acima.
+        if ((posSet.size && convPos) || !lineOpen) {
           const preConn = Object.keys(sessions).find(a => isOpenLine(a) && !posSet.has(a));
           if (preConn && preConn !== convo.account) {
             await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [preConn, id]);
             convo.account = preConn;
+          } else if (posSet.size && convPos) {
+            return res.status(409).json({ error: 'Nenhuma linha do pré-venda está conectada para assumir esta conversa (ela está numa linha do pós). Conecte uma linha do pré em Conexões.' });
           }
         }
       }
@@ -1721,7 +1725,26 @@ app.post('/api/conversations/:id/audio', authenticateToken, async (req, res) => 
     if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
 
     const buffer = Buffer.from(audio, 'base64');
-    const accountId = convo.account;
+    let accountId = convo.account;
+    // Roteia pela linha do AMBIENTE do usuário — MESMA regra do envio de texto (fix 2026-07-04,
+    // pedido do Henry: "tem que mandar mensagem e áudio independente se mudou ambiente ou
+    // WhatsApp"). Card que migrou deixava a conversa presa na linha do outro lado e o áudio
+    // falhava/saía pela linha errada. Pós → linha pós conectada; pré/admin → linha não-pós.
+    try {
+      const { posSet } = await getSaleLineFilter();
+      const isOpenLine = (a) => !!(sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
+      if (posSet.size) {
+        const isPos = await userIsPos(req);
+        const ok = (a) => isOpenLine(a) && (isPos ? posSet.has(a) : !posSet.has(a));
+        if (!ok(accountId)) {
+          const alt = Object.keys(sessions).find(ok);
+          if (alt) { await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [alt, id]); convo.account = alt; accountId = alt; }
+        }
+      } else if (!isOpenLine(accountId)) {
+        const alt = Object.keys(sessions).find(isOpenLine);
+        if (alt) { await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [alt, id]); convo.account = alt; accountId = alt; }
+      }
+    } catch (e) { /* não bloqueia em falha de checagem */ }
     const isConnected = sessions[accountId] && sessions[accountId].ws.isOpen;
 
     let messageObj;
@@ -1758,7 +1781,23 @@ app.post('/api/conversations/:id/media', authenticateToken, async (req, res) => 
     if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
     const buffer = Buffer.from(data, 'base64');
     if (buffer.length > 16 * 1024 * 1024) return res.status(400).json({ error: "Arquivo acima de 16 MB" });
-    const accountId = convo.account;
+    let accountId = convo.account;
+    // Mesma regra de roteamento por ambiente do texto/áudio (fix 2026-07-04) — ver rota /audio.
+    try {
+      const { posSet } = await getSaleLineFilter();
+      const isOpenLine = (a) => !!(sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
+      if (posSet.size) {
+        const isPos = await userIsPos(req);
+        const ok = (a) => isOpenLine(a) && (isPos ? posSet.has(a) : !posSet.has(a));
+        if (!ok(accountId)) {
+          const alt = Object.keys(sessions).find(ok);
+          if (alt) { await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [alt, id]); convo.account = alt; accountId = alt; }
+        }
+      } else if (!isOpenLine(accountId)) {
+        const alt = Object.keys(sessions).find(isOpenLine);
+        if (alt) { await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [alt, id]); convo.account = alt; accountId = alt; }
+      }
+    } catch (e) { /* não bloqueia em falha de checagem */ }
     const isConnected = sessions[accountId] && sessions[accountId].ws.isOpen;
     let messageObj;
     if (isConnected) {
