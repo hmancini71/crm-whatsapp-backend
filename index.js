@@ -2096,6 +2096,19 @@ app.delete('/api/leads/:id/payment-proof', authenticateToken, async (req, res) =
 });
 
 // 9d. Leads Routes: Find or create a conversation for a lead (open chat from lead modal)
+// Localiza a conversa de um lead SEM filtro de ambiente (fix 2026-07-04, caso Sonia Silva):
+// o chat do card procurava na lista GET /conversations (filtrada por ambiente) — se o histórico
+// estava numa linha do OUTRO ambiente, mostrava "Ainda não há conversa" e, ao enviar, nascia uma
+// 2ª conversa sem o histórico. Aqui usa findConvoForLead (jid → últimos 8 dígitos, varre tudo).
+app.get('/api/leads/:id/conversation', authenticateToken, async (req, res) => {
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [req.params.id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    const convo = await findConvoForLead(lead);
+    res.json(convo || null);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/leads/:id/open-conversation', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
