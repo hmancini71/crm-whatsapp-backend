@@ -2096,6 +2096,32 @@ app.delete('/api/leads/:id/payment-proof', authenticateToken, async (req, res) =
 });
 
 // 9d. Leads Routes: Find or create a conversation for a lead (open chat from lead modal)
+// ENCERRAR ATENDIMENTO (pedido do Henry, 2026-07-05 — vale p/ cards do pré E do pós): exige o
+// motivo de declínio/cancelamento, move o card p/ "Lead declinou/cancelado" DE FORMA ENCERRADA
+// (archived=1 — sai do board; fica em Leads→Arquivados) e ARQUIVA a conversa do WhatsApp.
+// Reabertura: já coberta pela regra existente do messages.upsert — lead declinado ARQUIVADO que
+// manda nova mensagem é restaurado na coluna "Novo Leads" do PRÉ, a conversa desarquiva e TODO o
+// histórico de mensagens permanece (nada é apagado); motivo/encerramento ficam no lead_history.
+app.post('/api/leads/:id/close-service', authenticateToken, async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'Informe o motivo do declínio/cancelamento.' });
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    await runQuery(
+      "UPDATE leads SET stage = 'declinado', decline_reason = ?, pos_stage = NULL, bridge = 0, priority = '', lastClientReply = NULL, archived = 1 WHERE id = ?",
+      [reason, id]
+    );
+    try {
+      const convo = await findConvoForLead(lead);
+      if (convo) await runQuery("UPDATE conversations SET archived = 1, unread = 0 WHERE id = ?", [convo.id]);
+    } catch (e) {}
+    try { logLeadHistory({ leadId: id, phone: lead.phone, name: lead.name, type: 'movimentacao', detail: 'Atendimento ENCERRADO — Lead declinou/cancelado. Motivo: ' + reason, meta: { to: 'declinado', motivo: reason, encerrado: 1 } }); } catch (e) {}
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Localiza a conversa de um lead SEM filtro de ambiente (fix 2026-07-04, caso Sonia Silva):
 // o chat do card procurava na lista GET /conversations (filtrada por ambiente) — se o histórico
 // estava numa linha do OUTRO ambiente, mostrava "Ainda não há conversa" e, ao enviar, nascia uma
