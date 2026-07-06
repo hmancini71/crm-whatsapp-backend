@@ -495,6 +495,38 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: 'bridge_dir' = direção do selo da coluna-ponte (2026-07-05, pedido do Henry:
+  // a ÚLTIMA movimentação decide o "ASSUNTO PRÉ/PÓS-VENDA"). Gravado quando o card ENTRA na ponte:
+  // veio do board pós → 'pre'; veio do board pré → 'pos'. Vazio = cards antigos (selo derivado).
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'bridge_dir')) {
+      db.run("ALTER TABLE leads ADD COLUMN bridge_dir TEXT DEFAULT ''", (alterErr) => {
+        if (alterErr) console.error("Failed to add bridge_dir column to leads:", alterErr);
+      });
+    }
+  });
+
+  // Safe migration: 'bridge_subject' = SELO da coluna-ponte gravado na MOVIMENTAÇÃO (2026-07-05,
+  // regra do Henry: a ÚLTIMA movimentação define o assunto — pré moveu → 'pos'; pós moveu → 'pre').
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'bridge_subject')) {
+      db.run("ALTER TABLE leads ADD COLUMN bridge_subject TEXT DEFAULT ''", (alterErr) => {
+        if (alterErr) console.error("Failed to add bridge_subject column to leads:", alterErr);
+      });
+    }
+  });
+
+  // Safe migration: 'service_closed' = atendimento ENCERRADO pelo botão 🔚 (2026-07-05). O card
+  // fica VISÍVEL em "Lead declinou/cancelado"; se o cliente mandar nova mensagem, o whatsapp.js
+  // reabre o card em "Novo Leads" (pré) e zera a flag. Histórico de mensagens nunca é apagado.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'service_closed')) {
+      db.run("ALTER TABLE leads ADD COLUMN service_closed INTEGER DEFAULT 0", (alterErr) => {
+        if (alterErr) console.error("Failed to add service_closed column to leads:", alterErr);
+      });
+    }
+  });
+
   // Safe migration: colunas do pipeline que o usuário pode VER (pedido do Henry, 2026-07-02).
   // JSON array de ids de etapa; '' ou '[]' = SEM restrição (vê todas as colunas do ambiente).
   db.all("PRAGMA table_info(users)", (err, cols) => {

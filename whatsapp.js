@@ -642,6 +642,14 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
               [`%${cleanPhone.slice(-8)}%`]
             );
           }
+        } else if (Number(lead.service_closed) === 1) {
+          // ATENDIMENTO ENCERRADO (botão 🔚, 2026-07-05): cliente encerrado mandou NOVA mensagem →
+          // reabre o ciclo: o MESMO card (telefone é a chave) volta p/ "Novo Leads" do PRÉ, a flag
+          // zera e o motivo antigo é limpo (fica no lead_history). A conversa desarquiva no UPDATE
+          // acima e o histórico de mensagens está intacto.
+          console.log(`[WhatsApp ${id}] Encerrado "${lead.name}" voltou a falar → reaberto em Novo Leads.`);
+          await runQuery("UPDATE leads SET service_closed = 0, stage = 'novo', pos_stage = NULL, bridge = 0, decline_reason = NULL WHERE id = ?", [lead.id]);
+          try { await logHistory(lead.id, lead.phone, lead.name, 'movimentacao', 'Cliente voltou a falar após atendimento encerrado — reaberto em "Novo Leads"', { to: 'novo', reaberto: 1 }); } catch (e) {}
         } else {
           console.log(`[WhatsApp ${id}] Received message from existing lead: ${lead.name}`);
         }

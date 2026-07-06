@@ -605,7 +605,12 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       // SELO da coluna-ponte: a DIREÇÃO é dada pela ORIGEM do card. Lead pós (2030) que foi p/ a ponte
       // veio do ambiente PÓS → assunto p/ o PRÉ ('pre'); lead pré que foi p/ a ponte → assunto p/ o PÓS
       // ('pos'). Derivado aqui (não persistido): classifica todos automaticamente e some fora da ponte.
-      const bridgeSubject = (l) => leadIsPos(l, posSet, posDigits) ? 'pre' : 'pos';
+      // 2026-07-05 (regra do Henry): se a MOVIMENTAÇÃO gravou o assunto (leads.bridge_subject),
+      // ELE manda — a última movimentação vale sempre. A derivação pela linha é só fallback p/
+      // cards que entraram na ponte antes desta regra.
+      const bridgeSubject = (l) => (l.bridge_subject === 'pre' || l.bridge_subject === 'pos')
+        ? l.bridge_subject
+        : (leadIsPos(l, posSet, posDigits) ? 'pre' : 'pos');
       // LINHA RECLASSIFICADA (caso 3094→pós, 2026-07-02): a linha só define o ambiente enquanto o
       // lead ainda não foi TRABALHADO no pré. Se ele tem etapa pré ativa (tratamento/proposta/
       // followup/declinado) e nenhuma coluna pós, ele é do PRÉ — mesmo que a linha dele (account/
@@ -722,8 +727,13 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     // de origem — não grava o valor-ponte. Assim, ao SAIR da ponte (mover p/ qualquer outra coluna), o
     // bridge volta a 0 e o card some da ponte nos DOIS ambientes, retornando à sua coluna de origem.
     if (stage === 'clientes_antigos' || stage === 'clientes_antigos_pos') {
-      await runQuery("UPDATE leads SET bridge = 1 WHERE id = ?", [id]);
-      if (cur.bridge !== 1) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para a coluna-ponte (Comunicação Pré/Pós-Venda)', meta: { to: 'ponte' } });
+      // SELO da ponte pela ÚLTIMA MOVIMENTAÇÃO (regra do Henry, 2026-07-05): quem move do PRÉ
+      // marca "ASSUNTO PÓS-VENDA" ('pos'); quem move do PÓS marca "ASSUNTO PRÉ-VENDA" ('pre') —
+      // SEMPRE sobrescreve a tag anterior. Persistido em leads.bridge_subject.
+      let _subj = 'pos';
+      try { _subj = (await userIsPos(req)) ? 'pre' : 'pos'; } catch (e) {}
+      await runQuery("UPDATE leads SET bridge = 1, bridge_subject = ? WHERE id = ?", [_subj, id]);
+      if (cur.bridge !== 1 || cur.bridge_subject !== _subj) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para a coluna-ponte (Comunicação Pré/Pós-Venda) — assunto ' + (_subj === 'pre' ? 'PRÉ' : 'PÓS') + '-venda', meta: { to: 'ponte', assunto: _subj } });
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
     }
@@ -2097,11 +2107,11 @@ app.delete('/api/leads/:id/payment-proof', authenticateToken, async (req, res) =
 
 // 9d. Leads Routes: Find or create a conversation for a lead (open chat from lead modal)
 // ENCERRAR ATENDIMENTO (pedido do Henry, 2026-07-05 — vale p/ cards do pré E do pós): exige o
-// motivo de declínio/cancelamento, move o card p/ "Lead declinou/cancelado" DE FORMA ENCERRADA
-// (archived=1 — sai do board; fica em Leads→Arquivados) e ARQUIVA a conversa do WhatsApp.
-// Reabertura: já coberta pela regra existente do messages.upsert — lead declinado ARQUIVADO que
-// manda nova mensagem é restaurado na coluna "Novo Leads" do PRÉ, a conversa desarquiva e TODO o
-// histórico de mensagens permanece (nada é apagado); motivo/encerramento ficam no lead_history.
+// motivo de declínio/cancelamento, move o card p/ "Lead declinou/cancelado" com a marca
+// service_closed=1 (fica VISÍVEL na coluna — decisão do Henry) e ARQUIVA a conversa do WhatsApp.
+// Reabertura: no messages.upsert (whatsapp.js), lead com service_closed=1 que manda nova mensagem
+// volta à coluna "Novo Leads" do PRÉ; a conversa desarquiva sozinha ao receber mensagem e TODO o
+// histórico permanece (nada é apagado); motivo/encerramento ficam no lead_history.
 app.post('/api/leads/:id/close-service', authenticateToken, async (req, res) => {
   const id = String(req.params.id || '').trim();
   const reason = String((req.body && req.body.reason) || '').trim();
@@ -2110,7 +2120,7 @@ app.post('/api/leads/:id/close-service', authenticateToken, async (req, res) => 
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
     await runQuery(
-      "UPDATE leads SET stage = 'declinado', decline_reason = ?, pos_stage = NULL, bridge = 0, priority = '', lastClientReply = NULL, archived = 1 WHERE id = ?",
+      "UPDATE leads SET stage = 'declinado', decline_reason = ?, pos_stage = NULL, bridge = 0, priority = '', lastClientReply = NULL, service_closed = 1 WHERE id = ?",
       [reason, id]
     );
     try {
@@ -3229,6 +3239,10 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
       "INSERT INTO leads (id, name, company, phone, email, value, stage, pos_stage, bridge, source, account, owner, tags, createdAt, archived, priority, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, finalStage, posStage, bridgeVal, source || "Manual", account || "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify(safeTags), createdAt, 0, priority || "", recvNumber]
     );
+    // Criado DIRETO na ponte: grava o assunto pela regra da última movimentação (quem criou).
+    if (bridgeVal === 1) {
+      try { await runQuery("UPDATE leads SET bridge_subject = ? WHERE id = ?", [(await userIsPos(req)) ? 'pre' : 'pos', id]); } catch (e) {}
+    }
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.created', { ...lead, tags: safeTags });
     res.json({ ...lead, tags: safeTags, created: true });
