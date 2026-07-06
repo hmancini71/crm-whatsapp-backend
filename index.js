@@ -634,8 +634,12 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
         // convertida fica SEMPRE em "Venda convertida" no pré, mesmo depois de distribuída numa coluna do
         // pós — mover o card no pós só mexe em pos_stage (stage continua 'convertida'), então o card do pré
         // NÃO é alterado. ("Venda convertida" pré ↔ "Clientes concluídos" pós: cross-visíveis e independentes.)
+        // 'convertida' passa SEMPRE (fix 2026-07-06, caso JD Crawford): lead de linha PÓS (ex.:
+        // 3094) que virava "Venda convertida" era engolido pelo isPosByLine e SUMIA do pré —
+        // 'convertida' não está em WORKED_PRE. Venda convertida é cross-visível por regra: fica
+        // no pré E aparece no pós (Recém Contratados), independentemente da linha.
         parsedLeads = parsedLeads
-          .filter(l => (!isPosByLine(l) && (!hasPosStage(l) || l.stage === 'convertida')) || inBridge(l))
+          .filter(l => l.stage === 'convertida' || (!isPosByLine(l) && !hasPosStage(l)) || inBridge(l))
           .map(l => inBridge(l) ? Object.assign({}, l, { stage: 'clientes_antigos', bridge_subject: bridgeSubject(l) }) : l);
       }
     } catch (e) { /* em caso de falha, não filtra */ }
