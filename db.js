@@ -157,6 +157,17 @@ db.serialize(() => {
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_phone ON lead_history(phone)");
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_lead ON lead_history(lead_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_msgid ON lead_history(meta)");
+
+  // 5c. Calendly (2026-07-07): eventos já processados pela integração — evita retrabalho e
+  // detecta remarcação/cancelamento (ver calendly.js).
+  db.run(`CREATE TABLE IF NOT EXISTS calendly_events (
+    uuid TEXT PRIMARY KEY,
+    lead_id TEXT,
+    start_time TEXT,
+    status TEXT,
+    card_date TEXT,
+    updated_at INTEGER
+  )`);
   // Índices de performance (busca por conversa/lead/linha usados no dia a dia).
   db.run("CREATE INDEX IF NOT EXISTS idx_msgs_convo ON messages(conversationId)");
   db.run("CREATE INDEX IF NOT EXISTS idx_msgs_ts ON messages(timestamp)");

@@ -14,6 +14,7 @@ const nodemailer = require('nodemailer');
 const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
 const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
+const { getCalendlySettings, saveCalendlySettings, testCalendly, calendlySweep } = require('./calendly');
 const antiban = require('./antiban'); // governador anti-banimento (caps, warm-up, pacing, horário, variação)
 const {
   connectWhatsApp,
@@ -3546,6 +3547,44 @@ app.post('/api/ai/test', authenticateToken, async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
 
+// ===== CALENDLY (2026-07-07): configurações + teste + sincronização manual =====
+// O cliente agenda a Reunião de Validação no Calendly → o CRM preenche validation_date no card
+// e registra no histórico (ver calendly.js). Varredura automática a cada 5 min.
+app.get('/api/settings/calendly', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try {
+    const cfg = await getCalendlySettings();
+    // O token NUNCA volta cru para a interface — só o sinal de que existe.
+    res.json(Object.assign({}, cfg, { token: cfg.token ? '(configurado)' : '' }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/settings/calendly', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try {
+    const cur = await getCalendlySettings();
+    const b = req.body || {};
+    // token só é sobrescrito se vier NÃO-VAZIO (mesma proteção da chave Gemini contra autofill).
+    if (b.token !== undefined && String(b.token).trim() !== '') cur.token = String(b.token).trim();
+    if (b.event_keyword !== undefined) cur.event_keyword = String(b.event_keyword).trim();
+    if (b.enabled !== undefined) cur.enabled = !!b.enabled;
+    await saveCalendlySettings(cur);
+    res.json(cur);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/calendly/test', authenticateToken, async (req, res) => {
+  try {
+    const cfg = await getCalendlySettings();
+    const token = (req.body && String(req.body.token || '').trim()) || cfg.token;
+    const out = await testCalendly(token);
+    res.json(out);
+  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+app.post('/api/calendly/sync', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try { res.json(await calendlySweep(logLeadHistory)); }
+  catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
 // Dashboard: follow-ups automáticos (col 3-4) disparados por dia nos últimos 7 dias (fuso Brasília).
 app.get('/api/dashboard/followups-weekly', authenticateToken, async (req, res) => {
   try {
@@ -5027,4 +5066,7 @@ app.listen(PORT, async () => {
   // Regra 1.3b: auto-declínio dos que não responderam após os follow-ups (boot + a cada 30 min).
   setTimeout(() => { autoDeclineExhaustedFollowups().catch(() => {}); }, 3 * 60 * 1000);
   setInterval(() => { autoDeclineExhaustedFollowups().catch(() => {}); }, 30 * 60 * 1000);
+  // Calendly: reunião de validação agendada pelo cliente → data no card (boot + a cada 5 min).
+  setTimeout(() => { calendlySweep(logLeadHistory).catch((e) => console.error('[Calendly]', e.message)); }, 90 * 1000);
+  setInterval(() => { calendlySweep(logLeadHistory).catch((e) => console.error('[Calendly]', e.message)); }, 5 * 60 * 1000);
 });
