@@ -337,11 +337,18 @@ async function getFollowUpReply(convoId, leadName, tentativa) {
   if (!cfg.enabled || !cfg.fu_enabled || !cfg.gemini_key) return null;
   const contents = await buildContents(convoId, 20);
   if (!contents.length) return null;
-  const system = GUARDRAILS + '\n\n' + cfg.fu_instructions +
+  const system = GUARDRAILS +
+    // Regra fixa no código (2026-07-07, pedido do Henry): o follow-up JAMAIS dá informação
+    // técnica — houve caso real de a IA "explicar" taxa consular/SEVIS/reciprocidade (errado).
+    // O follow-up é SÓ retomada de contato; perguntas pendentes ficam para o consultor humano.
+    '\n\n[REGRA INVIOLÁVEL DO FOLLOW-UP — PRIORIDADE MÁXIMA, acima de qualquer instrução abaixo]\n' +
+    'Esta mensagem é APENAS uma retomada de contato com um cliente que parou de responder. É TERMINANTEMENTE PROIBIDO responder perguntas do cliente ou dar QUALQUER informação técnica: taxas (consular, SEVIS, reciprocidade ou qualquer outra), valores, vistos, tipos de visto, documentos, requisitos, prazos, agendamentos, processos ou procedimentos — mesmo que a última mensagem do cliente seja uma pergunta e mesmo que a resposta pareça simples ou óbvia. Você NÃO explica NADA. ' +
+    'Se houver uma pergunta pendente do cliente, NÃO a responda: diga apenas que um consultor especializado vai responder e pergunte se ele gostaria de retomar o atendimento. ' +
+    'Sua mensagem deve conter no máximo: saudação com o nome, menção gentil de que a conversa parou, e a pergunta se deseja continuar. Nada além disso.\n\n' + cfg.fu_instructions +
     '\n\nContexto: o lead chama-se "' + (leadName || 'desconhecido') + '". ' +
     'Esta é a tentativa de follow-up nº ' + (tentativa || 1) + '. ' +
     'Responda APENAS com o texto da mensagem (sem JSON, sem aspas, sem explicações). ' +
-    'Jamais cite preços, valores ou prazos (ver REGRAS INVIOLÁVEIS).';
+    'Jamais cite preços, valores, taxas ou prazos, e jamais responda perguntas técnicas (ver REGRAS INVIOLÁVEIS acima).';
   const txt = await callGemini(cfg, system, contents, false);
   const san = sanitizeAiReply(String(txt).trim().slice(0, 1200));
   // No follow-up, se a resposta cair no filtro (preço/@/link inventado), NÃO envia nada nesta rodada.
