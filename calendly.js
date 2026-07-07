@@ -14,8 +14,9 @@ const { runQuery, getRow, allRows } = require('./db');
 const DEFAULTS = {
   enabled: false,
   token: '',
-  // só eventos cujo NOME contenha esta palavra viram data de validação (regex, sem maiúsc/minúsc).
-  event_keyword: 'valida',
+  // só eventos cujo NOME case com esta regex (sem maiúsc/minúsc) viram data de validação.
+  // O evento real da conta chama-se "Reunião Vale Visto" — por isso o padrão aceita os dois nomes.
+  event_keyword: 'valida|vale visto',
   last_sync: 0,
   last_result: ''
 };
@@ -24,6 +25,8 @@ async function getCalendlySettings() {
   try {
     const row = await getRow("SELECT value FROM app_settings WHERE key = 'calendly_settings'");
     const cfg = row && row.value ? JSON.parse(row.value) : {};
+    // Migração: 'valida' era o padrão antigo e não casava com "Reunião Vale Visto" (0 eventos).
+    if (cfg.event_keyword === 'valida') cfg.event_keyword = DEFAULTS.event_keyword;
     return Object.assign({}, DEFAULTS, cfg);
   } catch (e) { return Object.assign({}, DEFAULTS); }
 }
