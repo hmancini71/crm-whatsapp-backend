@@ -2488,7 +2488,22 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
     // (newsletters/propaganda), Precedence bulk/list e Auto-Submitted. NUNCA esconde remetente que é
     // LEAD do CRM nem os domínios da casa (allowlist) — propaganda some da entrada, cliente não.
     const HDRS = ['x-spam-flag', 'list-unsubscribe', 'precedence', 'auto-submitted'];
-    const FETCH_OPTS = { envelope: true, internalDate: true, headers: HDRS };
+    // bodyStructure: p/ detectar ANEXOS sem baixar o e-mail (coluna 📎 da lista — Henry, 2026-07-06).
+    const FETCH_OPTS = { envelope: true, internalDate: true, headers: HDRS, bodyStructure: true };
+    // Nomes dos anexos a partir da estrutura MIME (disposition=attachment ou parte com filename).
+    const _attNames = (msg) => {
+      const names = [];
+      const walk = (node) => {
+        if (!node) return;
+        if (Array.isArray(node.childNodes)) node.childNodes.forEach(walk);
+        const disp = String(node.disposition || '').toLowerCase();
+        const fn = (node.dispositionParameters && node.dispositionParameters.filename)
+          || (node.parameters && node.parameters.name) || '';
+        if (disp === 'attachment' || (fn && disp !== 'inline')) names.push(String(fn || 'anexo'));
+      };
+      try { walk(msg.bodyStructure); } catch (e) {}
+      return names;
+    };
     let _known = new Set();
     try { (await allRows("SELECT DISTINCT LOWER(TRIM(email)) AS e FROM leads WHERE email IS NOT NULL AND TRIM(email) <> ''")).forEach(r => { if (r && r.e) _known.add(r.e); }); } catch (e) {}
     // Regras MANUAIS por domínio (botões 🚫/✅ da lista): 'ham' nunca filtra; 'spam' sempre filtra.
@@ -2525,7 +2540,8 @@ app.get('/api/email/messages', authenticateToken, async (req, res) => {
         fromAddress: f ? f.address : '',
         to: t ? (t.name || t.address) : '',
         toAddress: t ? t.address : '',
-        date: msg.internalDate || (msg.envelope && msg.envelope.date) || null
+        date: msg.internalDate || (msg.envelope && msg.envelope.date) || null,
+        attachments: _attNames(msg)
       });
     };
     // Lê os últimos e-mails de uma pasta (com busca TEXT do servidor quando há filtro digitado),
@@ -2630,7 +2646,16 @@ app.get('/api/email/message/:uid', authenticateToken, async (req, res) => {
           ccAddresses: (p.cc && p.cc.value) ? p.cc.value.map(v => v.address).filter(Boolean) : [],
           date: p.date || null,
           html: p.html || null,
-          text: p.text || ''
+          text: p.text || '',
+          // ANEXOS (Henry, 2026-07-06): metadados p/ a área de anexos do leitor. O download em si
+          // é servido por GET /api/email/attachment?uid=&box=&idx= (idx = posição nesta lista —
+          // MESMO parser/ordem do simpleParser, então o índice é estável).
+          attachments: (p.attachments || []).map((a, i) => ({
+            idx: i,
+            filename: a.filename || ('anexo-' + (i + 1)),
+            contentType: a.contentType || 'application/octet-stream',
+            size: a.size || (a.content ? a.content.length : 0)
+          }))
         };
       }
     } finally { lock.release(); }
@@ -2640,6 +2665,51 @@ app.get('/api/email/message/:uid', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error("IMAP read error:", err && err.message);
     res.status(500).json({ error: (err && err.message) || "Falha ao abrir e-mail" });
+  }
+});
+
+// 17c. Baixa/abre UM ANEXO do e-mail (Henry, 2026-07-06). Auth via header OU ?token= (necessário
+// p/ <a href> abrir/salvar direto do navegador, igual ao /media). ?dl=1 força download ("Salvar");
+// sem dl, Content-Disposition inline — PDF/imagem abrem numa aba nova ("Abrir").
+app.get('/api/email/attachment', async (req, res) => {
+  const token = (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]) || req.query.token;
+  if (!token) return res.status(401).json({ detail: "Não autenticado" });
+  try { jwt.verify(token, JWT_SECRET); }
+  catch (e) { return res.status(403).json({ detail: "Token inválido" }); }
+  try {
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    if (!acc) return res.status(400).json({ error: "Nenhum e-mail conectado" });
+    let ImapFlow, simpleParser;
+    try { ImapFlow = require('imapflow').ImapFlow; simpleParser = require('mailparser').simpleParser; }
+    catch (e) { return res.status(500).json({ error: "Bibliotecas de e-mail nao instaladas" }); }
+    const client = new ImapFlow({
+      host: acc.host, port: 993, secure: true,
+      auth: { user: acc.email, pass: acc.password },
+      logger: false, tls: { rejectUnauthorized: false }
+    });
+    await client.connect();
+    const _mbox = await resolveMailboxPath(client, req.query.box);
+    const lock = await client.getMailboxLock(_mbox);
+    let att = null;
+    try {
+      const msg = await client.fetchOne(String(req.query.uid || ''), { source: true }, { uid: true });
+      if (msg && msg.source) {
+        const p = await simpleParser(msg.source);
+        att = (p.attachments || [])[parseInt(req.query.idx, 10) || 0] || null;
+      }
+    } finally { lock.release(); }
+    try { await client.logout(); } catch (e) {}
+    if (!att || !att.content) return res.status(404).json({ error: "Anexo não encontrado" });
+    const fname = String(att.filename || 'anexo').replace(/[\r\n"]/g, '');
+    const ascii = fname.replace(/[^\x20-\x7E]/g, '_');
+    res.setHeader('Content-Type', att.contentType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', (req.query.dl ? 'attachment' : 'inline')
+      + '; filename="' + ascii + '"; filename*=UTF-8\'\'' + encodeURIComponent(fname));
+    res.setHeader('Content-Length', att.content.length);
+    res.end(att.content);
+  } catch (err) {
+    console.error("IMAP attachment error:", err && err.message);
+    res.status(500).json({ error: (err && err.message) || "Falha ao baixar o anexo" });
   }
 });
 
