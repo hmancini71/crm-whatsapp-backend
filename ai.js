@@ -4,6 +4,7 @@
 // - Follow-up nas colunas 2-3 do Tratamento inicial: texto gerado conforme instruções.
 // Configuração em app_settings (key 'ai_settings'), editável em Configurações.
 const https = require('https');
+const fs = require('fs');
 const { runQuery, getRow, allRows } = require('./db');
 
 const DEFAULTS = {
@@ -170,7 +171,16 @@ function callGemini(cfg, systemText, contents, jsonMode) {
     const model = cfg.model || DEFAULTS.model;
     const body = JSON.stringify({
       system_instruction: { parts: [{ text: systemText || '' }] },
-      contents: contents.map(c => ({ role: c.role, parts: [{ text: String(c.text || '').slice(0, 4000) }] })),
+      // Multimodal: além do texto, itens podem trazer áudio (c.audioB64/c.audioMime) — o Gemini
+      // OUVE mensagens de voz do cliente (inline_data). Ver buildContents.
+      contents: contents.map(c => {
+        const parts = [];
+        const t = String(c.text || '').slice(0, 4000);
+        if (t) parts.push({ text: t });
+        if (c.audioB64) parts.push({ inline_data: { mime_type: c.audioMime || 'audio/ogg', data: c.audioB64 } });
+        if (!parts.length) parts.push({ text: '…' });
+        return { role: c.role, parts };
+      }),
       generationConfig: Object.assign(
         // Temperatura baixa = mais fiel às instruções, menos "criatividade"/invenção
         // (ex.: deixar de inventar preços). Pode ser sobrescrita via cfg.temperature.
@@ -207,17 +217,41 @@ function callGemini(cfg, systemText, contents, jsonMode) {
   });
 }
 
-// Monta o histórico da conversa no formato do Gemini (últimas N mensagens, só texto).
+// Monta o histórico da conversa no formato do Gemini (últimas N mensagens).
+// MENSAGENS DE VOZ do cliente: o arquivo .ogg salvo em mediaPath é anexado em base64 para o
+// Gemini OUVIR e responder ao conteúdo (multimodal). Limites anti-custo: só os 3 áudios mais
+// recentes da janela e arquivos de até 8 MB; os demais continuam como etiqueta [audio].
 // O Gemini exige que a última mensagem seja sempre role:'user'; remove model-trailing.
 async function buildContents(convoId, limit) {
   const msgs = await allRows(
-    "SELECT `from`, text, type FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT ?",
+    "SELECT `from`, text, type, mediaPath FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT ?",
     [convoId, limit || 20]
   );
-  const contents = msgs.reverse().map(m => ({
-    role: m.from === 'me' ? 'model' : 'user',
-    text: (m.type && m.type !== 'text') ? ('[' + m.type + '] ' + (m.text || '')) : (m.text || '')
-  })).filter(c => c.text.trim());
+  // msgs está do MAIS RECENTE para o mais antigo: marca os 3 áudios mais novos do cliente p/ anexar.
+  let audiosLeft = 3;
+  msgs.forEach(m => {
+    if (audiosLeft > 0 && m.type === 'audio' && m.from !== 'me' && m.mediaPath) {
+      try {
+        const st = fs.statSync(m.mediaPath);
+        if (st.size > 0 && st.size <= 8 * 1024 * 1024) {
+          m._audioB64 = fs.readFileSync(m.mediaPath).toString('base64');
+          audiosLeft--;
+        }
+      } catch (e) { /* arquivo ausente → segue como etiqueta [audio] */ }
+    }
+  });
+  const contents = msgs.reverse().map(m => {
+    const item = {
+      role: m.from === 'me' ? 'model' : 'user',
+      text: (m.type && m.type !== 'text') ? ('[' + m.type + '] ' + (m.text || '')) : (m.text || '')
+    };
+    if (m._audioB64) {
+      item.audioB64 = m._audioB64;
+      item.audioMime = 'audio/ogg';
+      item.text = '[Mensagem de voz do cliente — OUÇA o áudio anexado e responda ao que ele disse]';
+    }
+    return item;
+  }).filter(c => c.text.trim() || c.audioB64);
   // Remove mensagens finais do tipo 'model' para garantir que a última seja 'user'
   while (contents.length && contents[contents.length - 1].role === 'model') contents.pop();
   return contents;
