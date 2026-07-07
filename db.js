@@ -169,6 +169,7 @@ db.serialize(() => {
     location TEXT,
     invitee_name TEXT,
     invitee_email TEXT,
+    qa_notes TEXT,
     updated_at INTEGER
   )`);
   // Migração (caso a tabela tenha nascido sem as colunas de link/convidado).
@@ -178,6 +179,7 @@ db.serialize(() => {
     if (!hasCe('location')) db.run("ALTER TABLE calendly_events ADD COLUMN location TEXT DEFAULT ''");
     if (!hasCe('invitee_name')) db.run("ALTER TABLE calendly_events ADD COLUMN invitee_name TEXT DEFAULT ''");
     if (!hasCe('invitee_email')) db.run("ALTER TABLE calendly_events ADD COLUMN invitee_email TEXT DEFAULT ''");
+    if (!hasCe('qa_notes')) db.run("ALTER TABLE calendly_events ADD COLUMN qa_notes TEXT DEFAULT ''");
   });
   // Índices de performance (busca por conversa/lead/linha usados no dia a dia).
   db.run("CREATE INDEX IF NOT EXISTS idx_msgs_convo ON messages(conversationId)");

@@ -147,12 +147,18 @@ async function calendlySweep(logLeadHistory) {
       const loc = ev.location || {};
       const meetLink = loc.join_url || (/^https?:\/\//i.test(String(loc.location || '')) ? loc.location : '') || '';
       const locTxt = meetLink || String(loc.location || '') || '';
+      // Respostas do formulário do Calendly (comentários que o cliente deixou ao agendar).
+      const qaNotes = (invitee && Array.isArray(invitee.questions_and_answers))
+        ? invitee.questions_and_answers
+            .filter(q => String(q.answer || '').trim())
+            .map(q => (q.question ? q.question + ': ' : '') + q.answer).join(' | ').slice(0, 600)
+        : '';
       if (!lead) {
         semLead++;
         await runQuery(
-          "INSERT INTO calendly_events (uuid, lead_id, start_time, status, card_date, location, invitee_name, invitee_email, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?) " +
-          "ON CONFLICT(uuid) DO UPDATE SET start_time = excluded.start_time, status = excluded.status, location = excluded.location, invitee_name = excluded.invitee_name, invitee_email = excluded.invitee_email, updated_at = excluded.updated_at",
-          [uuid, startIso, status, when, locTxt, invName, email, Date.now()]
+          "INSERT INTO calendly_events (uuid, lead_id, start_time, status, card_date, location, invitee_name, invitee_email, qa_notes, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(uuid) DO UPDATE SET start_time = excluded.start_time, status = excluded.status, location = excluded.location, invitee_name = excluded.invitee_name, invitee_email = excluded.invitee_email, qa_notes = excluded.qa_notes, updated_at = excluded.updated_at",
+          [uuid, startIso, status, when, locTxt, invName, email, qaNotes, Date.now()]
         );
         console.log('[Calendly] evento sem lead correspondente: ' + (invName || email || digits || uuid));
         continue;
@@ -186,9 +192,9 @@ async function calendlySweep(logLeadHistory) {
         updated++;
       }
       await runQuery(
-        "INSERT INTO calendly_events (uuid, lead_id, start_time, status, card_date, location, invitee_name, invitee_email, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT(uuid) DO UPDATE SET lead_id = excluded.lead_id, start_time = excluded.start_time, status = excluded.status, card_date = excluded.card_date, location = excluded.location, invitee_name = excluded.invitee_name, invitee_email = excluded.invitee_email, updated_at = excluded.updated_at",
-        [uuid, lead.id, startIso, status, when, locTxt, invName, email, Date.now()]
+        "INSERT INTO calendly_events (uuid, lead_id, start_time, status, card_date, location, invitee_name, invitee_email, qa_notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(uuid) DO UPDATE SET lead_id = excluded.lead_id, start_time = excluded.start_time, status = excluded.status, card_date = excluded.card_date, location = excluded.location, invitee_name = excluded.invitee_name, invitee_email = excluded.invitee_email, qa_notes = excluded.qa_notes, updated_at = excluded.updated_at",
+        [uuid, lead.id, startIso, status, when, locTxt, invName, email, qaNotes, Date.now()]
       );
     } catch (e) { console.error('[Calendly] erro no evento:', e.message); }
   }
