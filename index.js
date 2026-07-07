@@ -2713,6 +2713,62 @@ app.get('/api/email/attachment', async (req, res) => {
   }
 });
 
+// 17d. Baixa TODOS os anexos de um e-mail num ZIP (pedido do Henry, 2026-07-06). Token na query.
+// Depende do pacote 'archiver' (package.json) — instalado no npm install do deploy.
+app.get('/api/email/attachments-zip', async (req, res) => {
+  const token = (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]) || req.query.token;
+  if (!token) return res.status(401).json({ detail: "Não autenticado" });
+  try { jwt.verify(token, JWT_SECRET); }
+  catch (e) { return res.status(403).json({ detail: "Token inválido" }); }
+  try {
+    let archiver;
+    try { archiver = require('archiver'); }
+    catch (e) { return res.status(500).json({ error: "Pacote 'archiver' não instalado — publique o backend (npm install roda no deploy)." }); }
+    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+    if (!acc) return res.status(400).json({ error: "Nenhum e-mail conectado" });
+    let ImapFlow, simpleParser;
+    try { ImapFlow = require('imapflow').ImapFlow; simpleParser = require('mailparser').simpleParser; }
+    catch (e) { return res.status(500).json({ error: "Bibliotecas de e-mail nao instaladas" }); }
+    const client = new ImapFlow({
+      host: acc.host, port: 993, secure: true,
+      auth: { user: acc.email, pass: acc.password },
+      logger: false, tls: { rejectUnauthorized: false }
+    });
+    await client.connect();
+    const _mbox = await resolveMailboxPath(client, req.query.box);
+    const lock = await client.getMailboxLock(_mbox);
+    let atts = [], subj = 'email';
+    try {
+      const msg = await client.fetchOne(String(req.query.uid || ''), { source: true }, { uid: true });
+      if (msg && msg.source) {
+        const p = await simpleParser(msg.source);
+        subj = p.subject || 'email';
+        atts = (p.attachments || []).filter(a => a && a.content);
+      }
+    } finally { lock.release(); }
+    try { await client.logout(); } catch (e) {}
+    if (!atts.length) return res.status(404).json({ error: "Este e-mail não tem anexos" });
+    const zname = ('anexos_' + subj).replace(/[^\wÀ-ſ .\-]+/g, '_').trim().slice(0, 60) + '.zip';
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + zname.replace(/[^\x20-\x7E]/g, '_') + '"; filename*=UTF-8\'\'' + encodeURIComponent(zname));
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('error', () => { try { res.end(); } catch (e) {} });
+    archive.pipe(res);
+    const used = {};
+    atts.forEach((a, i) => {
+      const base = String(a.filename || ('anexo-' + (i + 1))).replace(/[\/\\]/g, '_');
+      const n = (used[base] = (used[base] || 0) + 1);
+      let name = base;
+      if (n > 1) { const dot = base.lastIndexOf('.'); name = dot > 0 ? base.slice(0, dot) + ' (' + (n - 1) + ')' + base.slice(dot) : base + ' (' + (n - 1) + ')'; }
+      archive.append(a.content, { name: name });
+    });
+    await archive.finalize();
+  } catch (err) {
+    console.error("IMAP zip error:", err && err.message);
+    if (!res.headersSent) res.status(500).json({ error: (err && err.message) || "Falha ao gerar o ZIP" });
+  }
+});
+
 // 18. Email Routes: Send (reply/forward/compose) via SMTP
 app.post('/api/email/send', authenticateToken, async (req, res) => {
   const { to, cc, subject, text, html, attachments } = req.body;

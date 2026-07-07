@@ -20,6 +20,7 @@
     "qrcode": "^1.5.3",
     "sqlite3": "^5.1.7",
     "imapflow": "^1.0.164",
-    "mailparser": "^3.7.1"
+    "mailparser": "^3.7.1",
+    "archiver": "^7.0.1"
   }
 }
