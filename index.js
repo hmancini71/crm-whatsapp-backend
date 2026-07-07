@@ -3584,6 +3584,19 @@ app.post('/api/calendly/sync', authenticateToken, async (req, res) => {
   try { res.json(await calendlySweep(logLeadHistory)); }
   catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
+// Reuniões de validação ATIVAS (Calendly) — alimenta a caixinha do card Agendado e a agenda do
+// dia (perfil do Alexandre). Aberto a qualquer usuário logado (leitura, sem token do Calendly).
+app.get('/api/calendly/meetings', authenticateToken, async (req, res) => {
+  try {
+    const rows = await allRows(
+      "SELECT ce.uuid, ce.lead_id, ce.start_time, ce.card_date, ce.location, ce.invitee_name, ce.invitee_email, " +
+      "l.name AS lead_name, l.phone AS lead_phone " +
+      "FROM calendly_events ce LEFT JOIN leads l ON l.id = ce.lead_id " +
+      "WHERE ce.status = 'active' ORDER BY ce.start_time ASC", []
+    );
+    res.json(rows || []);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // Dashboard: follow-ups automáticos (col 3-4) disparados por dia nos últimos 7 dias (fuso Brasília).
 app.get('/api/dashboard/followups-weekly', authenticateToken, async (req, res) => {

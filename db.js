@@ -166,8 +166,19 @@ db.serialize(() => {
     start_time TEXT,
     status TEXT,
     card_date TEXT,
+    location TEXT,
+    invitee_name TEXT,
+    invitee_email TEXT,
     updated_at INTEGER
   )`);
+  // Migração (caso a tabela tenha nascido sem as colunas de link/convidado).
+  db.all("PRAGMA table_info(calendly_events)", (ceErr, ceCols) => {
+    if (ceErr || !Array.isArray(ceCols) || !ceCols.length) return;
+    const hasCe = (n) => ceCols.find(c => c.name === n);
+    if (!hasCe('location')) db.run("ALTER TABLE calendly_events ADD COLUMN location TEXT DEFAULT ''");
+    if (!hasCe('invitee_name')) db.run("ALTER TABLE calendly_events ADD COLUMN invitee_name TEXT DEFAULT ''");
+    if (!hasCe('invitee_email')) db.run("ALTER TABLE calendly_events ADD COLUMN invitee_email TEXT DEFAULT ''");
+  });
   // Índices de performance (busca por conversa/lead/linha usados no dia a dia).
   db.run("CREATE INDEX IF NOT EXISTS idx_msgs_convo ON messages(conversationId)");
   db.run("CREATE INDEX IF NOT EXISTS idx_msgs_ts ON messages(timestamp)");
