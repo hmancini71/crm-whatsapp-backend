@@ -561,6 +561,15 @@ db.serialize(() => {
         if (alterErr) console.error("Failed to add allowed_stages column to users:", alterErr);
       });
     }
+    // Agenda de validações do Calendly por PERFIL (pedido do Henry, 2026-07-07): 1 = o usuário vê
+    // o painel "Validações" no board pós. Na criação da coluna, liga 1x para o Alexandre (que já
+    // usava por nome); depois o controle é só pelo modal Usuários.
+    if (!err && cols && !cols.find(c => c.name === 'calendly_agenda')) {
+      db.run("ALTER TABLE users ADD COLUMN calendly_agenda INTEGER DEFAULT 0", (alterErr) => {
+        if (alterErr) console.error("Failed to add calendly_agenda column to users:", alterErr);
+        else db.run("UPDATE users SET calendly_agenda = 1 WHERE lower(name) LIKE '%alexandre%'");
+      });
+    }
   });
 
   // Safe migration: 'pos_stage' = coluna do pipeline PÓS-VENDA (ambiente do 2030). Independente do
