@@ -303,6 +303,8 @@ db.serialize(() => {
     if (!has('consulate_date')) db.run("ALTER TABLE leads ADD COLUMN consulate_date TEXT DEFAULT ''");
     if (!has('validation_date')) db.run("ALTER TABLE leads ADD COLUMN validation_date TEXT DEFAULT ''");
     if (!has('access_email')) db.run("ALTER TABLE leads ADD COLUMN access_email TEXT DEFAULT ''");
+    // Responsável pelo card (pedido do Henry, 2026-07-08): nome do PERFIL DE LOGIN, opcional.
+    if (!has('responsible')) db.run("ALTER TABLE leads ADD COLUMN responsible TEXT DEFAULT ''");
   });
   // (b) migração das colunas antigas (decisão do Henry: tudo → "Sem conta", exceto Finalizados →
   // "Concluído"). Idempotente: os ids antigos nunca voltam a existir.

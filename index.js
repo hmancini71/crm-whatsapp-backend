@@ -251,6 +251,15 @@ function requireAdmin(req, res) {
   return true;
 }
 
+// Nomes dos perfis (leve, SEM dados sensíveis) — alimenta a combo "Responsável" dos cards
+// (pedido do Henry, 2026-07-08). Qualquer usuário logado pode ler.
+app.get('/api/users/names', authenticateToken, async (req, res) => {
+  try {
+    const rows = await allRows("SELECT id, name FROM users ORDER BY name");
+    res.json(rows || []);
+  } catch (e) { res.status(500).json({ detail: String(e) }); }
+});
+
 app.get('/api/users', authenticateToken, async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
@@ -904,7 +913,7 @@ app.post('/api/leads/:id/history', authenticateToken, async (req, res) => {
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email } = req.body;
+  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email, responsible } = req.body;
   
   try {
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
@@ -961,6 +970,11 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
     if (decline_reason !== undefined) {
       updates.push("decline_reason = ?");
       params.push(decline_reason || null);
+    }
+    // 👤 Responsável pelo card (pedido do Henry, 2026-07-08): nome do perfil, opcional ('' limpa).
+    if (responsible !== undefined) {
+      updates.push("responsible = ?");
+      params.push(String(responsible || '').slice(0, 80));
     }
     if (sale_date !== undefined) {
       updates.push("sale_date = ?");
