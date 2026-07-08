@@ -3589,7 +3589,7 @@ app.post('/api/calendly/sync', authenticateToken, async (req, res) => {
 app.get('/api/calendly/meetings', authenticateToken, async (req, res) => {
   try {
     const rows = await allRows(
-      "SELECT ce.uuid, ce.lead_id, ce.start_time, ce.card_date, ce.location, ce.invitee_name, ce.invitee_email, ce.qa_notes, " +
+      "SELECT ce.uuid, ce.lead_id, ce.start_time, ce.card_date, ce.location, ce.invitee_name, ce.invitee_email, ce.qa_notes, ce.reschedule_url, " +
       "l.name AS lead_name, l.phone AS lead_phone, l.email AS lead_email, l.comments AS lead_comments " +
       "FROM calendly_events ce LEFT JOIN leads l ON l.id = ce.lead_id " +
       "WHERE ce.status = 'active' ORDER BY ce.start_time ASC", []

@@ -127,7 +127,8 @@ async function calendlySweep(logLeadHistory) {
       const status = ev.status; // 'active' | 'canceled'
       const startIso = ev.start_time;
       const row = await getRow("SELECT * FROM calendly_events WHERE uuid = ?", [uuid]);
-      if (row && row.status === status && row.start_time === startIso) continue; // nada mudou
+      // Pula se nada mudou — mas reprocessa 1x eventos antigos sem reschedule_url (backfill).
+      if (row && row.status === status && row.start_time === startIso && row.reschedule_url) continue;
       // Convidado (e-mail/telefone) — 1 por evento no fluxo da Vale Visto.
       let invitee = null;
       try {
@@ -150,6 +151,9 @@ async function calendlySweep(logLeadHistory) {
       const loc = ev.location || {};
       const meetLink = loc.join_url || (/^https?:\/\//i.test(String(loc.location || '')) ? loc.location : '') || '';
       const locTxt = meetLink || String(loc.location || '') || '';
+      // Link OFICIAL de remarcação do convidado (abre o calendário do Calendly com os horários
+      // disponíveis e pede o MOTIVO; o cliente é notificado e a varredura atualiza o card).
+      const reschedUrl = (invitee && invitee.reschedule_url) || '';
       // Respostas do formulário do Calendly (comentários que o cliente deixou ao agendar).
       const qaNotes = (invitee && Array.isArray(invitee.questions_and_answers))
         ? invitee.questions_and_answers
@@ -159,9 +163,9 @@ async function calendlySweep(logLeadHistory) {
       if (!lead) {
         semLead++;
         await runQuery(
-          "INSERT INTO calendly_events (uuid, lead_id, start_time, status, card_date, location, invitee_name, invitee_email, qa_notes, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?) " +
-          "ON CONFLICT(uuid) DO UPDATE SET start_time = excluded.start_time, status = excluded.status, location = excluded.location, invitee_name = excluded.invitee_name, invitee_email = excluded.invitee_email, qa_notes = excluded.qa_notes, updated_at = excluded.updated_at",
-          [uuid, startIso, status, when, locTxt, invName, email, qaNotes, Date.now()]
+          "INSERT INTO calendly_events (uuid, lead_id, start_time, status, card_date, location, invitee_name, invitee_email, qa_notes, reschedule_url, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(uuid) DO UPDATE SET start_time = excluded.start_time, status = excluded.status, location = excluded.location, invitee_name = excluded.invitee_name, invitee_email = excluded.invitee_email, qa_notes = excluded.qa_notes, reschedule_url = excluded.reschedule_url, updated_at = excluded.updated_at",
+          [uuid, startIso, status, when, locTxt, invName, email, qaNotes, reschedUrl, Date.now()]
         );
         console.log('[Calendly] evento sem lead correspondente: ' + (invName || email || digits || uuid));
         continue;
@@ -169,14 +173,17 @@ async function calendlySweep(logLeadHistory) {
       if (status === 'active') {
         await runQuery("UPDATE leads SET validation_date = ? WHERE id = ?", [when, lead.id]);
         const remarcada = !!(row && row.card_date && row.card_date !== when);
-        try {
-          await logLeadHistory({
-            leadId: lead.id, phone: lead.phone, name: lead.name, type: 'calendly',
-            detail: '📅 Reunião de Validação ' + (remarcada ? 'REMARCADA' : 'agendada') + ' via Calendly: ' + when +
-              (invName ? ' (convidado: ' + invName + ')' : ''),
-            meta: uuid
-          });
-        } catch (e) {}
+        // Log só quando é evento NOVO ou data MUDOU (o backfill do reschedule_url não loga de novo).
+        if (!row || remarcada || !row.card_date) {
+          try {
+            await logLeadHistory({
+              leadId: lead.id, phone: lead.phone, name: lead.name, type: 'calendly',
+              detail: '📅 Reunião de Validação ' + (remarcada ? 'REMARCADA' : 'agendada') + ' via Calendly: ' + when +
+                (invName ? ' (convidado: ' + invName + ')' : ''),
+              meta: uuid
+            });
+          } catch (e) {}
+        }
         updated++;
       } else if (status === 'canceled') {
         // Limpa a data do card apenas se ela ainda for a deste evento (não apaga data remarcada).
@@ -195,9 +202,9 @@ async function calendlySweep(logLeadHistory) {
         updated++;
       }
       await runQuery(
-        "INSERT INTO calendly_events (uuid, lead_id, start_time, status, card_date, location, invitee_name, invitee_email, qa_notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT(uuid) DO UPDATE SET lead_id = excluded.lead_id, start_time = excluded.start_time, status = excluded.status, card_date = excluded.card_date, location = excluded.location, invitee_name = excluded.invitee_name, invitee_email = excluded.invitee_email, qa_notes = excluded.qa_notes, updated_at = excluded.updated_at",
-        [uuid, lead.id, startIso, status, when, locTxt, invName, email, qaNotes, Date.now()]
+        "INSERT INTO calendly_events (uuid, lead_id, start_time, status, card_date, location, invitee_name, invitee_email, qa_notes, reschedule_url, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(uuid) DO UPDATE SET lead_id = excluded.lead_id, start_time = excluded.start_time, status = excluded.status, card_date = excluded.card_date, location = excluded.location, invitee_name = excluded.invitee_name, invitee_email = excluded.invitee_email, qa_notes = excluded.qa_notes, reschedule_url = excluded.reschedule_url, updated_at = excluded.updated_at",
+        [uuid, lead.id, startIso, status, when, locTxt, invName, email, qaNotes, reschedUrl, Date.now()]
       );
     } catch (e) { console.error('[Calendly] erro no evento:', e.message); }
   }
