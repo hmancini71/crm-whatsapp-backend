@@ -189,6 +189,9 @@ db.serialize(() => {
   db.run("CREATE INDEX IF NOT EXISTS idx_leads_jid ON leads(whatsapp_jid)");
   db.run("CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone)");
   db.run("CREATE INDEX IF NOT EXISTS idx_conv_account ON conversations(account)");
+  // Etapa 1 (2026-07-08): índices de performance para as queries mais comuns do Kanban/listagem de leads.
+  db.run("CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_leads_owner ON leads(owner)");
 
   // 6. WhatsApp Accounts Table
   db.run(`CREATE TABLE IF NOT EXISTS whatsapp_accounts (
@@ -400,6 +403,8 @@ db.serialize(() => {
       });
     }
   });
+  // Etapa 1 (2026-07-08): índice composto p/ a listagem principal (filtra por archived, ordena por createdAt).
+  db.run("CREATE INDEX IF NOT EXISTS idx_leads_archived_created ON leads(archived, createdAt DESC)");
 
   // Safe migration: add 'comments' column to leads if it doesn't exist yet
   db.all("PRAGMA table_info(leads)", (err, cols) => {
@@ -583,6 +588,8 @@ db.serialize(() => {
       });
     }
   });
+  // Etapa 1 (2026-07-08): índice p/ o pipeline pós-venda (coluna 'pos_stage' já confirmada acima).
+  db.run("CREATE INDEX IF NOT EXISTS idx_leads_pos_stage ON leads(pos_stage)");
 
   // Safe migration: 'bridge' = card na COLUNA-PONTE ("Comunicação com ambiente Pré/Pós-Venda"). É uma
   // flag dedicada (1/0) em vez de sobrescrever stage/pos_stage — assim o card preserva a coluna de

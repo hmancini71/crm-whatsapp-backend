@@ -5,6 +5,7 @@ process.env.TZ = 'America/Sao_Paulo';
 
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -65,6 +66,7 @@ const PORT = process.env.PORT || 5000;
 const JWT_SECRET = 'leadsdpi_secret_key_123!';
 
 app.use(cors());
+app.use(compression());
 app.use(bodyParser.json({ limit: '30mb' }));
 
 // Health check routes
@@ -126,9 +128,11 @@ app.post('/api/debug/fix-stages', async (req, res) => {
   }
 });
 
-// Log requests
+// Log requests (condicional: liga com DEBUG_HTTP=1 — evita logar toda requisição/polling em produção)
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  if (process.env.DEBUG_HTTP === '1') {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  }
   next();
 });
 

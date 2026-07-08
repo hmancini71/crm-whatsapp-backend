@@ -392,18 +392,18 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
   // Handle incoming messages
   sock.ev.on('messages.upsert', async (m) => {
     try {
-      console.log(`[WhatsApp ${id}] messages.upsert event received, type: ${m.type}, count: ${m.messages ? m.messages.length : 0}`);
+      if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] messages.upsert event received, type: ${m.type}, count: ${m.messages ? m.messages.length : 0}`);
       if (m.type !== 'notify') return;
 
       for (const msg of m.messages) {
-        console.log(`[WhatsApp ${id}] Processing message:`, JSON.stringify(msg));
+        if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] Processing message: id=${msg.key && msg.key.id}, from=${msg.key && msg.key.remoteJid}`);
         // Mensagem enviada por nós (pelo CRM OU pelo celular). Antes era descartada;
         // agora gravamos como mensagem de saída para o chat mostrar os dois lados.
         const isMine = !!msg.key.fromMe;
 
         const fromJid = msg.key.remoteJid;
         if (!fromJid.endsWith('@s.whatsapp.net') && !fromJid.endsWith('@lid')) {
-          console.log(`[WhatsApp ${id}] Ignored message from JID: ${fromJid} (not a user)`);
+          if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] Ignored message from JID: ${fromJid} (not a user)`);
           continue; // ignore groups/broadcasts
         }
 
@@ -552,7 +552,7 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
         const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const name = (!isMine && msg.pushName) ? msg.pushName : (fromJid.endsWith('@lid') ? 'Usuário WhatsApp' : (phone || 'Usuário WhatsApp'));
 
-        console.log(`[WhatsApp ${id}] Message details: phone=${phone}, name=${name}, text="${text}"`);
+        if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] Message details: phone=${phone}, name=${name}, text="${text}"`);
 
         // Find or create conversation
         let convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? OR phone = ?", [fromJid, phone]);
@@ -560,7 +560,7 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
 
         if (convo) {
           convoId = convo.id;
-          console.log(`[WhatsApp ${id}] Existing conversation found: convoId=${convoId}`);
+          if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] Existing conversation found: convoId=${convoId}`);
           // Update conversation
           // Bolinha como no WhatsApp Web: conta SÓ mensagens do cliente e ZERA quando NÓS
           // respondemos (qualquer mensagem nossa = conversa "lida"). Cliente → +1; nós → 0.
@@ -571,7 +571,7 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
         } else {
           // Generate new conversation id
           convoId = 'c_' + Math.random().toString(36).substr(2, 9);
-          console.log(`[WhatsApp ${id}] No conversation found. Creating new one with convoId=${convoId}`);
+          if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] No conversation found. Creating new one with convoId=${convoId}`);
           const avatar = name.slice(0, 2).toUpperCase();
           await runQuery(
             "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -581,7 +581,7 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
 
         // Add message
         const msgId = incomingMsgId;
-        console.log(`[WhatsApp ${id}] Saving message to DB: msgId=${msgId}, convoId=${convoId}, type=${incomingType}`);
+        if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] Saving message to DB: msgId=${msgId}, convoId=${convoId}, type=${incomingType}`);
         await runQuery(
           "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
           [msgId, convoId, isMine ? 'me' : 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath, isMine ? sockNumber(sock) : null]
@@ -651,7 +651,7 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
           await runQuery("UPDATE leads SET service_closed = 0, stage = 'novo', pos_stage = NULL, bridge = 0, decline_reason = NULL WHERE id = ?", [lead.id]);
           try { await logHistory(lead.id, lead.phone, lead.name, 'movimentacao', 'Cliente voltou a falar após atendimento encerrado — reaberto em "Novo Leads"', { to: 'novo', reaberto: 1 }); } catch (e) {}
         } else {
-          console.log(`[WhatsApp ${id}] Received message from existing lead: ${lead.name}`);
+          if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] Received message from existing lead: ${lead.name}`);
         }
         // Foto de perfil do contato (não-bloqueante; reusa por 7 dias)
         fetchAndStoreAvatar(sock, fromJid).catch(() => {});
