@@ -221,12 +221,13 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   // wa_type define o AMBIENTE do login: 'pos' (Alexandre → só 2030/pós-venda) vs pré/ambos.
   // allowed_stages: colunas do pipeline que este usuário pode VER ([] = todas do ambiente).
-  let wa_type = 'ambos', allowed_stages = [], calendly_agenda = 0;
+  let wa_type = 'ambos', allowed_stages = [], calendly_agenda = 0, nav_tabs = [];
   try {
-    const u = await getRow("SELECT wa_type, allowed_stages, calendly_agenda FROM users WHERE id = ?", [req.user.sub]);
+    const u = await getRow("SELECT wa_type, allowed_stages, calendly_agenda, nav_tabs FROM users WHERE id = ?", [req.user.sub]);
     if (u && u.wa_type) wa_type = u.wa_type;
     if (u && u.allowed_stages) { try { const a = JSON.parse(u.allowed_stages); if (Array.isArray(a)) allowed_stages = a; } catch (e) {} }
     if (u) calendly_agenda = Number(u.calendly_agenda) ? 1 : 0;
+    if (u && u.nav_tabs) { try { const n = JSON.parse(u.nav_tabs); if (Array.isArray(n)) nav_tabs = n; } catch (e) {} }
   } catch (e) {}
   res.json({
     id: req.user.sub,
@@ -236,7 +237,8 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     avatar: req.user.avatar,
     wa_type,
     allowed_stages,
-    calendly_agenda
+    calendly_agenda,
+    nav_tabs
   });
 });
 
@@ -252,11 +254,12 @@ function requireAdmin(req, res) {
 app.get('/api/users', authenticateToken, async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const users = await allRows("SELECT id, name, email, role, avatar, wa_type, allowed_stages, calendly_agenda FROM users ORDER BY name");
+    const users = await allRows("SELECT id, name, email, role, avatar, wa_type, allowed_stages, calendly_agenda, nav_tabs FROM users ORDER BY name");
     res.json(users.map(u => {
-      let a = [];
+      let a = [], n = [];
       if (u.allowed_stages) { try { const p = JSON.parse(u.allowed_stages); if (Array.isArray(p)) a = p; } catch (e) {} }
-      return Object.assign({}, u, { allowed_stages: a });
+      if (u.nav_tabs) { try { const p = JSON.parse(u.nav_tabs); if (Array.isArray(p)) n = p; } catch (e) {} }
+      return Object.assign({}, u, { allowed_stages: a, nav_tabs: n });
     }));
   } catch (e) { res.status(500).json({ detail: String(e) }); }
 });
@@ -283,7 +286,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
 app.patch('/api/users/:id', authenticateToken, async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const { id } = req.params;
-  const { name, role, password, wa_type, allowed_stages, calendly_agenda } = req.body;
+  const { name, role, password, wa_type, allowed_stages, calendly_agenda, nav_tabs } = req.body;
   try {
     const u = await getRow("SELECT * FROM users WHERE id = ?", [id]);
     if (!u) return res.status(404).json({ detail: "Usuário não encontrado" });
@@ -301,6 +304,11 @@ app.patch('/api/users/:id', authenticateToken, async (req, res) => {
     }
     // Agenda de validações do Calendly no perfil (pedido do Henry, 2026-07-07): 0/1.
     if (calendly_agenda !== undefined) { updates.push("calendly_agenda = ?"); params.push(calendly_agenda ? 1 : 0); }
+    // Guias da barra lateral OCULTAS para este usuário (pedido do Henry, 2026-07-08).
+    if (nav_tabs !== undefined) {
+      const nv = Array.isArray(nav_tabs) ? nav_tabs.map(s => String(s)).filter(Boolean).slice(0, 12) : [];
+      updates.push("nav_tabs = ?"); params.push(nv.length ? JSON.stringify(nv) : '');
+    }
     if (password) { updates.push("password_hash = ?"); params.push(bcrypt.hashSync(String(password), 10)); }
     if (updates.length) { params.push(id); await runQuery("UPDATE users SET " + updates.join(", ") + " WHERE id = ?", params); }
     res.json({ ok: true });

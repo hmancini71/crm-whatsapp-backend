@@ -575,6 +575,14 @@ db.serialize(() => {
         else db.run("UPDATE users SET calendly_agenda = 1 WHERE lower(name) LIKE '%alexandre%'");
       });
     }
+    // Guias da barra lateral OCULTAS por usuário (pedido do Henry, 2026-07-08): JSON array de
+    // chaves ['whatsapp','email','meta','contratos','leads','dashboard','resultados','config'];
+    // '' ou '[]' = todas visíveis. Controlado no modal Usuários (botões por guia).
+    if (!err && cols && !cols.find(c => c.name === 'nav_tabs')) {
+      db.run("ALTER TABLE users ADD COLUMN nav_tabs TEXT DEFAULT ''", (alterErr) => {
+        if (alterErr) console.error("Failed to add nav_tabs column to users:", alterErr);
+      });
+    }
   });
 
   // Safe migration: 'pos_stage' = coluna do pipeline PÓS-VENDA (ambiente do 2030). Independente do
