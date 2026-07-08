@@ -1424,6 +1424,29 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
 });
 
 // 7. Conversations Routes: Get List (exclude archived leads' conversations)
+// Etapa 4 (perf): busca a ULTIMA mensagem de TODAS as conversas em 1 unica query agregada
+// (em vez de 1 query por conversa dentro de um loop). Usa o indice existente em
+// messages(conversationId, timestamp). Empate de timestamp na mesma conversa: desempata por
+// MAX(id), reproduzindo o comportamento pratico do antigo "ORDER BY timestamp DESC LIMIT 1".
+// Retorna um Map conversationId -> { id, from, text, time, type, timestamp } (mesmos campos
+// que o SELECT antigo devolvia para cada conversa).
+async function getLastMessagesMap() {
+  const rows = await allRows(
+    "SELECT m.id, m.conversationId, m.`from`, m.text, m.time, m.type, m.timestamp " +
+    "FROM messages m " +
+    "JOIN (SELECT conversationId, MAX(timestamp) AS mx FROM messages GROUP BY conversationId) g " +
+    "ON g.conversationId = m.conversationId AND g.mx = m.timestamp"
+  );
+  const map = new Map();
+  for (const r of rows) {
+    const existing = map.get(r.conversationId);
+    if (!existing || r.id > existing.id) {
+      map.set(r.conversationId, { id: r.id, from: r.from, text: r.text, time: r.time, type: r.type, timestamp: r.timestamp });
+    }
+  }
+  return map;
+}
+
 app.get('/api/conversations', authenticateToken, async (req, res) => {
   const { account } = req.query;
   try {
@@ -1475,19 +1498,13 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       }
     } catch (e) { /* em caso de falha, não filtra */ }
 
-    // Attach last message for each conversation
-    const detailedConvs = [];
-    for (const c of convs) {
-      const lastMsg = await getRow(
-        "SELECT id, \`from\`, text, time, type, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1",
-        [c.id]
-      );
-      detailedConvs.push({
-        ...c,
-        online: Boolean(c.online),
-        lastMessage: lastMsg || null
-      });
-    }
+    // Attach last message for each conversation (1 query agregada em vez de N — elimina o N+1)
+    const lastMsgMap = await getLastMessagesMap();
+    const detailedConvs = convs.map(c => ({
+      ...c,
+      online: Boolean(c.online),
+      lastMessage: lastMsgMap.get(c.id) || null
+    }));
 
     res.json(detailedConvs);
   } catch (err) {
@@ -3952,11 +3969,12 @@ app.get('/api/audit/awaiting-reply', authenticateToken, async (req, res) => {
     const numById = {}; const labelById = {};
     (accs || []).forEach(a => { numById[a.id] = a.number; labelById[a.id] = a.label; });
     const convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)");
+    const lastMsgMap = await getLastMessagesMap(); // 1 query agregada em vez de 1 por conversa — elimina o N+1
     const groups = {};
     for (const c of convs) {
       if (c.account === 'ig') continue;
       if (posSet.has(c.account)) continue; // pós/2030 fora
-      const last = await getRow("SELECT `from`, text, time, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [c.id]);
+      const last = lastMsgMap.get(c.id);
       if (!last || last.from !== 'them') continue; // só os que estão aguardando NOSSA resposta
       const ts = Number(last.timestamp) || 0; const ms = ts > 0 ? (ts < 1e12 ? ts * 1000 : ts) : Date.now();
       const key = c.account || 'sem_linha';
