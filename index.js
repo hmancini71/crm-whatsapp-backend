@@ -12,6 +12,7 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
+const multer = require('multer');
 const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
 const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
@@ -67,7 +68,25 @@ const JWT_SECRET = 'leadsdpi_secret_key_123!';
 
 app.use(cors());
 app.use(compression());
+// TODO: reduzir para 2mb quando o frontend FormData estiver publicado
 app.use(bodyParser.json({ limit: '30mb' }));
+
+// Upload multipart de mídia (áudio/foto/vídeo/documento) — achado 1.8: o caminho antigo mandava
+// o arquivo como base64 dentro do JSON (bodyParser 30mb), e o JSON.parse síncrono de ~20MB travava
+// o processo inteiro. Guarda em memória (os handlers já trabalham com Buffer, igual ao base64 antigo)
+// e limita a 16MB, mesmo teto já aplicado no caminho base64 de /media.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 16 * 1024 * 1024 } });
+// Envolve upload.single para responder JSON (e não a página de erro HTML padrão do Express) se o
+// multipart estourar o limite de tamanho ou vier malformado.
+function uploadSingle(field) {
+  const mw = upload.single(field);
+  return (req, res, next) => {
+    mw(req, res, (err) => {
+      if (err) return res.status(400).json({ error: (err && err.message) || 'Falha no upload do arquivo' });
+      next();
+    });
+  };
+}
 
 // Health check routes
 app.get('/', (req, res) => {
@@ -1141,76 +1160,103 @@ app.get('/api/dashboard/channel-leads', authenticateToken, async (req, res) => {
 });
 
 // 6b. Dashboard: contratos assinados por dia (e-mails "Contrato Assinado pelo Cliente:")
+// Achado 1.5: a varredura IMAP (até ~600 fetches sequenciais) rodava DENTRO da request; só havia
+// cache de 5 min sem lock (duas requests concorrentes com cache frio disparavam 2 varreduras).
+// Agora a varredura vira job de fundo (refreshSignedContracts), com guard _signedContractsRunning,
+// rodando no boot (+30s) e a cada 10 min. A rota NUNCA varre IMAP — responde sempre do cache
+// (stale-while-revalidate: cache expirado ainda é servido, e dispara um refresh em background;
+// sem cache ainda, devolve o mesmo formato zerado e dispara o refresh).
 let _signedCache = { key: '', ts: 0, data: null };
+let _signedContractsRunning = false;
+async function refreshSignedContracts(from, to) {
+  if (_signedContractsRunning) return;
+  _signedContractsRunning = true;
+  try {
+    // monta os dias do período (from/to; padrão 15 dias, fuso de São Paulo)
+    const days = daysRangeSP(from, to, 15);
+    const cacheKey = (from || '') + '|' + (to || '');
+    try {
+      const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+      let ImapFlow;
+      try { ImapFlow = require('imapflow').ImapFlow; } catch (e) { ImapFlow = null; }
+      if (acc && ImapFlow) {
+        const client = new ImapFlow({
+          host: acc.host, port: 993, secure: true,
+          auth: { user: acc.email, pass: acc.password }, logger: false, tls: { rejectUnauthorized: false }
+        });
+        await client.connect();
+        const lock = await client.getMailboxLock('INBOX');
+        try {
+          // Início do 1º dia do período (em UTC, com folga de 1 dia para o filtro IMAP SINCE).
+          const since = new Date(Date.parse(days[0].iso + 'T00:00:00Z') - 24 * 3600 * 1000);
+          // Conta "Contrato Assinado pelo Cliente:".
+          const matchSubj = (s) => s.includes('contrato assinado pelo cliente');
+          // Estratégia robusta: tenta SEARCH SINCE (todas as msgs do período);
+          // se falhar/vier vazio, faz fallback nas últimas 300 mensagens da caixa.
+          // Em ambos os casos, o que conta é o filtro de ASSUNTO + janela do período.
+          let iter = null;
+          try {
+            const uids = await client.search({ since }, { uid: true });
+            if (uids && uids.length) iter = client.fetch(uids, { envelope: true, internalDate: true }, { uid: true });
+          } catch (e) { iter = null; }
+          if (!iter) {
+            const total = (client.mailbox && client.mailbox.exists) || 0;
+            const start = Math.max(1, total - 299);
+            iter = client.fetch(start + ':*', { envelope: true, internalDate: true });
+          }
+          for await (const msg of iter) {
+            const subj = ((msg.envelope && msg.envelope.subject) || '').toLowerCase();
+            if (!matchSubj(subj)) continue;
+            const dt = msg.internalDate || (msg.envelope && msg.envelope.date);
+            if (!dt) continue;
+            const dd = new Date(dt);
+            if (dd < since) continue;
+            const iso = spDateISO(dd); // dia no fuso de São Paulo
+            const slot = days.find(x => x.iso === iso);
+            if (slot) slot.value++;
+          }
+        } finally { lock.release(); }
+        try { await client.logout(); } catch (e) {}
+      }
+    } catch (err) {
+      console.error('signed-contracts error:', err && err.message);
+    }
+    const payload = { days: days.map(d => ({ day: d.label, value: d.value })) };
+    _signedCache = { key: cacheKey, ts: Date.now(), data: payload };
+  } finally {
+    _signedContractsRunning = false;
+  }
+}
 app.get('/api/dashboard/signed-contracts', authenticateToken, async (req, res) => {
-  // monta os dias do período (from/to; padrão 15 dias, fuso de São Paulo)
-  const days = daysRangeSP(req.query.from, req.query.to, 15);
-  const cacheKey = (req.query.from || '') + '|' + (req.query.to || '');
-  // cache de 5 min POR período (IMAP é lento; o front consulta com frequência)
-  if (_signedCache.data && _signedCache.key === cacheKey && (Date.now() - _signedCache.ts < 5 * 60 * 1000)) {
+  const from = req.query.from, to = req.query.to;
+  const cacheKey = (from || '') + '|' + (to || '');
+  if (_signedCache.data && _signedCache.key === cacheKey) {
+    // cache de 5 min POR período (IMAP é lento; o front consulta com frequência); se expirou,
+    // responde com o que tem e dispara um refresh em background (não bloqueia a request).
+    if (Date.now() - _signedCache.ts >= 5 * 60 * 1000) refreshSignedContracts(from, to).catch(() => {});
     return res.json(_signedCache.data);
   }
-  try {
-    const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
-    let ImapFlow;
-    try { ImapFlow = require('imapflow').ImapFlow; } catch (e) { ImapFlow = null; }
-    if (acc && ImapFlow) {
-      const client = new ImapFlow({
-        host: acc.host, port: 993, secure: true,
-        auth: { user: acc.email, pass: acc.password }, logger: false, tls: { rejectUnauthorized: false }
-      });
-      await client.connect();
-      const lock = await client.getMailboxLock('INBOX');
-      try {
-        // Início do 1º dia do período (em UTC, com folga de 1 dia para o filtro IMAP SINCE).
-        const since = new Date(Date.parse(days[0].iso + 'T00:00:00Z') - 24 * 3600 * 1000);
-        // Conta "Contrato Assinado pelo Cliente:".
-        const matchSubj = (s) => s.includes('contrato assinado pelo cliente');
-        // Estratégia robusta: tenta SEARCH SINCE (todas as msgs do período);
-        // se falhar/vier vazio, faz fallback nas últimas 300 mensagens da caixa.
-        // Em ambos os casos, o que conta é o filtro de ASSUNTO + janela do período.
-        let iter = null;
-        try {
-          const uids = await client.search({ since }, { uid: true });
-          if (uids && uids.length) iter = client.fetch(uids, { envelope: true, internalDate: true }, { uid: true });
-        } catch (e) { iter = null; }
-        if (!iter) {
-          const total = (client.mailbox && client.mailbox.exists) || 0;
-          const start = Math.max(1, total - 299);
-          iter = client.fetch(start + ':*', { envelope: true, internalDate: true });
-        }
-        for await (const msg of iter) {
-          const subj = ((msg.envelope && msg.envelope.subject) || '').toLowerCase();
-          if (!matchSubj(subj)) continue;
-          const dt = msg.internalDate || (msg.envelope && msg.envelope.date);
-          if (!dt) continue;
-          const dd = new Date(dt);
-          if (dd < since) continue;
-          const iso = spDateISO(dd); // dia no fuso de São Paulo
-          const slot = days.find(x => x.iso === iso);
-          if (slot) slot.value++;
-        }
-      } finally { lock.release(); }
-      try { await client.logout(); } catch (e) {}
-    }
-  } catch (err) {
-    console.error('signed-contracts error:', err && err.message);
-  }
-  const payload = { days: days.map(d => ({ day: d.label, value: d.value })) };
-  _signedCache = { key: cacheKey, ts: Date.now(), data: payload };
-  res.json(payload);
+  // Ainda sem cache para este período específico (boot recente ou período fora do default
+  // pré-computado pelo job de fundo): devolve o formato zerado e dispara o refresh em background.
+  const emptyDays = daysRangeSP(from, to, 15).map(d => ({ day: d.label, value: 0 }));
+  refreshSignedContracts(from, to).catch(() => {});
+  res.json({ days: emptyDays });
 });
 
 // 6c. Clientes que ASSINARAM o contrato (assunto "Contrato Assinado pelo Cliente: NOME").
 // Varre a caixa (últimos 90 dias). De cada mensagem casada extrai (a) os e-mails do corpo/assunto e
 // (b) o NOME que vem após "Cliente:" no assunto. O front marca o card como "assinado" quando o e-mail
-// OU o nome do lead bate. Use ?debug=1 para ver os assuntos casados e o que foi extraído.
+// OU o nome do lead bate. Use ?debug=1 para ver os assuntos casados e o que foi extraído (segue
+// varrendo IMAP na hora, é uma chamada manual/de depuração, não o fluxo normal do dashboard).
+//
+// Achado 1.5: mesma ideia da rota acima — a varredura vira job de fundo (scanSignedEmails +
+// refreshSignedEmails), com guard _signedEmailsRunning, rodando no boot (+90s, escalonado em
+// relação ao job de contratos) e a cada 10 min. A rota normal só lê o cache.
 let _signedEmailsCache = { ts: 0, data: null };
-app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
-  const debug = req.query && (req.query.debug === '1' || req.query.debug === 'true');
-  if (!debug && _signedEmailsCache.data && (Date.now() - _signedEmailsCache.ts < 5 * 60 * 1000)) {
-    return res.json(_signedEmailsCache.data);
-  }
+let _signedEmailsRunning = false;
+// Faz a varredura IMAP completa (90 dias) + marca leads no banco. Não mexe no cache — quem decide
+// o que fazer com o resultado é o chamador (refreshSignedEmails grava no cache; debug só devolve).
+async function scanSignedEmails(debug) {
   const emails = new Set();
   const names = new Set();
   const dbg = [];
@@ -1334,20 +1380,47 @@ app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
   } catch (e) { console.error('signed-emails mark error:', e && e.message); }
 
   const payload = { emails: Array.from(emails), names: Array.from(names), marked };
-  if (debug) { payload.matched = dbg; payload.matchedCount = dbg.length; payload.scanOk = scanOk; return res.json(payload); }
-  if (scanOk) {
-    // Varredura OK: atualiza o cache (une com o último bom p/ nunca encolher por uma leitura parcial do IMAP).
-    if (_signedEmailsCache.data) {
-      const e = new Set([...(_signedEmailsCache.data.emails || []), ...payload.emails]);
-      const n = new Set([...(_signedEmailsCache.data.names || []), ...payload.names]);
-      payload.emails = Array.from(e); payload.names = Array.from(n);
+  return { payload, dbg, scanOk };
+}
+async function refreshSignedEmails() {
+  if (_signedEmailsRunning) return;
+  _signedEmailsRunning = true;
+  try {
+    const { payload, scanOk } = await scanSignedEmails(false);
+    if (scanOk) {
+      // Varredura OK: atualiza o cache (une com o último bom p/ nunca encolher por uma leitura parcial do IMAP).
+      if (_signedEmailsCache.data) {
+        const e = new Set([...(_signedEmailsCache.data.emails || []), ...payload.emails]);
+        const n = new Set([...(_signedEmailsCache.data.names || []), ...payload.names]);
+        payload.emails = Array.from(e); payload.names = Array.from(n);
+      }
+      _signedEmailsCache = { ts: Date.now(), data: payload };
     }
-    _signedEmailsCache = { ts: Date.now(), data: payload };
-    return res.json(payload);
+    // Varredura falhou (IMAP indisponível): mantém o último cache bom (não grava lista vazia).
+  } finally {
+    _signedEmailsRunning = false;
   }
-  // Varredura falhou (IMAP indisponível): devolve o último resultado bom, sem gravar lista vazia.
-  if (_signedEmailsCache.data) return res.json(_signedEmailsCache.data);
-  res.json(payload);
+}
+app.get('/api/dashboard/signed-emails', authenticateToken, async (req, res) => {
+  const debug = req.query && (req.query.debug === '1' || req.query.debug === 'true');
+  if (debug) {
+    // Chamada manual de depuração: varre a IMAP na hora e devolve os detalhes (não usa nem grava cache).
+    try {
+      const { payload, dbg, scanOk } = await scanSignedEmails(true);
+      payload.matched = dbg; payload.matchedCount = dbg.length; payload.scanOk = scanOk;
+      return res.json(payload);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+  if (_signedEmailsCache.data) {
+    // cache de 5 min; se expirou, responde com o que tem e dispara um refresh em background.
+    if (Date.now() - _signedEmailsCache.ts >= 5 * 60 * 1000) refreshSignedEmails().catch(() => {});
+    return res.json(_signedEmailsCache.data);
+  }
+  // Ainda sem cache (boot recente): devolve o formato vazio esperado pelo front e dispara o refresh.
+  refreshSignedEmails().catch(() => {});
+  res.json({ emails: [], names: [], marked: 0 });
 });
 
 // 7. Conversations Routes: Get List (exclude archived leads' conversations)
@@ -1737,17 +1810,17 @@ app.post('/api/leads/:leadId/start-conversation', authenticateToken, async (req,
   }
 });
 
-// 9b. Conversations Routes: Send Voice Note (audio, base64 in body)
-app.post('/api/conversations/:id/audio', authenticateToken, async (req, res) => {
+// 9b. Conversations Routes: Send Voice Note (multipart com fallback base64 no body — achado 1.8)
+app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file'), async (req, res) => {
   const { id } = req.params;
   const { audio, mimetype } = req.body;
-  if (!audio) return res.status(400).json({ error: "Áudio é obrigatório" });
+  if (!req.file && !audio) return res.status(400).json({ error: "Áudio é obrigatório" });
 
   try {
     const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
     if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
 
-    const buffer = Buffer.from(audio, 'base64');
+    const buffer = req.file ? req.file.buffer : Buffer.from(audio, 'base64');
     let accountId = convo.account;
     // Roteia pela linha do AMBIENTE do usuário — MESMA regra do envio de texto (fix 2026-07-04,
     // pedido do Henry: "tem que mandar mensagem e áudio independente se mudou ambiente ou
@@ -1794,15 +1867,15 @@ app.post('/api/conversations/:id/audio', authenticateToken, async (req, res) => 
   }
 });
 
-// 9b1b. Conversations Routes: enviar foto/vídeo/documento
-app.post('/api/conversations/:id/media', authenticateToken, async (req, res) => {
+// 9b1b. Conversations Routes: enviar foto/vídeo/documento (multipart com fallback base64 — achado 1.8)
+app.post('/api/conversations/:id/media', authenticateToken, uploadSingle('file'), async (req, res) => {
   const { id } = req.params;
   const { data, mimetype, fileName } = req.body || {};
-  if (!data) return res.status(400).json({ error: "Arquivo é obrigatório" });
+  if (!req.file && !data) return res.status(400).json({ error: "Arquivo é obrigatório" });
   try {
     const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
     if (!convo) return res.status(404).json({ error: "Conversa não encontrada" });
-    const buffer = Buffer.from(data, 'base64');
+    const buffer = req.file ? req.file.buffer : Buffer.from(data, 'base64');
     if (buffer.length > 16 * 1024 * 1024) return res.status(400).json({ error: "Arquivo acima de 16 MB" });
     let accountId = convo.account;
     // Mesma regra de roteamento por ambiente do texto/áudio (fix 2026-07-04) — ver rota /audio.
@@ -3409,7 +3482,7 @@ async function findConvoForLead(l) {
 }
 
 // Reconciliação do "controle de tempo" (bolinha) e da tag "Novo lead", baseada SEMPRE na
-// última mensagem real de cada conversa — é a fonte única da verdade. Roda no boot e a cada 60s,
+// última mensagem real de cada conversa — é a fonte única da verdade. Roda no boot e a cada 5 min
 // então o estado se autocorrige independentemente de a mensagem ter vindo pelo CRM, pelo celular
 // ou pela IA (não depende de o "casamento" por telefone ter acertado na hora do envio).
 //
@@ -3419,19 +3492,54 @@ async function findConvoForLead(l) {
 //  • Tag "Novo lead" (priority='novolead') é removida quando existe QUALQUER mensagem nossa de um
 //    HUMANO (from='me' E ai=0) na conversa — ou seja, alguém de fato atendeu. Mensagens da IA
 //    (ai=1) NÃO contam, então o card recém-transferido pela IA continua na 1ª coluna até o humano falar.
+//
+// Achado 1.6: antes, cada lead chamava findConvoForLead() (uma query LIKE fazendo table scan em
+// conversations POR LEAD) + guard de sobreposição inexistente + intervalo de 60s. Agora: 1 SELECT
+// de todas as conversas por passada, casamento em memória (Map por whatsapp_jid e por telefone
+// normalizado, mesma semântica de findConvoForLead — que continua intacta e em uso em outros
+// pontos), guard _reconcileRunning para nunca rodar duas passadas ao mesmo tempo, e intervalo de 5 min.
+let _reconcileRunning = false;
 async function reconcileReplyDots() {
+  if (_reconcileRunning) return;
+  _reconcileRunning = true;
   try {
     const leads = await allRows("SELECT id, whatsapp_jid, phone, priority, not_demand_ts FROM leads WHERE archived = 0");
+    // Carrega TODAS as conversas de uma vez (em vez de 1 query LIKE por lead) e monta índices em
+    // memória replicando a MESMA semântica de findConvoForLead(): match exato por whatsapp_jid,
+    // senão pelos últimos 8 dígitos do telefone (equivalente ao LIKE '%últimos8dígitos%' do SQL
+    // original, já que depois de tirar +, espaço, -, ( o telefone fica só com dígitos no final).
+    const convos = await allRows("SELECT id, phone, whatsapp_jid FROM conversations");
+    const convoByJid = new Map();
+    const convoByPhoneTail = new Map();
+    for (const c of convos) {
+      if (c.whatsapp_jid && !convoByJid.has(c.whatsapp_jid)) convoByJid.set(c.whatsapp_jid, c.id);
+      const digits = String(c.phone || '').replace(/\D/g, '');
+      if (digits.length >= 8) {
+        const tail = digits.slice(-8);
+        if (!convoByPhoneTail.has(tail)) convoByPhoneTail.set(tail, c.id);
+      }
+    }
+    const findConvoIdFast = (l) => {
+      if (l.whatsapp_jid && convoByJid.has(l.whatsapp_jid)) return convoByJid.get(l.whatsapp_jid);
+      if (l.phone) {
+        const p = String(l.phone).replace(/\D/g, '');
+        if (p.length >= 8) {
+          const tail = p.slice(-8);
+          if (convoByPhoneTail.has(tail)) return convoByPhoneTail.get(tail);
+        }
+      }
+      return null;
+    };
     for (const l of leads) {
-      const convo = await findConvoForLead(l);
-      if (!convo) continue;
-      const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convo.id]);
+      const convoId = findConvoIdFast(l);
+      if (!convoId) continue;
+      const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [convoId]);
       if (!last) continue;
 
       // last_client_ts: timestamp da última mensagem DO CLIENTE (persistente; usado para ordenar
       // todas as colunas por antiguidade da msg do cliente). Backfill/auto-correção contínua.
       try {
-        const lastThem = await getRow("SELECT MAX(timestamp) AS ts FROM messages WHERE conversationId = ? AND `from` = 'them'", [convo.id]);
+        const lastThem = await getRow("SELECT MAX(timestamp) AS ts FROM messages WHERE conversationId = ? AND `from` = 'them'", [convoId]);
         const lct = Number(lastThem && lastThem.ts) || 0;
         if (lct) await runQuery("UPDATE leads SET last_client_ts = ? WHERE id = ? AND COALESCE(last_client_ts,0) <> ?", [lct, l.id, lct]);
       } catch (e) {}
@@ -3448,16 +3556,18 @@ async function reconcileReplyDots() {
 
       // Limpa "Novo lead" se um humano já respondeu nesta conversa.
       if (l.priority === 'novolead') {
-        const human = await getRow("SELECT id FROM messages WHERE conversationId = ? AND `from` = 'me' AND COALESCE(ai,0) = 0 LIMIT 1", [convo.id]);
+        const human = await getRow("SELECT id FROM messages WHERE conversationId = ? AND `from` = 'me' AND COALESCE(ai,0) = 0 LIMIT 1", [convoId]);
         if (human) await runQuery("UPDATE leads SET priority = '' WHERE id = ? AND priority = 'novolead'", [l.id]);
       }
     }
   } catch (e) {
     console.error("reconcileReplyDots error:", e && e.message);
+  } finally {
+    _reconcileRunning = false;
   }
 }
-// Autocorreção contínua: a cada 60s (além da chamada no boot).
-setInterval(() => { reconcileReplyDots().catch(() => {}); }, 60 * 1000);
+// Autocorreção contínua: a cada 5 min (achado 1.6 — antes 60s; além da chamada no boot).
+setInterval(() => { reconcileReplyDots().catch(() => {}); }, 5 * 60 * 1000);
 
 // Coluna "Mensagens novas não classificadas" (Grupo Visto Americano — pedido do Henry 2026-07-04):
 // toda conversa NÃO LIDA numa linha do PÓS cujo contato não está em NENHUMA coluna do pós vira
@@ -5018,6 +5128,13 @@ app.listen(PORT, async () => {
     console.error("Error reconciling novo leads:", err);
   }
   setInterval(() => { reconcileNovoLeads().catch(() => {}); }, 15 * 60 * 1000);
+  // Achado 1.5: contratos/e-mails assinados (dashboard) — varredura IMAP agora é job de fundo,
+  // escalonado p/ não bater os dois no IMAP ao mesmo tempo (contratos +30s, e-mails +90s do boot),
+  // recorrente a cada 10 min. As rotas GET só leem o cache (ver refreshSignedContracts/refreshSignedEmails).
+  setTimeout(() => { refreshSignedContracts().catch(() => {}); }, 30 * 1000);
+  setInterval(() => { refreshSignedContracts().catch(() => {}); }, 10 * 60 * 1000);
+  setTimeout(() => { refreshSignedEmails().catch(() => {}); }, 90 * 1000);
+  setInterval(() => { refreshSignedEmails().catch(() => {}); }, 10 * 60 * 1000);
   // Dedup de leads fantasma (duplicatas sem telefone do mesmo nome) — no boot e a cada 30 min.
   try { await archiveGhostDuplicates(); } catch (e) { console.error('[dedup fantasma boot]', e && e.message); }
   setInterval(() => { archiveGhostDuplicates().catch(() => {}); }, 30 * 60 * 1000);
