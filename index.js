@@ -2575,6 +2575,29 @@ async function resolveMailboxPath(client, box) {
   } catch (e) { return 'INBOX'; }
 }
 
+// ===== 📝 RASCUNHOS de e-mail (pedido do Henry, 2026-07-08) =====
+// Compositor fechado com conteúdo salva aqui; a aba Rascunhos lista/reabre; enviar apaga.
+app.get('/api/email/drafts', authenticateToken, async (req, res) => {
+  try { res.json(await allRows("SELECT * FROM email_drafts ORDER BY updated_at DESC LIMIT 100")); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/email/drafts', authenticateToken, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const id = (b.id && String(b.id)) || ('d_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+    await runQuery(
+      "INSERT INTO email_drafts (id, to_addr, cc, subject, body, updated_at) VALUES (?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET to_addr = excluded.to_addr, cc = excluded.cc, subject = excluded.subject, body = excluded.body, updated_at = excluded.updated_at",
+      [id, String(b.to || '').slice(0, 500), String(b.cc || '').slice(0, 500), String(b.subject || '').slice(0, 500), String(b.body || '').slice(0, 100000), Date.now()]
+    );
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/email/drafts/:id', authenticateToken, async (req, res) => {
+  try { await runQuery("DELETE FROM email_drafts WHERE id = ?", [req.params.id]); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/email/messages', authenticateToken, async (req, res) => {
   try {
     const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");

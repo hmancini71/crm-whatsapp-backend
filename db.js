@@ -158,6 +158,17 @@ db.serialize(() => {
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_lead ON lead_history(lead_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_msgid ON lead_history(meta)");
 
+  // 5b-2. Rascunhos de e-mail (pedido do Henry, 2026-07-08): compositor fechado com conteúdo
+  // salva aqui; a aba 📝 Rascunhos lista e reabre para continuar/enviar.
+  db.run(`CREATE TABLE IF NOT EXISTS email_drafts (
+    id TEXT PRIMARY KEY,
+    to_addr TEXT,
+    cc TEXT,
+    subject TEXT,
+    body TEXT,
+    updated_at INTEGER
+  )`);
+
   // 5c. Calendly (2026-07-07): eventos já processados pela integração — evita retrabalho e
   // detecta remarcação/cancelamento (ver calendly.js).
   db.run(`CREATE TABLE IF NOT EXISTS calendly_events (
