@@ -1483,9 +1483,11 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
 
     // Filtra por LOGIN: PÓS-venda (Alexandre) vê SÓ conversas das linhas pós (2030);
     // pré/admin excluem as conversas das linhas pós. Nunca mascara — só mostra/oculta.
+    // ?all=1 (pedido do Henry, 2026-07-08): PULA o filtro de ambiente — usado pelo filtro por
+    // RESPONSÁVEL da Caixa WhatsApp, que precisa enxergar pré E pós juntos.
     try {
       const { posSet } = await getSaleLineFilter();
-      if (posSet.size) {
+      if (posSet.size && String(req.query.all) !== '1') {
         const isPos = await userIsPos(req);
         if (isPos) {
           // Pós: SÓ conversas cujo lead está NO PIPELINE pós (2030 + Vendas Concretizadas + Clientes
