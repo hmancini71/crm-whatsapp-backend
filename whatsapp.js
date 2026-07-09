@@ -152,6 +152,22 @@ function isWithinBusinessHours(cfg) {
   } catch (e) { return true; } // em dúvida, NÃO responde (considera dentro)
 }
 
+// 🎉 FERIADO de hoje (pedido do Henry, 2026-07-09): cfg.holidays = [{date, message}] onde date é
+// "DD/MM" (repete todo ano) ou "DD/MM/AAAA" (só naquele ano). No feriado, a mensagem pré-gravada
+// vale o dia INTEIRO (qualquer horário) e para os DOIS ambientes (pré e pós).
+function holidayToday(cfg) {
+  try {
+    const hs = Array.isArray(cfg && cfg.holidays) ? cfg.holidays : [];
+    if (!hs.length) return null;
+    const hoje = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date()); // "09/07/2026"
+    const diaMes = hoje.slice(0, 5); // "09/07"
+    return hs.find(h => {
+      const d = String((h && h.date) || '').trim();
+      return d === hoje || d === diaMes;
+    }) || null;
+  } catch (e) { return null; }
+}
+
 // Número (linha) NOSSA a partir do socket conectado — carimbado em cada mensagem que enviamos,
 // para o histórico saber de QUAL número saiu cada mensagem (imune a futuras trocas de linha).
 function sockNumber(sock) {
@@ -183,15 +199,27 @@ async function maybeAutoReply(sock, fromJid, convoId) {
     if (!row || !row.value) { console.log('[autoReply] sem config de horário salva'); return; }
     let cfg; try { cfg = JSON.parse(row.value); } catch (e) { console.log('[autoReply] config inválida'); return; }
     if (!cfg.autoReply) { console.log('[autoReply] auto-resposta DESLIGADA'); return; }
-    if (!cfg.message) { console.log('[autoReply] mensagem vazia'); return; }
-    if (isWithinBusinessHours(cfg)) { console.log('[autoReply] DENTRO do expediente, não responde'); return; }
-    // Sem cooldown: toda mensagem recebida fora do horário recebe a resposta.
-    await sock.sendMessage(fromJid, { text: cfg.message });
+    // 🎉 FERIADO: mensagem própria, o dia INTEIRO (ignora o expediente). Cooldown de 12h por
+    // conversa para não repetir a cada mensagem do cliente no mesmo dia.
+    const feriado = holidayToday(cfg);
+    const texto = feriado ? (String(feriado.message || '').trim() || cfg.message) : cfg.message;
+    if (!texto) { console.log('[autoReply] mensagem vazia'); return; }
+    if (!feriado && isWithinBusinessHours(cfg)) { console.log('[autoReply] DENTRO do expediente, não responde'); return; }
+    if (feriado) {
+      try {
+        const c = await getRow("SELECT last_autoreply FROM conversations WHERE id = ?", [convoId]);
+        if (c && Number(c.last_autoreply) && (Date.now() - Number(c.last_autoreply)) < 12 * 3600 * 1000) {
+          console.log('[autoReply] feriado: já respondida nas últimas 12h'); return;
+        }
+      } catch (e) {}
+    }
+    // Fora do horário comum: sem cooldown (toda mensagem recebe a resposta).
+    await sock.sendMessage(fromJid, { text: texto });
     const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
     const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
-    await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, our_number) VALUES (?, ?, ?, ?, ?, ?, ?)", [msgId, convoId, 'me', cfg.message, timeStr, Date.now(), sockNumber(sock)]);
+    await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, our_number) VALUES (?, ?, ?, ?, ?, ?, ?)", [msgId, convoId, 'me', texto, timeStr, Date.now(), sockNumber(sock)]);
     await runQuery("UPDATE conversations SET lastTime = ?, last_autoreply = ? WHERE id = ?", [timeStr, Date.now(), convoId]);
-    console.log(`[autoReply] mensagem fora do horário ENVIADA para ${fromJid}`);
+    console.log(`[autoReply] mensagem ${feriado ? 'de FERIADO' : 'fora do horário'} ENVIADA para ${fromJid}`);
   } catch (e) { console.error('[autoReply] erro:', e && e.message); }
 }
 
@@ -672,17 +700,31 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
         // (Tratamento inicial, Proposta enviada, Follow-up pagamento, Venda convertida,
         // Lead declinou/cancelado e Clientes antigos). NÃO vale para "Novo Leads" — esses são
         // atendidos pela IA (que já inclui o aviso de fora do horário quando conclui).
-        let _autoReplyOk = false;
+        let _autoReplyOk = false, _leadStageAuto = null;
         try {
           const _tail = (fromJid.split('@')[0] || '').replace(/\D/g, '').slice(-8);
           let _lead = await getRow("SELECT stage FROM leads WHERE archived = 0 AND whatsapp_jid = ? LIMIT 1", [fromJid]);
           if (!_lead && _tail.length >= 8) {
             _lead = await getRow("SELECT stage FROM leads WHERE archived = 0 AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", [`%${_tail}%`]);
           }
+          if (_lead) _leadStageAuto = _lead.stage || null;
           // JAMAIS automação para estágios terminais (Venda convertida / Declinou / Clientes antigos).
           if (_lead && _lead.stage && !['novo', 'convertida', 'declinado', 'clientes_antigos'].includes(_lead.stage)) _autoReplyOk = true;
         } catch (e) {}
-        if (_autoReplyOk && !(await isPosLine(id))) await maybeAutoReply(sock, fromJid, convoId); // 2030/pós: sem automação
+        // 🎉 FERIADO (pedido do Henry, 2026-07-09): a mensagem pré-gravada vale o dia todo e para
+        // os DOIS ambientes (pré E pós), inclusive clientes em estágios terminais. Só os "Novo
+        // Leads" ficam de fora (a IA os atende). Fora do feriado, regra original.
+        let _feriadoHoje = false;
+        try {
+          const _bhr = await getRow("SELECT value FROM app_settings WHERE key = 'business_hours'");
+          const _bhc = _bhr && _bhr.value ? JSON.parse(_bhr.value) : null;
+          _feriadoHoje = !!(_bhc && _bhc.autoReply && holidayToday(_bhc));
+        } catch (e) {}
+        if (_feriadoHoje) {
+          if (_leadStageAuto !== 'novo') await maybeAutoReply(sock, fromJid, convoId);
+        } else if (_autoReplyOk && !(await isPosLine(id))) {
+          await maybeAutoReply(sock, fromJid, convoId); // 2030/pós: sem automação fora de feriado
+        }
 
         // ===== IA (Gemini): 1ª interação nos leads em "Novo Leads" =====
         // Coleta dados do cliente conforme as instruções de Configurações; quando
