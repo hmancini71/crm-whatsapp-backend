@@ -630,6 +630,10 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       ...l,
       tags: l.tags ? JSON.parse(l.tags) : []
     }));
+    // ?all=1 (pipeline381): devolve os leads dos DOIS ambientes, SEM o filtro pré/pós abaixo —
+    // usado pelo filtro 👤 Responsável da guia WhatsApp p/ cruzar conversas com cards que podem
+    // estar no ambiente oposto (caso JD Crawford). Mesmo padrão do GET /conversations?all=1.
+    if (String(req.query.all || '') === '1') return res.json(parsedLeads);
     // Filtra por LOGIN (sem mascarar, sempre o número real):
     //  - PÓS (Alexandre): só leads do 2030 OU vendas convertidas; 'stage' é remapeado p/ pos_stage
     //    (assim o pipeline nativo coloca os cards nas colunas do pós-venda).
