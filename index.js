@@ -175,7 +175,7 @@ function authenticateToken(req, res, next) {
 
 // 1. Auth Route: Login
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, env } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: "Email e senha são obrigatórios" });
   }
@@ -190,12 +190,30 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: "Credenciais inválidas" });
     }
 
+    // AMBIENTE escolhido no login (pedido do Henry, 09/07/2026): combo Pré-venda/Pós-venda na
+    // tela de login. Valida contra o wa_type do usuário ('ambos' pode os dois; 'pre' só pré;
+    // 'pos' só pós). Se não permitido → 403 com aviso claro. Sem env no body (app antigo/API):
+    // cai no padrão do cadastro, como sempre foi. O ambiente vira claim 'env' do JWT e passa a
+    // decidir userIsPos() e o wa_type efetivo devolvido em /auth/me — o resto do sistema não muda.
+    let envSel = (env === 'pre' || env === 'pos') ? env : null;
+    const waT = String(user.wa_type || 'ambos');
+    if (envSel) {
+      const permitido = (waT === 'ambos') || (waT === envSel);
+      if (!permitido) {
+        const nomeAmb = envSel === 'pos' ? 'PÓS-venda' : 'PRÉ-venda';
+        return res.status(403).json({ error: "Sem acesso: seu usuário não está configurado para o ambiente " + nomeAmb + ". Fale com o administrador." });
+      }
+    } else {
+      envSel = (waT === 'pos') ? 'pos' : 'pre';
+    }
+
     const tokenPayload = {
       sub: user.id,
       email: user.email,
       name: user.name,
       role: user.role,
-      avatar: user.avatar
+      avatar: user.avatar,
+      env: envSel
     };
 
     const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
@@ -229,6 +247,10 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     if (u) calendly_agenda = Number(u.calendly_agenda) ? 1 : 0;
     if (u && u.nav_tabs) { try { const n = JSON.parse(u.nav_tabs); if (Array.isArray(n)) nav_tabs = n; } catch (e) {} }
   } catch (e) {}
+  // Ambiente escolhido no LOGIN (claim 'env' do JWT) vence o wa_type do cadastro: o frontend
+  // inteiro decide pré/pós por cu.wa_type === 'pos', então devolver o ambiente EFETIVO aqui
+  // faz tudo funcionar sem mudar mais nada. Usuário 'ambos' sem env no token segue 'ambos'.
+  if (req.user.env === 'pos' || req.user.env === 'pre') wa_type = req.user.env;
   res.json({
     id: req.user.sub,
     name: req.user.name,
@@ -1024,10 +1046,9 @@ const CORRECT_STAGES = [
 
 app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
   try {
-    // Fonte de verdade das colunas: o SERVIDOR decide pré/pós pelo wa_type do usuário logado.
-    let wa_type = 'ambos';
-    try { const u = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]); if (u && u.wa_type) wa_type = u.wa_type; } catch (e) {}
-    if (wa_type === 'pos') return res.json(POS_STAGES_FULL);
+    // Fonte de verdade das colunas: o SERVIDOR decide pré/pós pelo ambiente da sessão
+    // (claim 'env' do login, 09/07/2026) com fallback no wa_type do cadastro.
+    if (await userIsPos(req)) return res.json(POS_STAGES_FULL);
     let stages = await allRows("SELECT * FROM stages");
     // Self-healing: if stages don't match expected set (id OU título), fix them. Inclui o título p/
     // que renomear uma coluna no CORRECT_STAGES propague ao banco automaticamente no próximo GET.
@@ -2330,6 +2351,10 @@ async function getSaleLineFilter() {
 async function userIsPos(req) {
   try {
     if (!req.user || !req.user.sub) return false;
+    // Ambiente escolhido no LOGIN (claim 'env' do JWT, 09/07/2026) decide primeiro; tokens
+    // antigos (sem env) caem no wa_type do cadastro, como antes.
+    if (req.user.env === 'pos') return true;
+    if (req.user.env === 'pre') return false;
     const u = await getRow("SELECT wa_type FROM users WHERE id = ?", [req.user.sub]);
     return !!(u && String(u.wa_type) === 'pos');
   } catch (e) { return false; }
