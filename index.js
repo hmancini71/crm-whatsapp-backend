@@ -68,6 +68,17 @@ const JWT_SECRET = 'leadsdpi_secret_key_123!';
 
 app.use(cors());
 app.use(compression());
+
+// MICRO-CACHE do GET /api/leads (perf 2026-07-10): a rota faz SELECT * de TODOS os leads (1078
+// leads ~1,2MB) e refiltra em JS a cada chamada — o SPA refaz esse fetch em TODA entrada na guia
+// Pipeline, então cada clique pagava 0,9-1,5s de TTFB no servidor. Guarda o corpo JSON já pronto
+// por chave de ambiente ('pre'|'pos'|'all') por poucos segundos (TTL curto, não é cache de longo
+// prazo) e invalida explicitamente em qualquer rota que escreva em 'leads' — assim o board nunca
+// mostra dado velho após um card ser criado/movido/editado/arquivado.
+const LEADS_CACHE_TTL_MS = 4000;
+let _leadsCache = new Map();
+function bustLeadsCache() { _leadsCache.clear(); }
+
 // TODO: reduzir para 2mb quando o frontend FormData estiver publicado
 app.use(bodyParser.json({ limit: '30mb' }));
 
@@ -646,6 +657,17 @@ setInterval(refreshIgToken, 24 * 60 * 60 * 1000);
 // 3. Leads Routes: Get All (active only)
 app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
+    // Chave do micro-cache: calcula o ambiente (pós/pré) UMA vez aqui em cima — antes o userIsPos
+    // era chamado dentro do try do filtro (repetindo a consulta a cada request); agora é calculado
+    // uma única vez e reaproveitado tanto na chave do cache quanto no filtro abaixo.
+    const _isAllParam = String(req.query.all || '') === '1';
+    const isPos = await userIsPos(req);
+    const _cacheKey = _isAllParam ? 'all' : (isPos ? 'pos' : 'pre');
+    const _cached = _leadsCache.get(_cacheKey);
+    if (_cached && (Date.now() - _cached.t) < LEADS_CACHE_TTL_MS) {
+      res.type('application/json').send(_cached.body);
+      return;
+    }
     // Ordena por prioridade (followup no topo, depois urgente/vermelho, depois média/amarelo, depois sem), e por data.
     const leads = await allRows("SELECT * FROM leads WHERE archived = 0 ORDER BY CASE priority WHEN 'followup' THEN 1 WHEN 'urgente' THEN 2 WHEN 'media' THEN 3 ELSE 4 END, createdAt DESC");
     let parsedLeads = leads.map(l => ({
@@ -655,14 +677,19 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
     // ?all=1 (pipeline381): devolve os leads dos DOIS ambientes, SEM o filtro pré/pós abaixo —
     // usado pelo filtro 👤 Responsável da guia WhatsApp p/ cruzar conversas com cards que podem
     // estar no ambiente oposto (caso JD Crawford). Mesmo padrão do GET /conversations?all=1.
-    if (String(req.query.all || '') === '1') return res.json(parsedLeads);
+    if (_isAllParam) {
+      const _body = JSON.stringify(parsedLeads);
+      _leadsCache.set(_cacheKey, { t: Date.now(), body: _body });
+      res.type('application/json').send(_body);
+      return;
+    }
     // Filtra por LOGIN (sem mascarar, sempre o número real):
     //  - PÓS (Alexandre): só leads do 2030 OU vendas convertidas; 'stage' é remapeado p/ pos_stage
     //    (assim o pipeline nativo coloca os cards nas colunas do pós-venda).
     //  - PRÉ/admin: exclui os leads do 2030.
     try {
       const { posSet, posDigits } = await posLineInfo();
-      const isPos = await userIsPos(req);
+      // isPos já foi calculado acima (reaproveitado da chave do cache) — não chama userIsPos de novo.
       // COLUNA-PONTE: 'Comunicação com ambiente Pré/Pós-Venda'. Um lead está na ponte se foi colocado
       // nela por QUALQUER lado — stage='clientes_antigos' (pré) OU pos_stage='clientes_antigos_pos'
       // (pós). Quem está na ponte aparece nos DOIS ambientes, na coluna-ponte de cada board.
@@ -714,7 +741,9 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
           .map(l => inBridge(l) ? Object.assign({}, l, { stage: 'clientes_antigos', bridge_subject: bridgeSubject(l) }) : l);
       }
     } catch (e) { /* em caso de falha, não filtra */ }
-    res.json(parsedLeads);
+    const _body = JSON.stringify(parsedLeads);
+    _leadsCache.set(_cacheKey, { t: Date.now(), body: _body });
+    res.type('application/json').send(_body);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -742,6 +771,7 @@ app.patch('/api/leads/:id/archive', authenticateToken, async (req, res) => {
   }
   const { id } = req.params;
   try {
+    bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
 
@@ -764,6 +794,7 @@ app.patch('/api/leads/:id/archive', authenticateToken, async (req, res) => {
 app.patch('/api/leads/:id/restore', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
+    bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
 
@@ -796,6 +827,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
   }
 
   try {
+    bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
     const cur = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     if (!cur) return res.status(404).json({ error: "Lead não encontrado" });
     // COLUNA-PONTE: entrar nela (por qualquer board) marca a flag 'bridge' e PRESERVA o stage/pos_stage
@@ -940,8 +972,9 @@ app.post('/api/leads/:id/history', authenticateToken, async (req, res) => {
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email, responsible } = req.body;
-  
+
   try {
+    bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
 
@@ -1044,11 +1077,23 @@ const CORRECT_STAGES = [
   { id: "clientes_antigos", title: "Comunicação com ambiente Pós-Venda",  color: "#6366f1" }
 ];
 
+// CACHE do self-healing de /api/pipeline/stages (perf 2026-07-10): a cada clique em Pipeline o
+// front pedia esta rota, que fazia SELECT * FROM stages + comparação com CORRECT_STAGES (e às vezes
+// DELETE/INSERT) — um round-trip ao banco por clique, mesmo quando nada mudou. Guarda o resultado
+// final (mesmo array que a rota devolveria) por até 60s; o ramo pós (POS_STAGES_FULL) continua fora
+// do cache pois já é uma constante em memória, não toca no banco.
+let _stagesCheckedAt = 0;
+let _stagesCache = null;
+
 app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
   try {
     // Fonte de verdade das colunas: o SERVIDOR decide pré/pós pelo ambiente da sessão
     // (claim 'env' do login, 09/07/2026) com fallback no wa_type do cadastro.
     if (await userIsPos(req)) return res.json(POS_STAGES_FULL);
+    if (_stagesCache && (Date.now() - _stagesCheckedAt) < 60000) {
+      // Cache hit: dentro da janela de 60s, devolve exatamente o mesmo array sem tocar o banco.
+      return res.json(_stagesCache);
+    }
     let stages = await allRows("SELECT * FROM stages");
     // Self-healing: if stages don't match expected set (id OU título), fix them. Inclui o título p/
     // que renomear uma coluna no CORRECT_STAGES propague ao banco automaticamente no próximo GET.
@@ -1066,6 +1111,10 @@ app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
       await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
       stages = await allRows("SELECT * FROM stages");
     }
+    // Grava o resultado final no cache de 60s (perf 2026-07-10) — próxima chamada nesta janela
+    // devolve este mesmo array sem repetir o SELECT/self-healing.
+    _stagesCache = stages;
+    _stagesCheckedAt = Date.now();
     res.json(stages);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -3462,6 +3511,7 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
   const _hasEmail = /.+@.+\..+/.test(String(email || '').trim());
   if (!_hasPhone && !_hasEmail) return res.status(400).json({ error: "Informe telefone OU e-mail (todo lead precisa de pelo menos um)." });
   try {
+    bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
     // NUNCA DUPLICAR: se já existir um lead ATIVO com o mesmo telefone (últimos 8 dígitos) OU o mesmo
     // e-mail, devolve o existente em vez de criar outro card.
     const _last8 = String(phone || '').replace(/\D/g, '').slice(-8);
@@ -4932,6 +4982,9 @@ async function unifyDuplicateWhatsappCards() {
       if (sets.length) { vals.push(keep.id); await runQuery("UPDATE leads SET " + sets.join(', ') + " WHERE id = ?", vals); }
       gruposCorrigidos++;
     }
+    // Só derruba o micro-cache se algo REALMENTE mudou (evita limpar o cache a cada 30min à toa
+    // quando não há duplicata nova — a função roda em sweep periódico, não só sob demanda).
+    if (archived || gruposCorrigidos) bustLeadsCache();
     if (archived) console.log(`[unifica whatsapp] concluído: ${archived} card(s) unificado(s) em ${gruposCorrigidos} grupo(s) de mesmo número.`);
   } catch (e) { console.error('[unifica whatsapp]', e && e.message); }
 }

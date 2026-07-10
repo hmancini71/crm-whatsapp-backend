@@ -164,11 +164,34 @@ function saveAiSettings(cfg) {
   );
 }
 
-// Chamada REST ao Gemini (generateContent). contents: [{role:'user'|'model', text}]
-function callGemini(cfg, systemText, contents, jsonMode) {
+// FALLBACK DE MODELO GEMINI (10/07/2026): o Google descontinuou o modelo "gemini-2.5-flash"
+// configurado em produção — log real do pm2: "This model models/gemini-2.5-flash is no longer
+// available" — derrubando 100% das respostas da IA no WhatsApp. Em vez de depender de um único
+// nome de modelo fixo (sujeito a nova descontinuação futura pelo Google), a chamada tenta uma
+// LISTA de candidatos em ordem e MEMORIZA em memória do processo qual funcionou, evitando
+// reprocessar a lista a cada mensagem. Isto NÃO mexe na chave (gemini_key) nem nos prompts —
+// só na escolha de qual nome de modelo é enviado na URL da API. cfg.model (configurável em
+// Configurações) fica em segundo plano: se for um dos candidatos e ainda funcionar, ótimo; a
+// lista abaixo é a fonte de verdade para o fallback automático.
+const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-3-flash', 'gemini-2.5-flash'];
+let _geminiModelOk = null; // nome do último modelo que respondeu com sucesso (cache em memória do processo; reseta ao reiniciar)
+
+// Detecta se a falha é por causa do MODELO (descontinuado/indisponível) — só nesse caso o
+// fallback avança para o próximo candidato. Qualquer outro erro (429 rate-limit, 500, timeout
+// de rede, chave inválida etc.) NÃO avança o fallback: propaga na hora, preservando o
+// comportamento de erro que já existia antes desta mudança.
+function isModelUnavailableError(statusCode, errBody) {
+  if (statusCode === 404) return true;
+  const msg = (errBody && (errBody.message || errBody.status)) ? String(errBody.message || errBody.status) : '';
+  return /no longer available/i.test(msg) || /NOT_FOUND/i.test(msg);
+}
+
+// Faz UMA chamada REST ao Gemini (generateContent) para um modelo específico. Resolve com o
+// texto da resposta ou rejeita com um Error; quando a rejeição é por modelo indisponível, o
+// Error carrega `.modelIssue = true` para o orquestrador (callGemini, abaixo) decidir se tenta
+// o próximo candidato da lista.
+function callGeminiOnce(model, cfg, systemText, contents, jsonMode) {
   return new Promise((resolve, reject) => {
-    if (!cfg.gemini_key) return reject(new Error('Chave da API Gemini não configurada'));
-    const model = cfg.model || DEFAULTS.model;
     const body = JSON.stringify({
       system_instruction: { parts: [{ text: systemText || '' }] },
       // Multimodal: além do texto, itens podem trazer áudio (c.audioB64/c.audioMime) — o Gemini
@@ -203,7 +226,16 @@ function callGemini(cfg, systemText, contents, jsonMode) {
       res.on('end', () => {
         try {
           const j = JSON.parse(data);
-          if (j.error) return reject(new Error(j.error.message || 'Erro da API Gemini'));
+          if (j.error) {
+            const err = new Error(j.error.message || 'Erro da API Gemini');
+            err.modelIssue = isModelUnavailableError(res.statusCode, j.error);
+            return reject(err);
+          }
+          if (isModelUnavailableError(res.statusCode, null)) {
+            const err = new Error('Modelo indisponível (HTTP ' + res.statusCode + ')');
+            err.modelIssue = true;
+            return reject(err);
+          }
           const txt = j.candidates && j.candidates[0] && j.candidates[0].content &&
             j.candidates[0].content.parts && j.candidates[0].content.parts.map(p => p.text || '').join('');
           if (!txt) return reject(new Error('Resposta vazia do Gemini'));
@@ -215,6 +247,39 @@ function callGemini(cfg, systemText, contents, jsonMode) {
     req.on('timeout', () => { try { req.destroy(new Error('Timeout na API Gemini')); } catch (e) {} });
     req.write(body); req.end();
   });
+}
+
+// Chamada REST ao Gemini (generateContent). contents: [{role:'user'|'model', text}]
+// Orquestra o fallback de modelo (ver GEMINI_MODELS acima): usa primeiro o último modelo que
+// funcionou (_geminiModelOk) — caminho rápido, sem overhead na operação normal — e, se ele
+// falhar por estar indisponível, esquece a memorização e cai para os demais candidatos da
+// lista, em ordem, até um funcionar. Ao obter sucesso, memoriza o modelo e loga
+// '[IA] modelo ativo: <modelo>'. Erros que NÃO sejam de modelo (rate limit, rede, chave
+// inválida etc.) são propagados imediatamente — mesmo comportamento de erro de antes desta
+// mudança, mantendo o try/catch das rotas chamadoras intacto.
+async function callGemini(cfg, systemText, contents, jsonMode) {
+  if (!cfg.gemini_key) throw new Error('Chave da API Gemini não configurada');
+  const candidates = _geminiModelOk
+    ? [_geminiModelOk].concat(GEMINI_MODELS.filter(m => m !== _geminiModelOk))
+    : GEMINI_MODELS.slice();
+  let lastErr = null;
+  for (let i = 0; i < candidates.length; i++) {
+    const model = candidates[i];
+    try {
+      const txt = await callGeminiOnce(model, cfg, systemText, contents, jsonMode);
+      if (_geminiModelOk !== model) {
+        _geminiModelOk = model;
+        console.log('[IA] modelo ativo: ' + model);
+      }
+      return txt;
+    } catch (e) {
+      lastErr = e;
+      if (!e.modelIssue) throw e; // erro que não é de modelo → propaga na hora, não avança o fallback
+      if (_geminiModelOk === model) _geminiModelOk = null; // o modelo memorizado parou de funcionar
+      // modelo indisponível: tenta o próximo candidato da lista
+    }
+  }
+  throw lastErr || new Error('Nenhum modelo Gemini disponível');
 }
 
 // Monta o histórico da conversa no formato do Gemini (últimas N mensagens).
