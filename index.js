@@ -3081,14 +3081,91 @@ app.post('/api/leads/from-conversation', authenticateToken, async (req, res) => 
     const id = 'l_' + Math.random().toString(36).substr(2, 9);
     const createdAt = new Date().toISOString().slice(0, 10);
     const src = convo.account === 'ig' ? 'Instagram' : 'WhatsApp';
+    // Lead nascido de comentário no Instagram (não Direct puro) ganha a tag "comentário Meta" —
+    // identificado pela existência de ao menos 1 mensagem com id 'cmt_%' na conversa de origem.
+    let leadTags = [];
+    if (convo.account === 'ig') {
+      const cmtMsg = await getRow("SELECT id FROM messages WHERE conversationId = ? AND id LIKE 'cmt_%' LIMIT 1", [convo.id]);
+      if (cmtMsg) leadTags = ['comentário Meta'];
+    }
     await runQuery(
       "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, convo.name || (src + ' lead'), "", convo.phone || "", "", 0, "novo", src, convo.account || 'ig', "Henry Mancini", JSON.stringify([]), createdAt, 0, convo.whatsapp_jid || null]
+      [id, convo.name || (src + ' lead'), "", convo.phone || "", "", 0, "novo", src, convo.account || 'ig', "Henry Mancini", JSON.stringify(leadTags), createdAt, 0, convo.whatsapp_jid || null]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
-    res.json({ ...lead, tags: [], created: true });
+    res.json({ ...lead, tags: leadTags, created: true });
   } catch (err) {
     console.error("from-conversation error:", err && err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 19b-2. Leads Routes: Get the original Meta (Instagram) comment that originated a lead.
+// Busca a mensagem cmt_ mais antiga da conversa do lead e tenta trazer o comentário "ao vivo" via
+// Graph API (texto/autor/data/link da publicação); se a Graph falhar (comentário apagado, token
+// expirado, timeout), cai no texto gravado no banco (live:false). Cache em memória por lead id
+// (TTL 10 min) para não bater na Graph a cada clique no botão do frontend.
+const _metaCommentCache = new Map();
+const META_COMMENT_CACHE_TTL_MS = 10 * 60 * 1000;
+app.get('/api/leads/:id/meta-comment', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const cached = _metaCommentCache.get(id);
+    if (cached && (Date.now() - cached.t) < META_COMMENT_CACHE_TTL_MS) {
+      return res.json(cached.body);
+    }
+
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
+    if (!lead.whatsapp_jid || !String(lead.whatsapp_jid).startsWith('ig:')) {
+      return res.status(404).json({ error: "Lead não veio do Instagram" });
+    }
+
+    const convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ?", [lead.whatsapp_jid]);
+    if (!convo) return res.status(404).json({ error: "Lead não nasceu de comentário" });
+
+    const msg = await getRow("SELECT * FROM messages WHERE conversationId = ? AND id LIKE 'cmt_%' ORDER BY timestamp ASC LIMIT 1", [convo.id]);
+    if (!msg) return res.status(404).json({ error: "Lead não nasceu de comentário" });
+
+    const commentId = String(msg.id).slice(4); // remove prefixo 'cmt_'
+    const storedText = String(msg.text || '').replace(/^\[Coment[aá]rio\]\s*/, '');
+    let body = {
+      text: storedText,
+      username: convo.name || '',
+      timestamp: msg.timestamp || null,
+      permalink: null,
+      stored_text: storedText,
+      live: false
+    };
+
+    try {
+      const conn = await getRow("SELECT access_token FROM ig_connections ORDER BY connected_at DESC LIMIT 1");
+      if (conn && conn.access_token) {
+        const r = await fetch('https://graph.instagram.com/v21.0/' + encodeURIComponent(commentId) +
+          '?fields=text,username,timestamp,media{permalink}&access_token=' + encodeURIComponent(conn.access_token),
+          { signal: AbortSignal.timeout(6000) });
+        const d = await r.json().catch(() => ({}));
+        if (d && !d.error) {
+          body = {
+            text: d.text || storedText,
+            username: d.username || convo.name || '',
+            timestamp: d.timestamp || msg.timestamp || null,
+            permalink: (d.media && d.media.permalink) || null,
+            stored_text: storedText,
+            live: true
+          };
+        } else if (d && d.error) {
+          console.error('[Meta comment] erro Graph:', JSON.stringify(d.error));
+        }
+      }
+    } catch (e) {
+      console.error('[Meta comment] falha Graph:', e && e.message);
+    }
+
+    _metaCommentCache.set(id, { t: Date.now(), body });
+    res.json(body);
+  } catch (err) {
+    console.error("meta-comment error:", err && err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -5198,6 +5275,40 @@ async function backfillServiceTagOnce() {
   } catch (e) { console.error('[backfill tag serviço]', e && e.message); }
 }
 
+// PONTUAL (uma única vez, guardado por flag em app_settings): adiciona a tag "comentário Meta" aos
+// leads do Instagram (whatsapp_jid LIKE 'ig:%') cuja conversa de origem tenha ao menos 1 mensagem de
+// comentário (id LIKE 'cmt_%') — mesmo critério usado na criação de leads novos (from-conversation).
+// Idempotente: só adiciona quem ainda não tem a tag. Agendada ~20s após o boot p/ não competir com a
+// inicialização (flag meta_comment_tag_backfill_done impede repetir em deploys/restarts futuros).
+async function backfillMetaCommentTagOnce() {
+  try {
+    const FLAG = 'meta_comment_tag_backfill_done';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return; // já executou — não repete
+    const TAG = 'comentário Meta';
+    const rows = await allRows("SELECT id, tags, whatsapp_jid FROM leads WHERE whatsapp_jid LIKE 'ig:%'");
+    let n = 0;
+    for (const r of rows) {
+      const convo = await getRow("SELECT id FROM conversations WHERE whatsapp_jid = ?", [r.whatsapp_jid]);
+      if (!convo) continue;
+      const cmtMsg = await getRow("SELECT id FROM messages WHERE conversationId = ? AND id LIKE 'cmt_%' LIMIT 1", [convo.id]);
+      if (!cmtMsg) continue;
+      let t = [];
+      try { t = r.tags ? JSON.parse(r.tags) : []; } catch (e) { t = []; }
+      if (!Array.isArray(t)) t = [];
+      if (t.includes(TAG)) continue;
+      t.push(TAG);
+      await runQuery("UPDATE leads SET tags = ? WHERE id = ?", [JSON.stringify(t), r.id]);
+      n++;
+    }
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [FLAG, new Date().toISOString()]
+    );
+    console.log(`[backfill tag comentário Meta] aplicada "${TAG}" a ${n} lead(s) de comentário. Flag ${FLAG} marcada — não repete.`);
+  } catch (e) { console.error('[backfill tag comentário Meta]', e && e.message); }
+}
+
 // Define wa5 e wa6 como PÓS-VENDA por padrão (são celulares de pós-venda). Faz MERGE: só preenche o
 // tipo quando ainda não houver um definido para a linha — não sobrescreve o que o Henry já configurou.
 async function ensurePosVendaDefaults() {
@@ -5287,6 +5398,9 @@ app.listen(PORT, async () => {
   setInterval(() => { archiveGhostDuplicates().catch(() => {}); }, 30 * 60 * 1000);
   // PONTUAL: aplica a tag de serviço padrão aos leads sem tag (uma única vez; flag impede repetir).
   try { await backfillServiceTagOnce(); } catch (e) { console.error('[backfill tag serviço boot]', e && e.message); }
+  // PONTUAL: tag "comentário Meta" nos leads de Instagram nascidos de comentário (uma única vez;
+  // ~20s após o boot p/ não competir com a inicialização; flag impede repetir).
+  setTimeout(() => { backfillMetaCommentTagOnce().catch(() => {}); }, 20 * 1000);
   // wa5/wa6 = pós-venda por padrão (não sobrescreve configuração existente).
   try { await ensurePosVendaDefaults(); } catch (e) { console.error('[wa pós-venda boot]', e && e.message); }
   // PONTUAL: reconcilia duplicatas JÁ existentes de mesmo telefone (arquiva, mantendo a etapa mais avançada).
