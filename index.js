@@ -3086,7 +3086,7 @@ app.post('/api/leads/from-conversation', authenticateToken, async (req, res) => 
     let leadTags = [];
     if (convo.account === 'ig') {
       const cmtMsg = await getRow("SELECT id FROM messages WHERE conversationId = ? AND id LIKE 'cmt_%' LIMIT 1", [convo.id]);
-      if (cmtMsg) leadTags = ['comentário Meta'];
+      leadTags = cmtMsg ? ['comentário Meta'] : ['Meta'];
     }
     await runQuery(
       "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -5309,6 +5309,40 @@ async function backfillMetaCommentTagOnce() {
   } catch (e) { console.error('[backfill tag comentário Meta]', e && e.message); }
 }
 
+// PONTUAL (uma única vez, guardado por flag em app_settings): garante que TODO lead do Instagram
+// (whatsapp_jid LIKE 'ig:%') fique com uma das duas tags "Meta" — "comentário Meta" (nasceu de
+// comentário) ou "Meta" (Direct puro, sem comentário vinculado). Idempotente: pula quem já tem
+// qualquer uma das duas tags (inclusive os que o backfill v1 (comentário) já marcou). Agendada
+// ~25s após o boot, logo após backfillMetaCommentTagOnce (flag meta_direct_tag_backfill_done
+// impede repetir em deploys/restarts futuros).
+async function backfillMetaDirectTagOnce() {
+  try {
+    const FLAG = 'meta_direct_tag_backfill_done';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return; // já executou — não repete
+    const TAG_COMMENT = 'comentário Meta';
+    const TAG_DIRECT = 'Meta';
+    const rows = await allRows("SELECT id, tags, whatsapp_jid FROM leads WHERE whatsapp_jid LIKE 'ig:%'");
+    let n = 0;
+    for (const r of rows) {
+      let t = [];
+      try { t = r.tags ? JSON.parse(r.tags) : []; } catch (e) { t = []; }
+      if (!Array.isArray(t)) t = [];
+      if (t.includes(TAG_DIRECT) || t.includes(TAG_COMMENT)) continue;
+      const convo = await getRow("SELECT id FROM conversations WHERE whatsapp_jid = ?", [r.whatsapp_jid]);
+      const cmtMsg = convo ? await getRow("SELECT id FROM messages WHERE conversationId = ? AND id LIKE 'cmt_%' LIMIT 1", [convo.id]) : null;
+      if (cmtMsg) t.push(TAG_COMMENT); else t.push(TAG_DIRECT);
+      await runQuery("UPDATE leads SET tags = ? WHERE id = ?", [JSON.stringify(t), r.id]);
+      n++;
+    }
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [FLAG, new Date().toISOString()]
+    );
+    console.log(`[backfill tag Meta Direct] aplicada tag a ${n} lead(s) do Instagram sem tag Meta. Flag ${FLAG} marcada — não repete.`);
+  } catch (e) { console.error('[backfill tag Meta Direct]', e && e.message); }
+}
+
 // Define wa5 e wa6 como PÓS-VENDA por padrão (são celulares de pós-venda). Faz MERGE: só preenche o
 // tipo quando ainda não houver um definido para a linha — não sobrescreve o que o Henry já configurou.
 async function ensurePosVendaDefaults() {
@@ -5401,6 +5435,10 @@ app.listen(PORT, async () => {
   // PONTUAL: tag "comentário Meta" nos leads de Instagram nascidos de comentário (uma única vez;
   // ~20s após o boot p/ não competir com a inicialização; flag impede repetir).
   setTimeout(() => { backfillMetaCommentTagOnce().catch(() => {}); }, 20 * 1000);
+  // PONTUAL: garante tag "Meta" (Direct) ou "comentário Meta" a TODO lead do Instagram sem
+  // nenhuma das duas (uma única vez; ~25s após o boot, logo após o backfill de comentário; flag
+  // impede repetir).
+  setTimeout(() => { backfillMetaDirectTagOnce().catch(() => {}); }, 25 * 1000);
   // wa5/wa6 = pós-venda por padrão (não sobrescreve configuração existente).
   try { await ensurePosVendaDefaults(); } catch (e) { console.error('[wa pós-venda boot]', e && e.message); }
   // PONTUAL: reconcilia duplicatas JÁ existentes de mesmo telefone (arquiva, mantendo a etapa mais avançada).
