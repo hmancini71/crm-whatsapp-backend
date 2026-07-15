@@ -896,6 +896,17 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       // Registra o MOTIVO + a DATA DO FECHAMENTO no histórico (sobrevive ao recontato/reset).
       const hoje = new Date().toISOString().slice(0, 10);
       logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'cancelamento', detail: 'Cancelado/declinado em ' + hoje.split('-').reverse().join('/') + ' — motivo: ' + String(cur.decline_reason || '').trim() });
+      // FECHAMENTO AUTOMÁTICO ao ENTRAR em "Lead declinou/cancelado" por qualquer via (arrasto/combo)
+      // (decisão do Henry, 2026-07-15): replica o mesmo fechamento do botão "Encerrar atendimento"
+      // (POST /api/leads/:id/close-service, ~L2312) — service_closed=1, limpa lastClientReply/priority
+      // e ARQUIVA a conversa do WhatsApp. pos_stage/bridge já foram zerados acima. Reabertura: mesmo
+      // mecanismo do close-service (whatsapp.js ~673-680) — nova mensagem do cliente reabre em "Novo Leads".
+      try {
+        await runQuery("UPDATE leads SET service_closed = 1, lastClientReply = NULL, priority = '' WHERE id = ?", [id]);
+        const convo = await findConvoForLead(cur);
+        if (convo) await runQuery("UPDATE conversations SET archived = 1, unread = 0 WHERE id = ?", [convo.id]);
+      } catch (e) {}
+      logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Atendimento ENCERRADO automaticamente ao mover para "Lead declinou/cancelado"', meta: { to: 'declinado', encerrado: 1, auto: 1 } });
     }
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.stage_changed', { ...lead, tags: lead.tags ? JSON.parse(lead.tags) : [] });
@@ -5345,6 +5356,36 @@ async function backfillMetaDirectTagOnce() {
 
 // Define wa5 e wa6 como PÓS-VENDA por padrão (são celulares de pós-venda). Faz MERGE: só preenche o
 // tipo quando ainda não houver um definido para a linha — não sobrescreve o que o Henry já configurou.
+// PONTUAL (uma única vez, guardado por flag em app_settings): fecha o atendimento dos leads que JÁ
+// estavam em "Lead declinou/cancelado" ANTES da regra do passo 1 (fechamento automático ao ENTRAR
+// nessa coluna, PATCH /:id/stage ~L899) existir. Mesmo efeito do botão "Encerrar atendimento"
+// (~L2327): service_closed=1, limpa lastClientReply e ARQUIVA a conversa do WhatsApp (findConvoForLead
+// — mesmo matching usado nos dois pontos acima). Idempotente: só afeta leads com stage='declinado' e
+// service_closed <> 1 (flag declinado_close_backfill_done impede repetir em deploys/restarts futuros).
+// Agendada ~30s após o boot, logo após os backfills de tag Meta.
+async function backfillDeclinadoCloseOnce() {
+  try {
+    const FLAG = 'declinado_close_backfill_done';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return; // já executou — não repete
+    const rows = await allRows("SELECT * FROM leads WHERE stage = 'declinado' AND (service_closed IS NULL OR service_closed <> 1)");
+    let n = 0;
+    for (const r of rows) {
+      try {
+        await runQuery("UPDATE leads SET service_closed = 1, lastClientReply = NULL WHERE id = ?", [r.id]);
+        const convo = await findConvoForLead(r);
+        if (convo) await runQuery("UPDATE conversations SET archived = 1, unread = 0 WHERE id = ?", [convo.id]);
+        n++;
+      } catch (e) {}
+    }
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [FLAG, new Date().toISOString()]
+    );
+    console.log(`[backfill fechamento declinado] fechado(s) e arquivada(s) a conversa de ${n} lead(s) já em "Lead declinou/cancelado". Flag ${FLAG} marcada — não repete.`);
+  } catch (e) { console.error('[backfill fechamento declinado]', e && e.message); }
+}
+
 async function ensurePosVendaDefaults() {
   try {
     const row = await getRow("SELECT value FROM app_settings WHERE key = 'wa_sale_types'");
@@ -5439,6 +5480,10 @@ app.listen(PORT, async () => {
   // nenhuma das duas (uma única vez; ~25s após o boot, logo após o backfill de comentário; flag
   // impede repetir).
   setTimeout(() => { backfillMetaDirectTagOnce().catch(() => {}); }, 25 * 1000);
+  // PONTUAL: fecha o atendimento (service_closed=1) e arquiva a conversa dos leads que JÁ estavam em
+  // "Lead declinou/cancelado" antes do fechamento automático do passo 1 existir (uma única vez; ~30s
+  // após o boot, logo após os backfills de tag Meta; flag impede repetir).
+  setTimeout(() => { backfillDeclinadoCloseOnce().catch(() => {}); }, 30 * 1000);
   // wa5/wa6 = pós-venda por padrão (não sobrescreve configuração existente).
   try { await ensurePosVendaDefaults(); } catch (e) { console.error('[wa pós-venda boot]', e && e.message); }
   // PONTUAL: reconcilia duplicatas JÁ existentes de mesmo telefone (arquiva, mantendo a etapa mais avançada).
