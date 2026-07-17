@@ -85,38 +85,75 @@ async function fetchAndStoreAvatar(sock, jid) {
   } catch (e) { return false; }
 }
 
-// Transcode any browser-recorded audio (webm/ogg/mp4) into Opus/OGG for WhatsApp PTT
+// ---- Fila de transcodificação (achado 2026-07-17: OOM killer matando ffmpeg no Hetzner de
+// 4GB — vários áudios enviados ao mesmo tempo por vendedores diferentes rodavam vários ffmpeg
+// em paralelo e estouravam a memória, derrubando o backend e junto as sessões do WhatsApp,
+// ex.: a linha do Levi). Serializa as conversões (1 por vez) + timeout mata processo travado
+// + -threads 1 reduz o pico de RAM de cada conversão individual. ----
+const TRANSCODE_MAX_CONCURRENT = 1;
+const TRANSCODE_TIMEOUT_MS = 30000;
+const TRANSCODE_MAX_INPUT_BYTES = 20 * 1024 * 1024; // 20MB — guarda-costas, além do limite do multer (16MB)
+let _transcodeActive = 0;
+const _transcodeQueue = [];
+function _runTranscodeQueue() {
+  if (_transcodeActive >= TRANSCODE_MAX_CONCURRENT || !_transcodeQueue.length) return;
+  _transcodeActive++;
+  const job = _transcodeQueue.shift();
+  _transcodeToOpusOggRaw(job.inputBuffer).then(job.resolve, job.reject)
+    .finally(() => { _transcodeActive--; _runTranscodeQueue(); });
+}
 function transcodeToOpusOgg(inputBuffer) {
+  if (inputBuffer && inputBuffer.length > TRANSCODE_MAX_INPUT_BYTES) {
+    return Promise.reject(new Error('Áudio grande demais (' + Math.round(inputBuffer.length / 1024 / 1024) + 'MB) — não convertido para evitar sobrecarga do servidor.'));
+  }
+  return new Promise((resolve, reject) => {
+    _transcodeQueue.push({ inputBuffer, resolve, reject });
+    _runTranscodeQueue();
+  });
+}
+
+// Transcode any browser-recorded audio (webm/ogg/mp4) into Opus/OGG for WhatsApp PTT
+function _transcodeToOpusOggRaw(inputBuffer) {
   return new Promise((resolve, reject) => {
     const stamp = Date.now() + '_' + Math.random().toString(36).slice(2);
     const tmpIn = path.join(MEDIA_DIR, 'in_' + stamp);
     const tmpOut = path.join(MEDIA_DIR, 'out_' + stamp + '.ogg');
     try { fs.writeFileSync(tmpIn, inputBuffer); } catch (e) { return reject(e); }
-    ffmpeg(tmpIn)
+    let settled = false;
+    const cleanup = () => { try { fs.unlinkSync(tmpIn); } catch (e) {} try { fs.unlinkSync(tmpOut); } catch (e) {} };
+    const cmd = ffmpeg(tmpIn)
       .audioCodec('libopus')
       .audioBitrate('32k')
       .audioChannels(1)
       .audioFrequency(48000)
       // iOS/WA-Windows: sem estes flags o iPhone mostra "áudio não está mais disponível"
       // (Baileys #768). Receita do evolution-api: timestamps normalizados + sem metadata.
-      .outputOptions(['-avoid_negative_ts', 'make_zero', '-map_metadata', '-1'])
+      // -threads 1: evita que o ffmpeg use todos os núcleos (pico de RAM) num servidor pequeno.
+      .outputOptions(['-avoid_negative_ts', 'make_zero', '-map_metadata', '-1', '-threads', '1'])
       .format('ogg')
       .on('end', () => {
+        if (settled) return; settled = true;
         try {
           const buf = fs.readFileSync(tmpOut);
           resolve(buf);
         } catch (e) { reject(e); }
-        finally {
-          try { fs.unlinkSync(tmpIn); } catch (e) {}
-          try { fs.unlinkSync(tmpOut); } catch (e) {}
-        }
+        finally { cleanup(); }
       })
       .on('error', (err) => {
-        try { fs.unlinkSync(tmpIn); } catch (e) {}
-        try { fs.unlinkSync(tmpOut); } catch (e) {}
+        if (settled) return; settled = true;
+        cleanup();
         reject(err);
       })
       .save(tmpOut);
+    // Trava de segurança: se o ffmpeg travar num input corrompido, mata o processo em vez de
+    // deixá-lo consumindo memória indefinidamente.
+    const killTimer = setTimeout(() => {
+      if (settled) return; settled = true;
+      try { cmd.kill('SIGKILL'); } catch (e) {}
+      cleanup();
+      reject(new Error('Conversão de áudio excedeu o tempo limite (' + (TRANSCODE_TIMEOUT_MS / 1000) + 's).'));
+    }, TRANSCODE_TIMEOUT_MS);
+    cmd.on('end', () => clearTimeout(killTimer)).on('error', () => clearTimeout(killTimer));
   });
 }
 
