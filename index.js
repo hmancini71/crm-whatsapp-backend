@@ -3519,7 +3519,8 @@ app.post('/api/contracts/:id/cancel', authenticateToken, async (req, res) => {
 
 // 19e. Homologar/assinar contrato pela Vale Visto a partir do CRM (proxy → action=admin_sign). Só Admin.
 app.post('/api/contracts/:id/admin-sign', authenticateToken, async (req, res) => {
-  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
+  // 2026-07-18 (decisão do Henry, caso Levi): VENDEDOR PODE assinar/homologar contratos.
+  // O guard de 403 foi removido SÓ desta rota; criar/cancelar contrato segue admin-only.
   const id = String(req.params.id || '').trim();
   const adminSignature = (req.body && req.body.adminSignature) || '';
   if (!id || !adminSignature) return res.status(400).json({ error: 'ID e assinatura obrigatórios' });
