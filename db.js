@@ -21,6 +21,18 @@ db.run("PRAGMA busy_timeout = 5000");
 // backfill dos cards antigos (migração abaixo).
 const GOOGLE_ADS_FIRST_MSG = 'olá, vim do site e gostaria de informações sobre vistos/imigração.';
 function normMsg(s) { return String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' '); }
+// Normalização TOLERANTE para o matching regra × 1ª mensagem (fix 2026-07-21, caso Moussa):
+// o cliente escreve "Olá! Gostaria..." e a regra diz "Olá. Gostaria..." — pontuação e acento
+// NÃO podem decidir a origem. Remove acentos e troca tudo que não é letra/número por espaço,
+// então "olá!", "ola,", "olá." viram todos "ola" antes do startsWith. As regras salvas na
+// guia Identificação não mudam — só a comparação usa esta forma.
+function normMsgLoose(s) {
+  return String(s == null ? '' : s)
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')   // remove acentos (á→a, ç→c)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')                        // pontuação/emoji/símbolos → espaço
+    .replace(/\s+/g, ' ').trim();
+}
 
 // ── Regras de identificação CONFIGURÁVEIS (guia "Identificação" nas Configurações, 2026-07-21) ──
 // Cada regra: { message, source }. Se a 1ª mensagem do cliente COMEÇA com `message`
@@ -46,10 +58,10 @@ function sanitizeOriginRules(arr) {
 
 // Devolve a origem definida pela 1ª mensagem, ou null se nenhuma regra casar.
 function originFromFirstMsg(text) {
-  const t = normMsg(text);
+  const t = normMsgLoose(text);
   if (!t) return null;
   for (const r of ORIGIN_MSG_RULES) {
-    const p = normMsg(r.message);
+    const p = normMsgLoose(r.message);
     if (p && t.startsWith(p)) return r.source || 'Google Ads';
   }
   return null;
@@ -1064,6 +1076,16 @@ db.serialize(() => {
       reclassifyLeadsByFirstMsg().then((n) => {
         console.log(`Backfill Identificação v2: ${n} lead(s) reclassificados pelas regras da guia.`);
         db.run("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('src_google_ads_msg_backfill_v2', ?)", [new Date().toISOString()]);
+      });
+    });
+    // Backfill v3 (fix 2026-07-21, caso Moussa): o matching virou tolerante a pontuação/acentos
+    // (normMsgLoose) — reroda a reclassificação UMA vez para pegar leads antigos tipo
+    // "Olá! Gostaria..." que o v2 (comparação exata de pontuação) deixou passar.
+    db.get("SELECT value FROM app_settings WHERE key = 'src_google_ads_msg_backfill_v3'", (gErr, gRow) => {
+      if (gErr || gRow) return; // erro ao ler ou já rodou nesta base
+      reclassifyLeadsByFirstMsg().then((n) => {
+        console.log(`Backfill Identificação v3 (pontuação/acentos): ${n} lead(s) reclassificados.`);
+        db.run("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('src_google_ads_msg_backfill_v3', ?)", [new Date().toISOString()]);
       });
     });
   });
