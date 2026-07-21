@@ -4567,6 +4567,88 @@ app.post('/api/settings/optimal-point', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Ponto ótimo — META ADS (pedido do Henry, 2026-07-21): mesmo CONTRATO do
+// /dashboard/optimal-point, mas com cost = spend de meta_ads_daily e funil do canal 'meta'
+// (leadChannelCat). Mantém os NOMES de campos (leadsGA/convGA/ticket.ga) de propósito:
+// o front usa um renderizador único para os dois cards. ──
+app.get('/api/dashboard/optimal-point-meta', authenticateToken, async (req, res) => {
+  try {
+    const days = daysRangeSP(undefined, undefined, 30);
+    const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
+
+    const adsRows = await allRows(
+      "SELECT date, clicks, spend, results, impressions FROM meta_ads_daily WHERE date >= ? AND date <= ?",
+      [fromIso, toIso]
+    );
+    let cost = 0, clicks = 0, conversions = 0, impressions = 0, activeDays = 0;
+    adsRows.forEach(r => {
+      const c = Number(r.spend) || 0;
+      cost += c;
+      clicks += Number(r.clicks) || 0;
+      conversions += Number(r.results) || 0;
+      impressions += Number(r.impressions) || 0;
+      if (c > 0) activeDays++;
+    });
+    const cpc = clicks > 0 ? cost / clicks : 0;
+
+    const leadRows = await allRows(
+      "SELECT createdAt, tracking, source, stage, value FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'",
+      [fromIso, toIso]
+    );
+    let leadsGA = 0, convGA = 0;
+    const ticketGaVals = [];
+    const ticketAllVals = [];
+    leadRows.forEach(l => {
+      const cat = leadChannelCat(l);
+      const isConv = l.stage === 'convertida';
+      const val = Number(l.value) || 0;
+      if (cat === 'meta') {
+        leadsGA++;
+        if (isConv) {
+          convGA++;
+          if (val > 0) ticketGaVals.push(val);
+        }
+      }
+      if (isConv && val > 0) ticketAllVals.push(val);
+    });
+    const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+    const daysCount = days.length || 30;
+    res.json({
+      window: { from: fromIso, to: toIso, days: daysCount },
+      ads: { cost, clicks, conversions, impressions, cpc, activeDays, spendMonthly: cost * 30.4 / daysCount, clicksMonthly: clicks * 30.4 / daysCount },
+      funnel: { leadsGA, convGA, leadsGAMonthly: leadsGA * 30.4 / daysCount, c2qPct: clicks > 0 ? (leadsGA / clicks) * 100 : 0, closePct: leadsGA > 0 ? (convGA / leadsGA) * 100 : 0 },
+      ticket: { ga: avg(ticketGaVals), all: avg(ticketAllVals), n: convGA },
+      updated_at: new Date().toISOString()
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Settings: premissas do ponto ótimo do META (margem/teto próprios — saturação difere do Google).
+app.get('/api/settings/optimal-point-meta', authenticateToken, async (req, res) => {
+  try {
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'optimal_point_meta'");
+    if (row && row.value) {
+      try { return res.json(JSON.parse(row.value)); } catch (e) { return res.json({}); }
+    }
+    res.json({});
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/settings/optimal-point-meta', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
+  }
+  try {
+    const value = JSON.stringify(req.body || {});
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES ('optimal_point_meta', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [value]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // META ADS — gasto da conta por período (lê meta_ads_daily). Mesma estrutura do google-ads.
 app.get('/api/dashboard/meta-ads', authenticateToken, async (req, res) => {
   try {
