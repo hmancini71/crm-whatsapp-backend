@@ -4485,7 +4485,7 @@ app.get('/api/dashboard/google-ads-breakdown', authenticateToken, async (req, re
 // (crmRenderOptPoint): { window, ads, funnel, ticket, updated_at }.
 app.get('/api/dashboard/optimal-point', authenticateToken, async (req, res) => {
   try {
-    const days = daysRangeSP(undefined, undefined, 30);
+    const days = daysRangeSP(req.query.from, req.query.to, 30);
     const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
 
     const adsRows = await allRows(
@@ -4573,7 +4573,7 @@ app.post('/api/settings/optimal-point', authenticateToken, async (req, res) => {
 // o front usa um renderizador único para os dois cards. ──
 app.get('/api/dashboard/optimal-point-meta', authenticateToken, async (req, res) => {
   try {
-    const days = daysRangeSP(undefined, undefined, 30);
+    const days = daysRangeSP(req.query.from, req.query.to, 30);
     const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
 
     const adsRows = await allRows(
