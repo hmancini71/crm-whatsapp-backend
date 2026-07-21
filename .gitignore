@@ -2,3 +2,4 @@ node_modules/
 sessions/
 database.db
 .env
+index.js.bak-otimo
