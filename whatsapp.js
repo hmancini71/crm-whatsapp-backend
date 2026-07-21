@@ -10,7 +10,7 @@ const fs = require('fs');
 const QRCode = require('qrcode');
 const ffmpegPath = require('ffmpeg-static');
 const ffmpeg = require('fluent-ffmpeg');
-const { runQuery, getRow, allRows, isGoogleAdsFirstMsg } = require('./db');
+const { runQuery, getRow, allRows, isGoogleAdsFirstMsg, originFromFirstMsg } = require('./db');
 const { getNovoLeadReply, getAiSettings } = require('./ai');
 const antiban = require('./antiban'); // governador anti-banimento (caps, warm-up, pacing, humano)
 // ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
@@ -681,7 +681,8 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
           // Regra de origem: a 1ª mensagem (pré-preenchida pelo site, clique vindo de
           // anúncio do Google Ads) começa SEMPRE com a frase padrão → origem "Google Ads".
           // Qualquer outra abertura mantém o padrão "Venda".
-          const leadSource = isGoogleAdsFirstMsg(text) ? "Google Ads" : "Venda";
+          // Regras configuráveis da guia "Identificação" (Configurações): 1ª mensagem → origem.
+          const leadSource = originFromFirstMsg(text) || "Venda";
           console.log(`[WhatsApp ${id}] No lead found for ${phone}. Creating new lead: leadId=${leadId} (source=${leadSource})`);
           await runQuery(
             "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

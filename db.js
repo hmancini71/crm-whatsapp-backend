@@ -21,7 +21,128 @@ db.run("PRAGMA busy_timeout = 5000");
 // backfill dos cards antigos (migração abaixo).
 const GOOGLE_ADS_FIRST_MSG = 'olá, vim do site e gostaria de informações sobre vistos/imigração.';
 function normMsg(s) { return String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' '); }
-function isGoogleAdsFirstMsg(text) { return normMsg(text).startsWith(GOOGLE_ADS_FIRST_MSG); }
+
+// ── Regras de identificação CONFIGURÁVEIS (guia "Identificação" nas Configurações, 2026-07-21) ──
+// Cada regra: { message, source }. Se a 1ª mensagem do cliente COMEÇA com `message`
+// (comparação normalizada), a origem do lead é `source`. Persistidas em app_settings
+// ('origin_msg_rules') e editáveis pela interface; o cache em memória é a fonte usada
+// na criação de leads e nas reclassificações. Defaults incluem a frase legada do site
+// + as 2 frases novas dos anúncios (pedido do Henry, 2026-07-21).
+const DEFAULT_ORIGIN_MSG_RULES = [
+  { message: 'Olá, vim do site e gostaria de informações sobre vistos/imigração.', source: 'Google Ads' },
+  { message: 'Olá. Gostaria de saber mais informações sobre como tirar o primeiro visto', source: 'Google Ads' },
+  { message: 'Olá. Gostaria de saber mais informações sobre renovação de visto.', source: 'Google Ads' }
+];
+let ORIGIN_MSG_RULES = DEFAULT_ORIGIN_MSG_RULES.slice();
+
+function sanitizeOriginRules(arr) {
+  return (Array.isArray(arr) ? arr : [])
+    .map(r => ({
+      message: String((r && r.message) == null ? '' : r.message).trim().slice(0, 300),
+      source: (String((r && r.source) == null ? '' : r.source).trim() || 'Google Ads').slice(0, 60)
+    }))
+    .filter(r => r.message);
+}
+
+// Devolve a origem definida pela 1ª mensagem, ou null se nenhuma regra casar.
+function originFromFirstMsg(text) {
+  const t = normMsg(text);
+  if (!t) return null;
+  for (const r of ORIGIN_MSG_RULES) {
+    const p = normMsg(r.message);
+    if (p && t.startsWith(p)) return r.source || 'Google Ads';
+  }
+  return null;
+}
+// Compat: mantém a assinatura booleana usada no whatsapp.js e nos backfills.
+function isGoogleAdsFirstMsg(text) { return originFromFirstMsg(text) === 'Google Ads'; }
+
+function getOriginMsgRules() { return ORIGIN_MSG_RULES.map(r => ({ message: r.message, source: r.source })); }
+
+function loadOriginMsgRules() {
+  return new Promise((resolve) => {
+    db.get("SELECT value FROM app_settings WHERE key = 'origin_msg_rules'", (err, row) => {
+      if (!err && row && row.value) {
+        try {
+          const arr = sanitizeOriginRules(JSON.parse(row.value));
+          if (arr.length) ORIGIN_MSG_RULES = arr;
+        } catch (e) { /* mantém defaults */ }
+        return resolve(ORIGIN_MSG_RULES);
+      }
+      // 1ª vez nesta base: semeia os defaults para aparecerem na guia Identificação.
+      db.run("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('origin_msg_rules', ?)",
+        [JSON.stringify(DEFAULT_ORIGIN_MSG_RULES)], () => resolve(ORIGIN_MSG_RULES));
+    });
+  });
+}
+
+function setOriginMsgRules(arr) {
+  const clean = sanitizeOriginRules(arr);
+  if (!clean.length) return Promise.reject(new Error('É preciso manter pelo menos uma regra.'));
+  return new Promise((resolve, reject) => {
+    db.run("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('origin_msg_rules', ?)",
+      [JSON.stringify(clean)], (err) => {
+        if (err) return reject(err);
+        ORIGIN_MSG_RULES = clean;
+        resolve(clean);
+      });
+  });
+}
+
+// Reclassifica os leads EXISTENTES pela 1ª mensagem recebida (mesma lógica do backfill
+// original, agora reutilizável): para cada lead cuja 1ª mensagem casa com uma regra e cujo
+// source difere, aplica o source da regra. Chamada ao salvar a guia Identificação e no
+// backfill v2 do deploy. Devolve o nº de leads atualizados.
+function reclassifyLeadsByFirstMsg() {
+  const last8 = (p) => { const d = String(p || '').replace(/\D/g, ''); return d.length >= 8 ? d.slice(-8) : ''; };
+  return new Promise((resolve) => {
+    db.all("SELECT id, source, whatsapp_jid, phone FROM leads", (lErr, leads) => {
+      if (lErr) { console.error("Reclassificação origem: erro ao ler leads:", lErr.message); return resolve(0); }
+      db.all("SELECT id, whatsapp_jid, phone FROM conversations", (cErr, convs) => {
+        if (cErr) { console.error("Reclassificação origem: erro ao ler conversations:", cErr.message); return resolve(0); }
+        const byJid = new Map(), byL8 = new Map();
+        (convs || []).forEach(c => {
+          if (c.whatsapp_jid) byJid.set(c.whatsapp_jid, c.id);
+          const l8 = last8(c.phone) || last8(c.whatsapp_jid);
+          if (l8 && !byL8.has(l8)) byL8.set(l8, c.id);
+        });
+        const firstThemMsg = (convId) => new Promise((res) => {
+          db.get("SELECT text FROM messages WHERE conversationId = ? AND `from` = 'them' ORDER BY timestamp ASC LIMIT 1",
+            [convId], (e, r) => res(e ? null : (r && r.text)));
+        });
+        (async () => {
+          try {
+            const bySource = new Map(); // source → [leadIds]
+            for (const ld of (leads || [])) {
+              let convId = ld.whatsapp_jid ? byJid.get(ld.whatsapp_jid) : null;
+              if (!convId) { const l8 = last8(ld.phone) || last8(ld.whatsapp_jid); if (l8) convId = byL8.get(l8); }
+              if (!convId) continue;
+              const src = originFromFirstMsg(await firstThemMsg(convId));
+              if (src && ld.source !== src) {
+                if (!bySource.has(src)) bySource.set(src, []);
+                bySource.get(src).push(ld.id);
+              }
+            }
+            let total = 0;
+            for (const [src, ids] of bySource) {
+              const ph = ids.map(() => '?').join(',');
+              await new Promise((res) => db.run(`UPDATE leads SET source = ? WHERE id IN (${ph})`, [src, ...ids], (uErr) => {
+                if (uErr) console.error("Reclassificação origem: erro no UPDATE:", uErr.message);
+                else total += ids.length;
+                res();
+              }));
+            }
+            if (total) console.log(`Reclassificação origem: ${total} lead(s) atualizados pela 1ª mensagem.`);
+            resolve(total);
+          } catch (e) {
+            console.error("Reclassificação origem: falha inesperada:", e && e.message);
+            resolve(0);
+          }
+        })();
+      });
+    });
+  });
+}
 
 // ── Regra de origem "Google Ads" por UTM ─────────────────────────────────────
 // Quando o rastreamento (campo `tracking`) tem utm_source = "Google Ads" em QUALQUER forma
@@ -935,6 +1056,18 @@ db.serialize(() => {
     }
   });
 
+  // ── Carrega as regras da guia Identificação ANTES dos backfills (semeia defaults na 1ª vez)
+  // e roda o backfill v2 (frases novas dos anúncios, 2026-07-21) UMA vez por base.
+  loadOriginMsgRules().then(() => {
+    db.get("SELECT value FROM app_settings WHERE key = 'src_google_ads_msg_backfill_v2'", (gErr, gRow) => {
+      if (gErr || gRow) return; // erro ao ler ou já rodou nesta base
+      reclassifyLeadsByFirstMsg().then((n) => {
+        console.log(`Backfill Identificação v2: ${n} lead(s) reclassificados pelas regras da guia.`);
+        db.run("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('src_google_ads_msg_backfill_v2', ?)", [new Date().toISOString()]);
+      });
+    });
+  });
+
   // ── Backfill ÚNICO: aplica a regra de origem "Google Ads" aos cards JÁ existentes.
   // Para cada lead, olha a PRIMEIRA mensagem recebida do cliente; se ela começa com a
   // frase do site (isGoogleAdsFirstMsg), reclassifica source = 'Google Ads'. Mesma regra
@@ -1046,5 +1179,9 @@ module.exports = {
   isGoogleAdsFirstMsg,
   GOOGLE_ADS_FIRST_MSG,
   isGoogleAdsUtm,
-  extractAdParams
+  extractAdParams,
+  originFromFirstMsg,
+  getOriginMsgRules,
+  setOriginMsgRules,
+  reclassifyLeadsByFirstMsg
 };

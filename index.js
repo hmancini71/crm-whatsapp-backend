@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
-const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams } = require('./db');
+const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams, getOriginMsgRules, setOriginMsgRules, reclassifyLeadsByFirstMsg } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
 const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
 const { getCalendlySettings, saveCalendlySettings, testCalendly, calendlySweep } = require('./calendly');
@@ -3250,6 +3250,26 @@ app.post('/api/settings/quick-replies', authenticateToken, async (req, res) => {
     );
     res.json({ success: true, count: clean.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Guia "Identificação" (Configurações): regras 1ª mensagem → origem do lead ──
+// GET devolve as regras; POST salva e RECLASSIFICA os leads existentes na hora,
+// para o resultado refletir em todos os indicadores (funil, dashboard, pizzas).
+app.get('/api/settings/origin-rules', authenticateToken, async (req, res) => {
+  try { res.json({ rules: getOriginMsgRules() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/settings/origin-rules', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
+  }
+  try {
+    const rules = (req.body && req.body.rules) || [];
+    const saved = await setOriginMsgRules(rules);
+    const reclassified = await reclassifyLeadsByFirstMsg();
+    res.json({ success: true, count: saved.length, reclassified });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // Relação de serviços (classificação) — editável em Configurações, usada na combo "Classificação (Serviço)".
