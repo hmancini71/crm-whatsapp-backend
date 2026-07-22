@@ -3272,6 +3272,36 @@ app.post('/api/settings/origin-rules', authenticateToken, async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// ── Guia "Resgate de leads" (Configurações): regra das colunas 3-4 do Tratamento inicial ──
+app.get('/api/settings/lead-rescue', authenticateToken, async (req, res) => {
+  try {
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'lead_rescue_rules'");
+    let parsed = null;
+    if (row && row.value) { try { parsed = JSON.parse(row.value); } catch (e) { parsed = null; } }
+    const minMessages = (parsed && Number.isInteger(parsed.minMessages)) ? parsed.minMessages : 4;
+    const requireClientMsg = (parsed && typeof parsed.requireClientMsg === 'boolean') ? parsed.requireClientMsg : true;
+    res.json({ minMessages, requireClientMsg });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/settings/lead-rescue', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
+  }
+  try {
+    const minMessages = parseInt(req.body.minMessages);
+    if (!Number.isInteger(minMessages) || minMessages < 1 || minMessages > 99) {
+      return res.status(400).json({ error: 'minMessages inválido (1-99)' });
+    }
+    const requireClientMsg = !!req.body.requireClientMsg;
+    await runQuery(
+      "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('lead_rescue_rules', ?)",
+      [JSON.stringify({ minMessages, requireClientMsg })]
+    );
+    res.json({ success: true, minMessages, requireClientMsg });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Relação de serviços (classificação) — editável em Configurações, usada na combo "Classificação (Serviço)".
 app.get('/api/settings/services', authenticateToken, async (req, res) => {
   try {
@@ -3768,6 +3798,11 @@ async function reconcileReplyDots() {
     // senão pelos últimos 8 dígitos do telefone (equivalente ao LIKE '%últimos8dígitos%' do SQL
     // original, já que depois de tirar +, espaço, -, ( o telefone fica só com dígitos no final).
     const convos = await allRows("SELECT id, phone, whatsapp_jid FROM conversations");
+    // Contagem agregada de mensagens por conversa (para as colunas 3-4 do "Tratamento inicial",
+    // separadas por engajamento — regra configurável na guia "Resgate de leads" das Configurações).
+    const msgAgg = await allRows("SELECT conversationId, COUNT(*) AS total, SUM(CASE WHEN `from`='them' THEN 1 ELSE 0 END) AS fromClient FROM messages GROUP BY conversationId");
+    const msgAggByConvo = new Map();
+    for (const m of msgAgg) msgAggByConvo.set(m.conversationId, { total: Number(m.total) || 0, fromClient: Number(m.fromClient) || 0 });
     const convoByJid = new Map();
     const convoByPhoneTail = new Map();
     for (const c of convos) {
@@ -3801,6 +3836,18 @@ async function reconcileReplyDots() {
         const lastThem = await getRow("SELECT MAX(timestamp) AS ts FROM messages WHERE conversationId = ? AND `from` = 'them'", [convoId]);
         const lct = Number(lastThem && lastThem.ts) || 0;
         if (lct) await runQuery("UPDATE leads SET last_client_ts = ? WHERE id = ? AND COALESCE(last_client_ts,0) <> ?", [lct, l.id, lct]);
+      } catch (e) {}
+
+      // conv_msg_count / conv_client_msg_count: contagem de mensagens da conversa (total e do
+      // cliente), usada para separar as colunas 3-4 do "Tratamento inicial" por engajamento.
+      try {
+        const agg = msgAggByConvo.get(convoId);
+        if (agg) {
+          await runQuery(
+            "UPDATE leads SET conv_msg_count = ?, conv_client_msg_count = ? WHERE id = ? AND (COALESCE(conv_msg_count,-1) <> ? OR COALESCE(conv_client_msg_count,-1) <> ?)",
+            [agg.total, agg.fromClient, l.id, agg.total, agg.fromClient]
+          );
+        }
       } catch (e) {}
 
       const lastTs = Number(last.timestamp) || 0;

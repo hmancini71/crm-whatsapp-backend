@@ -578,6 +578,38 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: add 'conv_msg_count' column to leads if it doesn't exist yet
+  // Total de mensagens (enviadas+recebidas, IA inclusa) da conversa casada com o lead
+  // (via whatsapp_jid exato ou últimos 8 dígitos do phone). Usado pela regra de
+  // "Resgate de leads" para separar as colunas 3/4 do Tratamento inicial.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'conv_msg_count')) {
+      db.run("ALTER TABLE leads ADD COLUMN conv_msg_count INTEGER DEFAULT NULL", (alterErr) => {
+        if (alterErr) {
+          console.error("Failed to add conv_msg_count column to leads:", alterErr);
+        } else {
+          console.log("Migration: added 'conv_msg_count' column to leads table.");
+        }
+      });
+    }
+  });
+
+  // Safe migration: add 'conv_client_msg_count' column to leads if it doesn't exist yet
+  // Quantidade de mensagens da conversa casada que vieram do cliente (from='them').
+  // Usado junto com 'conv_msg_count' pela regra de "Resgate de leads" (cols 3/4 do
+  // Tratamento inicial): exige >=1 mensagem do cliente quando requireClientMsg=true.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'conv_client_msg_count')) {
+      db.run("ALTER TABLE leads ADD COLUMN conv_client_msg_count INTEGER DEFAULT NULL", (alterErr) => {
+        if (alterErr) {
+          console.error("Failed to add conv_client_msg_count column to leads:", alterErr);
+        } else {
+          console.log("Migration: added 'conv_client_msg_count' column to leads table.");
+        }
+      });
+    }
+  });
+
   // Safe migration: add 'lastClientReply' column to leads if it doesn't exist yet
   db.all("PRAGMA table_info(leads)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'lastClientReply')) {
