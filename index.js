@@ -982,7 +982,7 @@ app.post('/api/leads/:id/history', authenticateToken, async (req, res) => {
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email, responsible } = req.body;
+  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email, responsible, source } = req.body;
 
   try {
     bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
@@ -1028,6 +1028,12 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
     if (priority !== undefined) {
       updates.push("priority = ?");
       params.push(priority);
+    }
+    // Origem manual (combo do modal): grava e TRAVA a classificação.
+    if (source !== undefined) {
+      updates.push("source = ?");
+      params.push(String(source));
+      updates.push("source_locked = 1");
     }
     if (lastClientReply !== undefined) {
       updates.push("lastClientReply = ?");
@@ -4924,11 +4930,11 @@ function leadChannelCat(l) {
   if (l && l.tracking) {
     try { const tk = JSON.parse(l.tracking); if (tk && typeof tk === 'object' && Object.keys(tk).length) ch = deriveChannel(tk); } catch (e) {}
   }
-  const src = String((l && l.source) || '').trim().toLowerCase();
-  if (ch === 'Google Ads') return 'ga';
-  if (ch === 'Meta Ads') return 'meta';
-  if (src === 'google ads') return 'ga';
-  if (src === 'meta ads' || src === 'facebook ads') return 'meta';
+  // ga/meta: delega ao synthChannel (fonte única) — assim source_locked (origem manual travada) e
+  // os aliases de Meta (facebook/instagram/meta/comentário Meta, inclusive via TAG) contam aqui também.
+  const synth = synthChannel(l);
+  if (synth === 'Google Ads') return 'ga';
+  if (synth === 'Meta Ads') return 'meta';
   if (ch) return 'org';
   return 'semclass';
 }
@@ -4944,14 +4950,28 @@ function channelBucketLabel(ch) {
 }
 // Canal SINTETIZADO do lead (quando não há evento 'canal' gravado): tracking → source → Orgânico.
 function synthChannel(lead) {
+  // Origem MANUAL travada (combo Origem do modal): tem prioridade sobre tracking/backfills.
+  if (lead && Number(lead.source_locked) === 1) {
+    const s = String(lead.source || '').trim().toLowerCase();
+    if (s === 'google ads') return 'Google Ads';
+    if (['meta ads', 'facebook ads', 'facebook', 'instagram', 'meta', 'comentário meta', 'comentario meta'].indexOf(s) !== -1) return 'Meta Ads';
+    if (/^org/.test(s)) return 'Orgânico';
+    if (s.indexOf('sem ') === 0) return 'Sem identificação';
+    return channelBucketLabel(lead.source);
+  }
   let ch = '';
   try { if (lead && lead.tracking) { const tk = JSON.parse(lead.tracking); if (tk && typeof tk === 'object' && Object.keys(tk).length) ch = deriveChannel(tk); } } catch (e) {}
   if (!ch) {
     const s = String((lead && lead.source) || '').trim().toLowerCase();
     if (s === 'google ads') ch = 'Google Ads';
-    else if (s === 'meta ads' || s === 'facebook ads') ch = 'Meta Ads';
+    else if (['meta ads', 'facebook ads', 'facebook', 'instagram', 'meta', 'comentário meta', 'comentario meta'].indexOf(s) !== -1) ch = 'Meta Ads';
     else if (s && s !== 'manual' && s !== 'marketing') ch = (lead && lead.source) || '';
     else ch = 'Orgânico';
+    // Tags do lead (ex.: "comentário Meta") também contam como Meta Ads.
+    try {
+      const tg = JSON.parse((lead && lead.tags) || '[]');
+      if (Array.isArray(tg) && (tg.indexOf('comentário Meta') !== -1 || tg.indexOf('Meta') !== -1)) ch = 'Meta Ads';
+    } catch (e) {}
   }
   return channelBucketLabel(ch);
 }

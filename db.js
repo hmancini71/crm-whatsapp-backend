@@ -108,7 +108,7 @@ function setOriginMsgRules(arr) {
 function reclassifyLeadsByFirstMsg() {
   const last8 = (p) => { const d = String(p || '').replace(/\D/g, ''); return d.length >= 8 ? d.slice(-8) : ''; };
   return new Promise((resolve) => {
-    db.all("SELECT id, source, whatsapp_jid, phone FROM leads", (lErr, leads) => {
+    db.all("SELECT id, source, whatsapp_jid, phone, source_locked FROM leads", (lErr, leads) => {
       if (lErr) { console.error("Reclassificação origem: erro ao ler leads:", lErr.message); return resolve(0); }
       db.all("SELECT id, whatsapp_jid, phone FROM conversations", (cErr, convs) => {
         if (cErr) { console.error("Reclassificação origem: erro ao ler conversations:", cErr.message); return resolve(0); }
@@ -126,6 +126,7 @@ function reclassifyLeadsByFirstMsg() {
           try {
             const bySource = new Map(); // source → [leadIds]
             for (const ld of (leads || [])) {
+              if (Number(ld.source_locked) === 1) continue; // classificação manual nunca é sobrescrita
               let convId = ld.whatsapp_jid ? byJid.get(ld.whatsapp_jid) : null;
               if (!convId) { const l8 = last8(ld.phone) || last8(ld.whatsapp_jid); if (l8) convId = byL8.get(l8); }
               if (!convId) continue;
@@ -573,6 +574,20 @@ db.serialize(() => {
           console.error("Failed to add priority column to leads:", alterErr);
         } else {
           console.log("Migration: added 'priority' column to leads table.");
+        }
+      });
+    }
+  });
+
+  // Safe migration: add 'source_locked' column to leads if it doesn't exist yet
+  // Origem MANUAL travada (combo Origem do modal, pipeline421): 1 = o Henry classificou na mão; backfills/reclassificações NUNCA sobrescrevem.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'source_locked')) {
+      db.run("ALTER TABLE leads ADD COLUMN source_locked INTEGER DEFAULT 0", (alterErr) => {
+        if (alterErr) {
+          console.error("Failed to add source_locked column to leads:", alterErr);
+        } else {
+          console.log("Migration: added 'source_locked' column to leads table.");
         }
       });
     }
