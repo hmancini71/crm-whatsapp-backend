@@ -850,11 +850,10 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       await runQuery("UPDATE leads SET pos_stage = ?, bridge = 0 WHERE id = ?", [stage, id]);
       // (A coluna On-hold foi extinta em 2026-07-03 — o conceito vive na PRIORIDADE 'onhold'.)
       if (cur.pos_stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '" (pós-venda)', meta: { to: stage } });
-      // pipeline440: entrou em "Recém Contratados" (vendas_concretizadas) → grava contracted_at
-      // UMA vez (nunca sobrescreve; sair da etapa depois não apaga a data).
-      if (stage === 'vendas_concretizadas') {
-        await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), id]);
-      }
+      // pipeline443: entrou em QUALQUER coluna do pós-venda → grava contracted_at (data em que o
+      // card foi ARRASTADO/movido p/ o pós) UMA vez (nunca sobrescreve; sair da etapa depois não
+      // apaga a data). Captura AMPLIADA (antes só capturava em 'vendas_concretizadas').
+      await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), id]);
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
     }
@@ -3726,6 +3725,8 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
       const _dupTerminalPre = ['declinado', 'convertida'].includes(dup.stage);
       if (_wantsPos && !_dupInPos && _dupTerminalPre) {
         await runQuery("UPDATE leads SET pos_stage = ?, bridge = 0 WHERE id = ?", [stage, dup.id]);
+        // pipeline443: reaproveitado e movido p/ coluna do pós → grava contracted_at (só se vazio).
+        await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), dup.id]);
         // Complementa dados VAZIOS/mais pobres com o que foi digitado (nunca apaga nada existente).
         if (email && !(dup.email || '').trim()) await runQuery("UPDATE leads SET email = ? WHERE id = ?", [String(email).trim(), dup.id]);
         if (name && String(name).trim().length > String(dup.name || '').trim().length) await runQuery("UPDATE leads SET name = ? WHERE id = ?", [String(name).trim(), dup.id]);
@@ -3787,6 +3788,10 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
       "INSERT INTO leads (id, name, company, phone, email, value, stage, pos_stage, bridge, source, account, owner, tags, createdAt, archived, priority, recv_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [id, name.trim(), company || "", phone || "", email || "", Number(value) || 0, finalStage, posStage, bridgeVal, source || "Manual", account || "", (req.user && req.user.name) || "Henry Mancini", JSON.stringify(safeTags), createdAt, 0, priority || "", recvNumber]
     );
+    // pipeline443: card já NASCE numa coluna do pós-venda → grava contracted_at (só se vazio).
+    if (posStage) {
+      await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), id]);
+    }
     // Criado DIRETO na ponte: grava o assunto pela regra da última movimentação (quem criou).
     if (bridgeVal === 1) {
       try { await runQuery("UPDATE leads SET bridge_subject = ? WHERE id = ?", [(await userIsPos(req)) ? 'pre' : 'pos', id]); } catch (e) {}
@@ -3945,6 +3950,8 @@ async function sweepPosUnclassified() {
           "INSERT INTO leads (id, name, company, phone, email, value, stage, pos_stage, bridge, source, account, owner, tags, createdAt, archived, priority, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           [id, (c.name || c.phone || 'Contato WhatsApp'), '', c.phone || '', '', 0, 'convertida', 'amer_msgs_novas', 0, 'WhatsApp', c.account || '', 'CRM', '[]', new Date().toISOString(), 0, '', c.whatsapp_jid || null]
         );
+        // pipeline443: card já nasce numa coluna do pós → grava contracted_at (só se vazio).
+        await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), id]);
         try { logLeadHistory({ leadId: id, phone: c.phone, name: c.name, type: 'movimentacao', detail: 'Card criado em "Mensagens novas não classificadas" (mensagem não lida na linha do pós)', meta: { to: 'amer_msgs_novas' } }); } catch (e) {}
         continue;
       }
@@ -3952,6 +3959,8 @@ async function sweepPosUnclassified() {
       if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) continue;
       if (['tratamento', 'proposta', 'followup'].includes(lead.stage)) continue;
       await runQuery("UPDATE leads SET pos_stage = 'amer_msgs_novas' WHERE id = ?", [lead.id]);
+      // pipeline443: entrou em coluna do pós → grava contracted_at (só se vazio).
+      await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), lead.id]);
       try { logLeadHistory({ leadId: lead.id, phone: lead.phone, name: lead.name, type: 'movimentacao', detail: 'Movido para "Mensagens novas não classificadas" (mensagem não lida na linha do pós)', meta: { to: 'amer_msgs_novas' } }); } catch (e) {}
     }
   } catch (e) { console.error('sweepPosUnclassified:', e && e.message); }
@@ -5585,6 +5594,70 @@ async function backfillContractedAtOnce() {
   } catch (e) { console.error('[backfill contracted_at]', e && e.message); }
 }
 
+// PONTUAL (uma única vez, guardado por flag em app_settings): pipeline443 — v1 só cobria a coluna
+// "Recém Contratados". v2 cobre TODO lead do pós-venda (qualquer coluna de POS_STAGES) que ainda
+// esteja sem contracted_at, com 4 fontes em ordem de confiança (NUNCA sobrescreve valor já gravado):
+//  1) timestamp do evento de histórico mais ANTIGO que marca a entrada do lead em QUALQUER coluna do
+//     pós-venda (type='venda' de "Venda convertida", OU type='movimentacao' com meta.to numa coluna
+//     de POS_STAGES — é o mesmo evento que a captura ao vivo grava, ver PATCH /stage);
+//  2) sale_date (data da venda), quando preenchida;
+//  3) timestamp do registro de histórico MAIS ANTIGO do lead que menciona "(pós-venda)" no detalhe —
+//     rede de segurança para entradas antigas cujo meta.to não bateu com a lista atual de POS_STAGES
+//     (colunas que já foram renomeadas/migradas);
+//  4) createdAt do lead (data de criação do card) — ÚLTIMO recurso: garante que NENHUM lead do
+//     pós-venda fique com contracted_at NULL depois deste backfill.
+// Idempotente (flag própria contracted_at_backfill_v2, independente da v1).
+async function backfillContractedAtV2Once() {
+  try {
+    const FLAG = 'contracted_at_backfill_v2';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const leads = await allRows("SELECT id, stage, pos_stage, sale_date, createdAt FROM leads WHERE (contracted_at IS NULL OR TRIM(contracted_at) = '')");
+    let n = 0, viaHist = 0, viaSale = 0, viaHistAmplo = 0, viaCreated = 0, skipped = 0;
+    for (const l of leads) {
+      let efetiva; try { efetiva = posStageFor(l); } catch (e) { efetiva = null; }
+      if (!POS_STAGES.includes(efetiva)) { skipped++; continue; } // não é lead do pós-venda — fora do escopo do v2
+      let at = null;
+      // Fonte 1: evento específico de entrada em coluna do pós (mesma semântica da captura ao vivo).
+      try {
+        const rows = await allRows("SELECT type, meta, created_at FROM lead_history WHERE lead_id = ? AND (type = 'venda' OR type = 'movimentacao') ORDER BY created_at ASC", [l.id]);
+        for (const h of rows) {
+          if (h.type === 'venda') { at = h.created_at; break; }
+          let meta = null; try { meta = h.meta ? JSON.parse(h.meta) : null; } catch (e) { meta = null; }
+          if (meta && meta.to && POS_STAGES.includes(meta.to)) { at = h.created_at; break; }
+        }
+        if (at) viaHist++;
+      } catch (e) {}
+      // Fonte 2: sale_date.
+      if (!at && l.sale_date && String(l.sale_date).trim()) {
+        const sd = String(l.sale_date).trim();
+        at = sd.length === 10 ? sd + 'T00:00:00.000Z' : sd;
+        viaSale++;
+      }
+      // Fonte 3: registro de histórico mais antigo mencionando "(pós-venda)" no detalhe (rede de
+      // segurança p/ entradas antigas / colunas já renomeadas cujo meta.to não bate mais com POS_STAGES).
+      if (!at) {
+        try {
+          const h2 = await getRow("SELECT MIN(created_at) AS at FROM lead_history WHERE lead_id = ? AND detail LIKE '%(pós-venda)%'", [l.id]);
+          if (h2 && h2.at) { at = h2.at; viaHistAmplo++; }
+        } catch (e) {}
+      }
+      // Fonte 4 (último recurso): createdAt do lead — garante zero NULL restante no pós.
+      if (!at && l.createdAt && String(l.createdAt).trim()) {
+        const ca = String(l.createdAt).trim();
+        at = ca.length === 10 ? ca + 'T00:00:00.000Z' : ca;
+        viaCreated++;
+      }
+      if (at) {
+        await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [at, l.id]);
+        n++;
+      }
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[backfill contracted_at v2] ${n} lead(s) do pós-venda receberam contracted_at — fontes: ${viaHist} via histórico (entrada na coluna), ${viaSale} via sale_date, ${viaHistAmplo} via histórico amplo "(pós-venda)", ${viaCreated} via createdAt (último recurso); ${skipped} lead(s) fora do escopo (não pós-venda); flag ${FLAG} marcada.`);
+  } catch (e) { console.error('[backfill contracted_at v2]', e && e.message); }
+}
+
 // PONTUAL (uma única vez, guardado por flag): SIMULA a chegada pelo site para o BACKLOG.
 // Para cada lead ABERTO, com telefone e SEM conversa, move para "Novo Leads", cria a conversa na
 // linha (12) 99227-1554 (wa2) e injeta a SAUDAÇÃO do site como mensagem do CLIENTE (inbound). Isso
@@ -5902,6 +5975,8 @@ app.listen(PORT, async () => {
   try { await backfillMetaChannelOnce(); } catch (e) { console.error('[meta backfill boot]', e && e.message); }
   // PONTUAL (pipeline440): preenche contracted_at dos leads já contratados (Recém Contratados) sem a data.
   try { await backfillContractedAtOnce(); } catch (e) { console.error('[backfill contracted_at boot]', e && e.message); }
+  // PONTUAL (pipeline443): v2 — cobre TODO lead do pós-venda (qualquer coluna), com fallbacks em cascata.
+  try { await backfillContractedAtV2Once(); } catch (e) { console.error('[backfill contracted_at v2 boot]', e && e.message); }
   // PONTUAL: divide a coluna pós "Vistos americanos" em Primeiro Visto / Renovação (separa os atuais por tag).
   try { await splitVistoAmericanoOnce(); } catch (e) { console.error('[split visto amer boot]', e && e.message); }
   // Migra as colunas americanas antigas p/ o novo "Grupo Visto Americano" (raia Agendamento).
