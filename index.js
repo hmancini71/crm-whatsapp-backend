@@ -3105,9 +3105,39 @@ app.post('/api/leads/from-conversation', authenticateToken, async (req, res) => 
       const cmtMsg = await getRow("SELECT id FROM messages WHERE conversationId = ? AND id LIKE 'cmt_%' LIMIT 1", [convo.id]);
       leadTags = cmtMsg ? ['comentário Meta'] : ['Meta'];
     }
+    // pipeline433: lead do Meta nasce com o telefone extraído do texto da conversa (IG não
+    // fornece o telefone do perfil) — só entra em ação quando a conversa ainda não tem um
+    // telefone válido (>=10 dígitos). Varre as mensagens em ordem cronológica e procura um
+    // telefone BR; prefere a PRIMEIRA ocorrência vinda de mensagem do cliente (from='them').
+    let leadPhone = convo.phone || "";
+    if (convo.account === 'ig' && (!convo.phone || String(convo.phone).replace(/\D/g, '').length < 10)) {
+      try {
+        const convoMsgs = await allRows("SELECT text, `from` FROM messages WHERE conversationId = ? ORDER BY timestamp ASC", [convo.id]);
+        const phoneRe = /(?:\+?55[\s.-]?)?(?:\(?\d{2}\)?[\s.-]?)?9?\d{4}[\s.-]?\d{4}/g;
+        let foundClient = null, foundAny = null;
+        for (const m of (convoMsgs || [])) {
+          const txt = String((m && m.text) || '');
+          if (!txt) continue;
+          const matches = txt.match(phoneRe) || [];
+          for (const raw of matches) {
+            let digits = raw.replace(/\D/g, '');
+            if (digits.length < 10 || digits.length > 13) continue;
+            if ((digits.length === 10 || digits.length === 11) && !digits.startsWith('55')) digits = '55' + digits;
+            if (!foundAny) foundAny = digits;
+            if (m.from === 'them' && !foundClient) { foundClient = digits; break; }
+          }
+          if (foundClient) break;
+        }
+        const extracted = foundClient || foundAny;
+        if (extracted) {
+          leadPhone = '+' + extracted;
+          await runQuery("UPDATE conversations SET phone = ? WHERE id = ?", [leadPhone, convo.id]);
+        }
+      } catch (e) { console.error('[from-conversation] falha ao extrair telefone do texto da conversa:', e && e.message); }
+    }
     await runQuery(
       "INSERT INTO leads (id, name, company, phone, email, value, stage, source, account, owner, tags, createdAt, archived, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, convo.name || (src + ' lead'), "", convo.phone || "", "", 0, "novo", src, convo.account || 'ig', "Henry Mancini", JSON.stringify(leadTags), createdAt, 0, convo.whatsapp_jid || null]
+      [id, convo.name || (src + ' lead'), "", leadPhone || "", "", 0, "novo", src, convo.account || 'ig', "Henry Mancini", JSON.stringify(leadTags), createdAt, 0, convo.whatsapp_jid || null]
     );
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     res.json({ ...lead, tags: leadTags, created: true });
