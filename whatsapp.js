@@ -614,6 +614,35 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
         // Mensagem sem conteúdo reconhecível (ex.: tipo desconhecido futuro) — ignora
         if (text === null) return;
 
+        // pipeline445: REPLY/citação recebida — extrai contextInfo (quando o cliente responde
+        // citando uma mensagem). Nunca deve impedir o recebimento normal da mensagem.
+        let quotedId = null, quotedText = null, quotedFrom = null;
+        try {
+          const ctxCandidates = [
+            innerMsg.extendedTextMessage?.contextInfo,
+            innerMsg.imageMessage?.contextInfo,
+            innerMsg.videoMessage?.contextInfo,
+            innerMsg.audioMessage?.contextInfo,
+            innerMsg.documentMessage?.contextInfo,
+            innerMsg.stickerMessage?.contextInfo
+          ];
+          const ctx = ctxCandidates.find(c => c && c.stanzaId);
+          if (ctx && ctx.stanzaId) {
+            quotedId = ctx.stanzaId;
+            const qm = ctx.quotedMessage || {};
+            let qText = qm.conversation || qm.extendedTextMessage?.text || qm.imageMessage?.caption || qm.videoMessage?.caption || qm.documentMessage?.fileName || '[mídia]';
+            quotedText = String(qText || '[mídia]').slice(0, 200);
+            try {
+              const qRow = await getRow("SELECT `from` FROM messages WHERE id = ?", [quotedId]);
+              quotedFrom = qRow ? qRow.from : 'them';
+            } catch (e2) {
+              quotedFrom = 'them';
+            }
+          }
+        } catch (e) {
+          quotedId = null; quotedText = null; quotedFrom = null;
+        }
+
         const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const name = (!isMine && msg.pushName) ? msg.pushName : (fromJid.endsWith('@lid') ? 'Usuário WhatsApp' : (phone || 'Usuário WhatsApp'));
 
@@ -648,8 +677,8 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
         const msgId = incomingMsgId;
         if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] Saving message to DB: msgId=${msgId}, convoId=${convoId}, type=${incomingType}`);
         await runQuery(
-          "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [msgId, convoId, isMine ? 'me' : 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath, isMine ? sockNumber(sock) : null]
+          "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number, quotedId, quotedText, quotedFrom) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [msgId, convoId, isMine ? 'me' : 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath, isMine ? sockNumber(sock) : null, quotedId, quotedText, quotedFrom]
         );
 
         // Regras de lead só valem para mensagens RECEBIDAS (do cliente), não para as nossas
@@ -941,7 +970,7 @@ async function disconnectWhatsApp(id) {
   return { id, status: 'disconnected' };
 }
 
-async function sendWhatsAppMessage(accountId, convoId, text) {
+async function sendWhatsAppMessage(accountId, convoId, text, quotedMsgId) {
   const convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
   if (!convo) throw new Error("Conversation not found");
 
@@ -952,16 +981,45 @@ async function sendWhatsAppMessage(accountId, convoId, text) {
     throw new Error("WhatsApp account not connected");
   }
 
-  // Send message
-  const sent = await sock.sendMessage(jid, { text });
+  // pipeline445: REPLY/citação — se veio quotedMsgId, monta o objeto {quoted} mínimo que o
+  // Baileys aceita p/ citar a mensagem original de verdade no aparelho do cliente. Qualquer
+  // falha aqui NUNCA pode impedir o envio normal: cai no fallback sem quoted.
+  let quotedRow = null;
+  if (quotedMsgId) {
+    try {
+      quotedRow = await getRow("SELECT id, `from`, text FROM messages WHERE id = ? AND conversationId = ?", [quotedMsgId, convoId]);
+    } catch (e) {
+      quotedRow = null;
+    }
+  }
+
+  let sent;
+  if (quotedRow) {
+    try {
+      const quoted = {
+        key: { remoteJid: jid, id: quotedRow.id, fromMe: quotedRow.from === 'me' },
+        message: { conversation: quotedRow.text || '' }
+      };
+      sent = await sock.sendMessage(jid, { text }, { quoted });
+    } catch (e) {
+      console.log('[reply] fallback sem citacao:', e.message);
+      sent = await sock.sendMessage(jid, { text });
+    }
+  } else {
+    // Send message
+    sent = await sock.sendMessage(jid, { text });
+  }
   
   const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   const msgId = sent.key.id || 'm_' + Math.random().toString(36).substr(2, 9);
 
+  const quotedTextTrunc = quotedRow ? String(quotedRow.text || '').slice(0, 200) : null;
+  const quotedFromVal = quotedRow ? quotedRow.from : null;
+
   // Insert into DB (status >= 2 = enviado/1 tick; messages.update sobe p/ entregue/lido)
   await runQuery(
-    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, status, our_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    [msgId, convoId, 'me', text, timeStr, Date.now(), Math.max(2, (sent && sent.status) || 0), sockNumber(sock)]
+    "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, status, our_number, quotedId, quotedText, quotedFrom) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [msgId, convoId, 'me', text, timeStr, Date.now(), Math.max(2, (sent && sent.status) || 0), sockNumber(sock), quotedRow ? quotedRow.id : null, quotedTextTrunc, quotedFromVal]
   );
 
   // Update conversation lastMessage
@@ -974,7 +1032,10 @@ async function sendWhatsAppMessage(accountId, convoId, text) {
     id: msgId,
     from: 'me',
     text,
-    time: timeStr
+    time: timeStr,
+    quotedId: quotedRow ? quotedRow.id : null,
+    quotedText: quotedTextTrunc,
+    quotedFrom: quotedFromVal
   };
 }
 

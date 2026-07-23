@@ -1050,6 +1050,33 @@ db.serialize(() => {
     }
   });
 
+  // Safe migration: colunas 'quotedId'/'quotedText'/'quotedFrom' em messages (pipeline445 —
+  // REPLY/citação de mensagens de WhatsApp: guarda a mensagem original citada).
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'quotedId')) {
+      db.run("ALTER TABLE messages ADD COLUMN quotedId TEXT", (e) => {
+        if (e) console.error("Failed to add quotedId column to messages:", e);
+        else console.log("Migration: added 'quotedId' column to messages table.");
+      });
+    }
+  });
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'quotedText')) {
+      db.run("ALTER TABLE messages ADD COLUMN quotedText TEXT", (e) => {
+        if (e) console.error("Failed to add quotedText column to messages:", e);
+        else console.log("Migration: added 'quotedText' column to messages table.");
+      });
+    }
+  });
+  db.all("PRAGMA table_info(messages)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'quotedFrom')) {
+      db.run("ALTER TABLE messages ADD COLUMN quotedFrom TEXT", (e) => {
+        if (e) console.error("Failed to add quotedFrom column to messages:", e);
+        else console.log("Migration: added 'quotedFrom' column to messages table.");
+      });
+    }
+  });
+
   // Anti-banimento: estatísticas de envio por número (caps diários + warm-up). Persistente.
   db.run(`CREATE TABLE IF NOT EXISTS wa_send_stats (
     account_id TEXT,

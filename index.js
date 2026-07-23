@@ -1668,7 +1668,7 @@ app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
     }
 
     const messages = await allRows(
-      "SELECT id, \`from\`, text, time, type, timestamp, status, edited, deleted, our_number FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
+      "SELECT id, \`from\`, text, time, type, timestamp, status, edited, deleted, our_number, quotedId, quotedText, quotedFrom FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
       [id]
     );
 
@@ -1703,7 +1703,7 @@ app.post('/api/conversations/:id/mark-unread', authenticateToken, async (req, re
 // 9. Conversations Routes: Send Message
 app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { text } = req.body;
+  const { text, quotedMsgId } = req.body;
   if (!text) {
     return res.status(400).json({ error: "Texto é obrigatório" });
   }
@@ -1840,7 +1840,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
 
     if (isConnected) {
       // Send real WhatsApp message
-      messageObj = await sendWhatsAppMessage(accountId, id, text);
+      messageObj = await sendWhatsAppMessage(accountId, id, text, quotedMsgId);
     } else {
       // Linha desconectada: NÃO grava mensagem fantasma (antes ela ficava com o relógio
       // "pendente" para sempre, dando impressão de que enviou). Avisa para reconectar.
