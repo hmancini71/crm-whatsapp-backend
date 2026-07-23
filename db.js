@@ -936,6 +936,19 @@ db.serialize(() => {
     }
   });
 
+  // pipeline440: data em que o lead ENTROU na coluna "Recém Contratados" (etapa pós-venda
+  // 'vendas_concretizadas') — capturada automaticamente (ver index.js, PATCH /api/leads/:id/stage) e
+  // exibida no card + no cabeçalho do modal. NUNCA sobrescrita depois de gravada (mesmo que o lead
+  // saia da etapa e volte). ISO 8601 (new Date().toISOString()); vazio até a 1ª entrada/backfill.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'contracted_at')) {
+      db.run("ALTER TABLE leads ADD COLUMN contracted_at TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) console.error("Failed to add contracted_at column to leads:", alterErr);
+        else console.log("Migration: added 'contracted_at' column to leads table.");
+      });
+    }
+  });
+
   // Unconditional migration: update stages to new pipeline phases (Novo Leads, Tratamento inicial, Proposta enviada, Follow-up pagamento, Lead declinou/cancelado)
   db.serialize(() => {
     console.log("Migration: sync stages to new 5-column pipeline...");

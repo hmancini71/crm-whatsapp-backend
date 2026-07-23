@@ -850,6 +850,11 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       await runQuery("UPDATE leads SET pos_stage = ?, bridge = 0 WHERE id = ?", [stage, id]);
       // (A coluna On-hold foi extinta em 2026-07-03 — o conceito vive na PRIORIDADE 'onhold'.)
       if (cur.pos_stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '" (pós-venda)', meta: { to: stage } });
+      // pipeline440: entrou em "Recém Contratados" (vendas_concretizadas) → grava contracted_at
+      // UMA vez (nunca sobrescreve; sair da etapa depois não apaga a data).
+      if (stage === 'vendas_concretizadas') {
+        await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), id]);
+      }
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
     }
@@ -889,6 +894,12 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       // DATA DA VENDA: padrão = dia da transferência (editável depois no card). Só preenche se vazio.
       const hoje = new Date().toISOString().slice(0, 10);
       await runQuery("UPDATE leads SET sale_date = ? WHERE id = ? AND (sale_date IS NULL OR TRIM(sale_date) = '')", [hoje, id]);
+      // pipeline440: "Venda convertida" cai por padrão em "Recém Contratados" no board pós (ver
+      // posStageFor) salvo se o lead já tem um pos_stage explícito diferente (ex.: já distribuído
+      // numa coluna do pós) — nesse caso a data já teria sido capturada no branch POS_STAGES acima.
+      if (!(cur.pos_stage && POS_STAGES.includes(cur.pos_stage) && cur.pos_stage !== 'clientes_antigos_pos')) {
+        await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), id]);
+      }
       const valStr = Number(cur.value) > 0 ? ' — valor R$ ' + Number(cur.value).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '';
       logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'venda', detail: 'Venda convertida em ' + hoje.split('-').reverse().join('/') + valStr });
     }
@@ -5535,6 +5546,45 @@ async function backfillMetaChannelOnce() {
   } catch (e) { console.error('[meta backfill]', e && e.message); }
 }
 
+// PONTUAL (uma única vez, guardado por flag em app_settings): pipeline440 — preenche contracted_at
+// (data de entrada em "Recém Contratados") dos leads que HOJE já estão nessa etapa (posStageFor ===
+// 'vendas_concretizadas') e ainda não têm a data gravada. Fontes, em ordem de confiança: (1) o evento
+// mais ANTIGO no histórico que marcou a entrada na etapa (movimentacao meta.to='vendas_concretizadas'
+// OU tipo 'venda' de "Venda convertida"); (2) sale_date (data da venda) como fallback; (3) sem dado
+// → fica NULL (front mostra "—"). NUNCA sobrescreve contracted_at já preenchido. Idempotente (flag).
+async function backfillContractedAtOnce() {
+  try {
+    const FLAG = 'contracted_at_backfill_v1';
+    const done = await getRow("SELECT value FROM app_settings WHERE key = ?", [FLAG]);
+    if (done && done.value) return;
+    const leads = await allRows("SELECT id, stage, pos_stage, sale_date FROM leads WHERE (contracted_at IS NULL OR TRIM(contracted_at) = '')");
+    let n = 0, viaHist = 0, viaSale = 0;
+    for (const l of leads) {
+      let efetiva; try { efetiva = posStageFor(l); } catch (e) { efetiva = null; }
+      if (efetiva !== 'vendas_concretizadas') continue;
+      let at = null;
+      try {
+        const h = await getRow(
+          "SELECT MIN(created_at) AS at FROM lead_history WHERE lead_id = ? AND (type = 'venda' OR (type = 'movimentacao' AND meta LIKE '%\"to\":\"vendas_concretizadas\"%'))",
+          [l.id]
+        );
+        if (h && h.at) { at = h.at; viaHist++; }
+      } catch (e) {}
+      if (!at && l.sale_date && String(l.sale_date).trim()) {
+        const sd = String(l.sale_date).trim();
+        at = sd.length === 10 ? sd + 'T00:00:00.000Z' : sd;
+        viaSale++;
+      }
+      if (at) {
+        await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [at, l.id]);
+        n++;
+      }
+    }
+    await runQuery("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [FLAG, new Date().toISOString()]);
+    console.log(`[backfill contracted_at] ${n} lead(s) de "Recém Contratados" receberam contracted_at (${viaHist} via histórico, ${viaSale} via sale_date, sem dado: ${leads.length - n}); flag ${FLAG} marcada.`);
+  } catch (e) { console.error('[backfill contracted_at]', e && e.message); }
+}
+
 // PONTUAL (uma única vez, guardado por flag): SIMULA a chegada pelo site para o BACKLOG.
 // Para cada lead ABERTO, com telefone e SEM conversa, move para "Novo Leads", cria a conversa na
 // linha (12) 99227-1554 (wa2) e injeta a SAUDAÇÃO do site como mensagem do CLIENTE (inbound). Isso
@@ -5850,6 +5900,8 @@ app.listen(PORT, async () => {
   try { await restore2030Leads(); } catch (e) { console.error('[restaura 2030 boot]', e && e.message); }
   // PONTUAL: classifica como Meta Ads os leads do histórico que mandaram a mensagem-padrão do Meta.
   try { await backfillMetaChannelOnce(); } catch (e) { console.error('[meta backfill boot]', e && e.message); }
+  // PONTUAL (pipeline440): preenche contracted_at dos leads já contratados (Recém Contratados) sem a data.
+  try { await backfillContractedAtOnce(); } catch (e) { console.error('[backfill contracted_at boot]', e && e.message); }
   // PONTUAL: divide a coluna pós "Vistos americanos" em Primeiro Visto / Renovação (separa os atuais por tag).
   try { await splitVistoAmericanoOnce(); } catch (e) { console.error('[split visto amer boot]', e && e.message); }
   // Migra as colunas americanas antigas p/ o novo "Grupo Visto Americano" (raia Agendamento).
