@@ -1,14 +1,4 @@
-==== DEPLOY AUTO 22/07/2026 12:24:26,80 ==== 
+==== DEPLOY AUTO 22/07/2026 21:24:38,58 ==== 
 [1/3] node --check... 
    sintaxe OK 
 [2/3] git push... 
-[main 3f0739d] perf: micro-cache leads/stages + fallback modelo gemini (2.5-flash descontinuado)
- 1 file changed, 4 insertions(+)
- create mode 100644 _deploy_auto_log.txt
-To https://github.com/hmancini71/crm-whatsapp-backend.git
-   62e1ee6..3f0739d  main -> main
-   push OK 
-[3/3] atualizando Hetzner... 
-Access denied
-FATAL ERROR: Configured password was not accepted
-==== FALHOU — veja as linhas acima ==== 
