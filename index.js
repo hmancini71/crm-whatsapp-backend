@@ -3963,6 +3963,9 @@ app.post('/api/settings/ai', authenticateToken, async (req, res) => {
     ['enabled', 'novo_enabled', 'fu_enabled'].forEach(k => { if (b[k] !== undefined) cur[k] = !!b[k]; });
     if (b.fu_hours !== undefined) cur.fu_hours = Math.max(1, Math.min(168, Number(b.fu_hours) || 24));
     if (b.fu_max !== undefined) cur.fu_max = Math.max(0, Math.min(30, Number(b.fu_max) || 2));
+    // pipeline431: ticks de coluna do follow-up (Henry) — col3 = regra do Resgate; col4 = demais
+    if (b.fu_col3 !== undefined) cur.fu_col3 = !!b.fu_col3;
+    if (b.fu_col4 !== undefined) cur.fu_col4 = !!b.fu_col4;
     await saveAiSettings(cur);
     res.json(cur);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4318,6 +4321,16 @@ async function aiFollowUpSweep() {
       [cfg.fu_max || 2]
     );
     if (!leads.length) return;
+    // pipeline431: ticks de coluna do follow-up (Henry) — col3 = regra do Resgate; col4 = demais
+    const fuCol3 = cfg.fu_col3 !== false;
+    const fuCol4 = cfg.fu_col4 !== false;
+    let minMessages = 4, requireClientMsg = true;
+    try {
+      const _rr = await getRow("SELECT value FROM app_settings WHERE key = 'lead_rescue_rules'");
+      const _parsed = _rr && _rr.value ? JSON.parse(_rr.value) : null;
+      if (_parsed && Number.isInteger(_parsed.minMessages)) minMessages = _parsed.minMessages;
+      if (_parsed && typeof _parsed.requireClientMsg === 'boolean') requireClientMsg = _parsed.requireClientMsg;
+    } catch (e) {}
     const { posSet: _posLines } = await getSaleLineFilter(); // IA não atua nas linhas pós (2030)
     const convs = await allRows("SELECT id, account, phone, whatsapp_jid FROM conversations WHERE (archived IS NULL OR archived = 0)");
     const norm = (p) => String(p || '').replace(/\D/g, '');
@@ -4328,6 +4341,10 @@ async function aiFollowUpSweep() {
     for (const l of leads) {
       if (processed >= PER_RUN_CAP) { console.log(`[IA follow-up] limite da rodada (${PER_RUN_CAP}) atingido; o restante segue na próxima.`); break; }
       try {
+        // pipeline431: ticks de coluna do follow-up (Henry) — col3 = regra do Resgate; col4 = demais
+        const _q = (Number(l.conv_msg_count) || 0) >= minMessages && (!requireClientMsg || (Number(l.conv_client_msg_count) || 0) >= 1);
+        const _col = _q ? 3 : 4;
+        if ((_col === 3 && !fuCol3) || (_col === 4 && !fuCol4)) continue;
         const lt = norm(l.phone).slice(-8);
         const conv = convs.find(c =>
           (l.whatsapp_jid && c.whatsapp_jid && c.whatsapp_jid === l.whatsapp_jid) ||
