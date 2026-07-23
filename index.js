@@ -3979,6 +3979,41 @@ app.post('/api/leads/:id/unsign', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// pipeline436: Boleto da taxa consular (coluna Com conta e sem agendar) — registra um NOVO envio
+// (múltiplos permitidos) e re-arma a tag GERAR AGENDAMENTO (dismissed volta a 0).
+app.post('/api/leads/:id/boleto', authenticateToken, async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  const due = String((req.body && req.body.due) || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(due)) return res.status(400).json({ error: 'Data de vencimento inválida (use YYYY-MM-DD).' });
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    let arr = [];
+    try { arr = JSON.parse(lead.boletos || '[]'); if (!Array.isArray(arr)) arr = []; } catch (e) { arr = []; }
+    const sentIso = new Date().toISOString();
+    arr.push({ due, sent: sentIso });
+    bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
+    await runQuery("UPDATE leads SET boletos = ?, boleto_tag_dismissed = 0 WHERE id = ?", [JSON.stringify(arr), id]);
+    const [dy, dm, dd] = due.split('-');
+    try { logLeadHistory({ leadId: id, phone: lead.phone, name: lead.name, type: 'nota', detail: `Boleto da taxa consular enviado — vencimento ${dd}/${dm}/${dy}` }); } catch (e) {}
+    const updatedLead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({ ...updatedLead, tags: updatedLead.tags ? JSON.parse(updatedLead.tags) : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// pipeline436: dispensa a tag GERAR AGENDAMENTO (✕ no badge do card ou botão no modal).
+app.post('/api/leads/:id/boleto-dismiss', authenticateToken, async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  try {
+    const lead = await getRow("SELECT id FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
+    await runQuery("UPDATE leads SET boleto_tag_dismissed = 1 WHERE id = ?", [id]);
+    const updatedLead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({ ...updatedLead, tags: updatedLead.tags ? JSON.parse(updatedLead.tags) : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ===== IA (Gemini): configurações + teste =====
 app.get('/api/settings/ai', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });

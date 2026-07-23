@@ -918,6 +918,24 @@ db.serialize(() => {
     }
   });
 
+  // pipeline436: boletos da taxa consular (coluna Com conta e sem agendar) — lista de envios {due, sent} + dispensa da tag GERAR AGENDAMENTO
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'boletos')) {
+      db.run("ALTER TABLE leads ADD COLUMN boletos TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) console.error("Failed to add boletos column to leads:", alterErr);
+        else console.log("Migration: added 'boletos' column to leads table.");
+      });
+    }
+  });
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'boleto_tag_dismissed')) {
+      db.run("ALTER TABLE leads ADD COLUMN boleto_tag_dismissed INTEGER DEFAULT 0", (alterErr) => {
+        if (alterErr) console.error("Failed to add boleto_tag_dismissed column to leads:", alterErr);
+        else console.log("Migration: added 'boleto_tag_dismissed' column to leads table.");
+      });
+    }
+  });
+
   // Unconditional migration: update stages to new pipeline phases (Novo Leads, Tratamento inicial, Proposta enviada, Follow-up pagamento, Lead declinou/cancelado)
   db.serialize(() => {
     console.log("Migration: sync stages to new 5-column pipeline...");
