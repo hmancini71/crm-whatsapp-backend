@@ -4665,22 +4665,27 @@ app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
       const sd = l.sale_date && String(l.sale_date).trim();
       const day = sd ? sd.slice(0, 10) : String(l.createdAt || '').slice(0, 10);
       if (!day || day < fromIso || day > toIso) return;
-      if (!byDay[day]) byDay[day] = { count: 0, value: 0, byCat: { ga: 0, meta: 0, org: 0, semclass: 0 } };
+      // pipeline448: byCatCount (Nº de vendas por categoria) ao lado de byCat (R$ por categoria) —
+      // fonte única também da pizza "Vendas convertidas por origem" (antes calculada solta no
+      // navegador por createdAt, sem excluir archived/"Planilha Americano" → divergia do quadro
+      // canônico). Mesma leadChannelCat, mesma query — os dois quadros nunca mais divergem.
+      if (!byDay[day]) byDay[day] = { count: 0, value: 0, byCat: { ga: 0, meta: 0, org: 0, semclass: 0 }, byCatCount: { ga: 0, meta: 0, org: 0, semclass: 0 } };
       const val = Number(l.value) || 0;
       const cat = leadChannelCat(l);
       byDay[day].count++;
       byDay[day].value += val;
       byDay[day].byCat[cat] = (byDay[day].byCat[cat] || 0) + val;
+      byDay[day].byCatCount[cat] = (byDay[day].byCatCount[cat] || 0) + 1;
     });
     const emptyCat = () => ({ ga: 0, meta: 0, org: 0, semclass: 0 });
     const series = days.map(d => {
-      const e = byDay[d.iso] || { count: 0, value: 0, byCat: emptyCat() };
-      return { day: d.iso, label: d.label, count: e.count, value: e.value, byCat: e.byCat };
+      const e = byDay[d.iso] || { count: 0, value: 0, byCat: emptyCat(), byCatCount: emptyCat() };
+      return { day: d.iso, label: d.label, count: e.count, value: e.value, byCat: e.byCat, byCatCount: e.byCatCount };
     });
-    const totals = { count: 0, value: 0, byCat: emptyCat() };
+    const totals = { count: 0, value: 0, byCat: emptyCat(), byCatCount: emptyCat() };
     series.forEach(d => {
       totals.count += d.count; totals.value += d.value;
-      Object.keys(totals.byCat).forEach(k => { totals.byCat[k] += (d.byCat[k] || 0); });
+      Object.keys(totals.byCat).forEach(k => { totals.byCat[k] += (d.byCat[k] || 0); totals.byCatCount[k] += (d.byCatCount[k] || 0); });
     });
     res.json({ from: fromIso, to: toIso, days: series, totals, updated_at: new Date().toISOString() });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4696,14 +4701,22 @@ app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
 app.get('/api/dashboard/sales-daily-leads', authenticateToken, async (req, res) => {
   try {
     const day = String(req.query.day || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ error: 'day inválido (use YYYY-MM-DD)' });
+    const hasDay = /^\d{4}-\d{2}-\d{2}$/.test(day);
+    const fromQ = String(req.query.from || '').slice(0, 10);
+    const toQ = String(req.query.to || '').slice(0, 10);
+    const hasRange = /^\d{4}-\d{2}-\d{2}$/.test(fromQ) && /^\d{4}-\d{2}-\d{2}$/.test(toQ);
+    // pipeline448: aceita OU day=YYYY-MM-DD (1 dia, popup do segmento na barra) OU from=&to=
+    // (período inteiro — clique numa fatia/legenda da pizza "Vendas convertidas por origem", que
+    // não tem um único dia). Precisa de um dos dois.
+    if (!hasDay && !hasRange) return res.status(400).json({ error: 'informe day=YYYY-MM-DD OU from=&to=YYYY-MM-DD' });
+    const fromIso = hasDay ? day : fromQ, toIso = hasDay ? day : toQ;
     const cat = String(req.query.cat || '').trim().toLowerCase();
     if (cat && ['ga', 'meta', 'org', 'semclass'].indexOf(cat) === -1) return res.status(400).json({ error: 'cat inválido (use ga|meta|org|semclass)' });
     const rows = await allRows(
       "SELECT id, name, value, tags, tracking, source FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
-      "(sale_date IS NOT NULL AND TRIM(sale_date) <> '' AND substr(sale_date,1,10) = ?) OR " +
-      "((sale_date IS NULL OR TRIM(sale_date) = '') AND substr(createdAt,1,10) = ?))",
-      [day, day]
+      "(sale_date IS NOT NULL AND TRIM(sale_date) <> '' AND substr(sale_date,1,10) >= ? AND substr(sale_date,1,10) <= ?) OR " +
+      "((sale_date IS NULL OR TRIM(sale_date) = '') AND substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?))",
+      [fromIso, toIso, fromIso, toIso]
     );
     let leads = rows.map(l => {
       let service = '—';
@@ -4714,7 +4727,7 @@ app.get('/api/dashboard/sales-daily-leads', authenticateToken, async (req, res) 
     leads.sort((a, b) => b.value - a.value);
     leads = leads.map(l => ({ id: l.id, name: l.name, value: l.value, service: l.service }));
     const totals = leads.reduce((s, l) => { s.count++; s.value += l.value; return s; }, { count: 0, value: 0 });
-    res.json({ day, cat: cat || null, leads, totals });
+    res.json({ day: hasDay ? day : null, from: fromIso, to: toIso, cat: cat || null, leads, totals });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
