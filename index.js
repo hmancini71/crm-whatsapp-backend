@@ -16,6 +16,7 @@ const multer = require('multer');
 const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams, getOriginMsgRules, setOriginMsgRules, reclassifyLeadsByFirstMsg } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
 const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
+const { createConversionReportJob, listConversionReports, getConversionReport, getLatestConversionReport } = require('./reports');
 const { getCalendlySettings, saveCalendlySettings, testCalendly, calendlySweep } = require('./calendly');
 const antiban = require('./antiban'); // governador anti-banimento (caps, warm-up, pacing, horário, variação)
 const {
@@ -4072,14 +4073,24 @@ app.post('/api/leads/:id/boleto-dismiss', authenticateToken, async (req, res) =>
 // ===== IA (Gemini): configurações + teste =====
 app.get('/api/settings/ai', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
-  try { res.json(await getAiSettings()); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const cfg = await getAiSettings();
+    // pipeline452: a chave Anthropic NUNCA volta inteira pro front — só os últimos 4 caracteres,
+    // igual ao padrão já usado p/ o token do Meta/Calendly (nunca reinjetado no campo).
+    const out = Object.assign({}, cfg);
+    const ak = String(cfg.anthropic_key || '');
+    out.anthropic_key = '';
+    out.anthropic_key_mask = ak.length >= 4 ? ('••••' + ak.slice(-4)) : '';
+    out.anthropic_key_set = !!ak;
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/settings/ai', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
   try {
     const cur = await getAiSettings();
     const b = req.body || {};
-    ['gemini_key', 'model', 'novo_instructions', 'fu_instructions', 'movement_rules'].forEach(k => { if (b[k] !== undefined) cur[k] = String(b[k]); });
+    ['gemini_key', 'model', 'novo_instructions', 'fu_instructions', 'movement_rules', 'anthropic_key', 'anthropic_model'].forEach(k => { if (b[k] !== undefined) cur[k] = String(b[k]); });
     ['enabled', 'novo_enabled', 'fu_enabled'].forEach(k => { if (b[k] !== undefined) cur[k] = !!b[k]; });
     if (b.fu_hours !== undefined) cur.fu_hours = Math.max(1, Math.min(168, Number(b.fu_hours) || 24));
     if (b.fu_max !== undefined) cur.fu_max = Math.max(0, Math.min(30, Number(b.fu_max) || 2));
@@ -4090,6 +4101,44 @@ app.post('/api/settings/ai', authenticateToken, async (req, res) => {
     res.json(cur);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ===== pipeline452: Relatório crítico de conversão (Claude/Anthropic) =====
+// Analisa as conversas dos leads do "Tratamento inicial" num período e gera um relatório
+// markdown. Roda em BACKGROUND (setImmediate, ver reports.js) — este endpoint só enfileira.
+app.post('/api/reports/conversion-analysis', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try {
+    const b = req.body || {};
+    const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+    if (!isIsoDate(b.from) || !isIsoDate(b.to)) return res.status(400).json({ error: 'Informe as datas inicial e final (formato AAAA-MM-DD).' });
+    if (b.from > b.to) return res.status(400).json({ error: 'A data inicial não pode ser depois da data final.' });
+    const job = await createConversionReportJob(b.from, b.to);
+    res.status(202).json(job);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+app.get('/api/reports/conversion-analysis', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try { res.json(await listConversionReports(10)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/reports/conversion-analysis/latest', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try {
+    const r = await getLatestConversionReport();
+    if (!r) return res.status(404).json({ error: 'Nenhum relatório gerado ainda.' });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/reports/conversion-analysis/:id', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
+  try {
+    const r = await getConversionReport(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Relatório não encontrado.' });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/ai/test', authenticateToken, async (req, res) => {
   try {
     const cfg = await getAiSettings();

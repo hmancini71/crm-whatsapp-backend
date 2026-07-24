@@ -11,6 +11,10 @@ const DEFAULTS = {
   enabled: false,
   gemini_key: '',
   model: 'gemini-2.0-flash',
+  // pipeline452: chave/modelo da API Anthropic (Claude), usados só pelo "Relatório crítico de
+  // conversão" (guia IA) — NÃO tem relação com o loop de atendimento/follow-up do Gemini acima.
+  anthropic_key: '',
+  anthropic_model: 'claude-fable-5',
   novo_enabled: false,
   novo_instructions: `Você é o Jorge, atendente virtual da Vale Visto (consultoria de vistos e cidadania) que tem a persona de um especialista em vendas de serviços de imigração. Cumprimente o cliente pelo nome se souber, agradeça o contato, faça uma apresentação curta sobre a Vale Visto e colete com gentileza: 1) nome completo; 2) qual serviço/tipo de visto procura.
 Faça as perguntas que forem necessárias para classificar o pedido em algumas das opções a seguir:

@@ -303,6 +303,22 @@ db.serialize(() => {
     updated_at INTEGER
   )`);
 
+  // 5b-3. Relatório crítico de conversão (pipeline452): job de análise via API Anthropic (Claude)
+  // sobre as conversas do Tratamento inicial num período. status: queued|running|done|error.
+  // progress: texto curto ("chunk 2/5"); result: markdown final; error: mensagem legível.
+  db.run(`CREATE TABLE IF NOT EXISTS ai_reports (
+    id TEXT PRIMARY KEY,
+    type TEXT,
+    period_from TEXT,
+    period_to TEXT,
+    status TEXT,
+    progress TEXT,
+    result TEXT,
+    error TEXT,
+    created_at TEXT
+  )`);
+  db.run("CREATE INDEX IF NOT EXISTS idx_ai_reports_created ON ai_reports(created_at DESC)");
+
   // 5c. Calendly (2026-07-07): eventos já processados pela integração — evita retrabalho e
   // detecta remarcação/cancelamento (ver calendly.js).
   db.run(`CREATE TABLE IF NOT EXISTS calendly_events (
