@@ -4536,9 +4536,19 @@ app.get('/api/dashboard/google-ads', authenticateToken, async (req, res) => {
     });
     const sum = (k) => series.reduce((a, x) => a + (Number(x[k]) || 0), 0);
     const clicks = sum('clicks'), cost = sum('cost'), conversions = sum('conversions'), impressions = sum('impressions');
+    const activeDays = series.filter(x => x.clicks > 0 || x.cost > 0 || x.impressions > 0).length;
+    // pipeline446: contagem CANÔNICA (server-side) de leads do canal Google Ads no período — mesmos
+    // filtros do ponto ótimo (archived=0, exclui legado "Planilha Americano") — substitui o cálculo
+    // no navegador do rodapé "Custo/lead no CRM" (que somava leads arquivados/legado).
+    const leadRows = await allRows(
+      "SELECT createdAt, tracking, source FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'",
+      [fromIso, toIso]
+    );
+    let crmLeadsGA = 0;
+    leadRows.forEach(l => { if (leadChannelCat(l) === 'ga') crmLeadsGA++; });
     res.json({
-      from: fromIso, to: toIso, days: series,
-      totals: { clicks, cost, conversions, impressions, cpc: clicks > 0 ? cost / clicks : 0, costPerConv: conversions > 0 ? cost / conversions : 0 }
+      from: fromIso, to: toIso, days: series, activeDays,
+      totals: { clicks, cost, conversions, impressions, cpc: clicks > 0 ? cost / clicks : 0, costPerConv: conversions > 0 ? cost / conversions : 0, crmLeadsGA }
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4635,6 +4645,47 @@ app.get('/api/dashboard/google-ads-breakdown', authenticateToken, async (req, re
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET: Faturamento e vendas por dia (pipeline446) — FONTE ÚNICA server-side do quadro "Faturamento
+// e vendas por dia" do dashboard: antes o front calculava isso no navegador sobre window._crmLeadMap
+// (sem filtro de archived nem do legado "Planilha Americano" → números inflados). Mesmos filtros
+// do /dashboard/optimal-point: stage='convertida', archived=0, exclui "Planilha Americano". Dia
+// CANÔNICO = sale_date (quando válido) senão a data de createdAt (fallback).
+app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
+  try {
+    const days = daysRangeSP(req.query.from, req.query.to, 15);
+    const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
+    const rows = await allRows(
+      "SELECT sale_date, createdAt, tracking, source, value FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
+      "(sale_date IS NOT NULL AND TRIM(sale_date) <> '' AND substr(sale_date,1,10) >= ? AND substr(sale_date,1,10) <= ?) OR " +
+      "((sale_date IS NULL OR TRIM(sale_date) = '') AND substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?))",
+      [fromIso, toIso, fromIso, toIso]
+    );
+    const byDay = {};
+    rows.forEach(l => {
+      const sd = l.sale_date && String(l.sale_date).trim();
+      const day = sd ? sd.slice(0, 10) : String(l.createdAt || '').slice(0, 10);
+      if (!day || day < fromIso || day > toIso) return;
+      if (!byDay[day]) byDay[day] = { count: 0, value: 0, byCat: { ga: 0, meta: 0, org: 0, semclass: 0 } };
+      const val = Number(l.value) || 0;
+      const cat = leadChannelCat(l);
+      byDay[day].count++;
+      byDay[day].value += val;
+      byDay[day].byCat[cat] = (byDay[day].byCat[cat] || 0) + val;
+    });
+    const emptyCat = () => ({ ga: 0, meta: 0, org: 0, semclass: 0 });
+    const series = days.map(d => {
+      const e = byDay[d.iso] || { count: 0, value: 0, byCat: emptyCat() };
+      return { day: d.iso, label: d.label, count: e.count, value: e.value, byCat: e.byCat };
+    });
+    const totals = { count: 0, value: 0, byCat: emptyCat() };
+    series.forEach(d => {
+      totals.count += d.count; totals.value += d.value;
+      Object.keys(totals.byCat).forEach(k => { totals.byCat[k] += (d.byCat[k] || 0); });
+    });
+    res.json({ from: fromIso, to: toIso, days: series, totals, updated_at: new Date().toISOString() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET: Ponto ótimo de investimento (Google Ads) — janela FIXA de 30 dias, auto-calibrada com
 // dados reais (google_ads_daily + leads do CRM). Contrato fixo consumido pelo frontend
 // (crmRenderOptPoint): { window, ads, funnel, ticket, updated_at }.
@@ -4658,25 +4709,35 @@ app.get('/api/dashboard/optimal-point', authenticateToken, async (req, res) => {
     });
     const cpc = clicks > 0 ? cost / clicks : 0;
 
+    // leadsGA: coorte de LEADS por createdAt na janela (denominador da tx clique→lead) — mantido
+    // como estava.
     const leadRows = await allRows(
       "SELECT createdAt, tracking, source, stage, value FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'",
       [fromIso, toIso]
     );
-    let leadsGA = 0, convGA = 0;
+    let leadsGA = 0;
+    leadRows.forEach(l => { if (leadChannelCat(l) === 'ga') leadsGA++; });
+
+    // pipeline446: convGA/ticket/CAC-contrato agora contam CONTRATOS pela DATA DA VENDA canônica
+    // (sale_date válido, senão createdAt) — mesma definição do /dashboard/sales-daily — em vez da
+    // data de criação do lead (uma venda fechada dias após o lead entrar contava no dia/janela
+    // errada e distorcia o ticket médio e o CAC por contrato).
+    const saleRows = await allRows(
+      "SELECT sale_date, createdAt, tracking, source, value FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
+      "(sale_date IS NOT NULL AND TRIM(sale_date) <> '' AND substr(sale_date,1,10) >= ? AND substr(sale_date,1,10) <= ?) OR " +
+      "((sale_date IS NULL OR TRIM(sale_date) = '') AND substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?))",
+      [fromIso, toIso, fromIso, toIso]
+    );
+    let convGA = 0;
     const ticketGaVals = [];
     const ticketAllVals = [];
-    leadRows.forEach(l => {
-      const cat = leadChannelCat(l);
-      const isConv = l.stage === 'convertida';
+    saleRows.forEach(l => {
       const val = Number(l.value) || 0;
-      if (cat === 'ga') {
-        leadsGA++;
-        if (isConv) {
-          convGA++;
-          if (val > 0) ticketGaVals.push(val);
-        }
+      if (val > 0) ticketAllVals.push(val);
+      if (leadChannelCat(l) === 'ga') {
+        convGA++;
+        if (val > 0) ticketGaVals.push(val);
       }
-      if (isConv && val > 0) ticketAllVals.push(val);
     });
     const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
@@ -4689,7 +4750,7 @@ app.get('/api/dashboard/optimal-point', authenticateToken, async (req, res) => {
 
     res.json({
       window: { from: fromIso, to: toIso, days: daysCount },
-      ads: { cost, clicks, conversions, impressions, cpc, activeDays, spendMonthly, clicksMonthly },
+      ads: { cost, clicks, conversions, impressions, cpc, activeDays, days: daysCount, spendMonthly, clicksMonthly },
       funnel: { leadsGA, convGA, leadsGAMonthly, c2qPct, closePct },
       ticket: { ga: avg(ticketGaVals), all: avg(ticketAllVals), n: convGA },
       updated_at: new Date().toISOString()
@@ -4750,28 +4811,34 @@ app.get('/api/dashboard/optimal-point-meta', authenticateToken, async (req, res)
       "SELECT createdAt, tracking, source, stage, value FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'",
       [fromIso, toIso]
     );
-    let leadsGA = 0, convGA = 0;
+    let leadsGA = 0;
+    leadRows.forEach(l => { if (leadChannelCat(l) === 'meta') leadsGA++; });
+
+    // pipeline446: mesmo tratamento do bloco Google — convGA/ticket/CAC-contrato pela DATA DA
+    // VENDA canônica (sale_date válido, senão createdAt), não pela data de criação do lead.
+    const saleRows = await allRows(
+      "SELECT sale_date, createdAt, tracking, source, value FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
+      "(sale_date IS NOT NULL AND TRIM(sale_date) <> '' AND substr(sale_date,1,10) >= ? AND substr(sale_date,1,10) <= ?) OR " +
+      "((sale_date IS NULL OR TRIM(sale_date) = '') AND substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?))",
+      [fromIso, toIso, fromIso, toIso]
+    );
+    let convGA = 0;
     const ticketGaVals = [];
     const ticketAllVals = [];
-    leadRows.forEach(l => {
-      const cat = leadChannelCat(l);
-      const isConv = l.stage === 'convertida';
+    saleRows.forEach(l => {
       const val = Number(l.value) || 0;
-      if (cat === 'meta') {
-        leadsGA++;
-        if (isConv) {
-          convGA++;
-          if (val > 0) ticketGaVals.push(val);
-        }
+      if (val > 0) ticketAllVals.push(val);
+      if (leadChannelCat(l) === 'meta') {
+        convGA++;
+        if (val > 0) ticketGaVals.push(val);
       }
-      if (isConv && val > 0) ticketAllVals.push(val);
     });
     const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
     const daysCount = days.length || 30;
     res.json({
       window: { from: fromIso, to: toIso, days: daysCount },
-      ads: { cost, clicks, conversions, impressions, cpc, activeDays, spendMonthly: cost * 30.4 / daysCount, clicksMonthly: clicks * 30.4 / daysCount },
+      ads: { cost, clicks, conversions, impressions, cpc, activeDays, days: daysCount, spendMonthly: cost * 30.4 / daysCount, clicksMonthly: clicks * 30.4 / daysCount },
       funnel: { leadsGA, convGA, leadsGAMonthly: leadsGA * 30.4 / daysCount, c2qPct: clicks > 0 ? (leadsGA / clicks) * 100 : 0, closePct: leadsGA > 0 ? (convGA / leadsGA) * 100 : 0 },
       ticket: { ga: avg(ticketGaVals), all: avg(ticketAllVals), n: convGA },
       updated_at: new Date().toISOString()
