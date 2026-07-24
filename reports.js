@@ -13,10 +13,18 @@ const crypto = require('crypto');
 const { runQuery, getRow, allRows } = require('./db');
 const { getAiSettings } = require('./ai');
 
-const CHUNK_SIZE = 12;
+// pipeline454 (fix bug relatado pelo Henry — "Resposta vazia da API Anthropic"): CHUNK_SIZE
+// reduzido de 12 p/ 8 e MAX_CHARS_PER_LEAD de 3500 p/ 2500 como margem de segurança — o modelo
+// 'claude-fable-5' usa "thinking" adaptativo que NÃO pode ser desligado (a API rejeita
+// thinking.type=disabled p/ este modelo: "Thinking defaults to adaptive mode") e os tokens de
+// thinking consomem o mesmo orçamento de max_tokens da resposta; lotes menores dão mais folga
+// pro bloco de texto real não ser cortado.
+const CHUNK_SIZE = 8;
 const LEAD_CAP = 150;
 const MAX_MSGS_PER_LEAD = 50;
-const MAX_CHARS_PER_LEAD = 3500;
+const MAX_CHARS_PER_LEAD = 2500;
+const MAP_MAX_TOKENS = 3000; // pipeline454: era 2000 — mais folga p/ thinking + JSON de saída
+const REDUCE_MAX_TOKENS = 4000;
 
 function newId() { return crypto.randomBytes(12).toString('hex'); }
 
@@ -46,17 +54,30 @@ function callClaudeOnce(apiKey, model, maxTokens, systemText, userText) {
       res.on('end', () => {
         let j;
         try { j = JSON.parse(data); } catch (e) {
-          return reject(new Error('Resposta inválida da API Anthropic (HTTP ' + res.statusCode + ')'));
+          return reject(new Error('Resposta inválida da API Anthropic (HTTP ' + res.statusCode + '): ' + String(data).slice(0, 200)));
         }
+        // pipeline454 (fix): SEMPRE propaga o erro REAL (status + type + message) em vez de
+        // esconder atrás de "Resposta vazia" — checa erro/status ANTES de tentar extrair texto.
         if (res.statusCode === 401) return reject(new Error('chave Anthropic inválida'));
         if (j.error) {
-          const msg = (j.error && j.error.message) || ('Erro da API Anthropic (HTTP ' + res.statusCode + ')');
-          return reject(new Error(msg));
+          const etype = j.error.type || 'erro';
+          const emsg = String(j.error.message || '').slice(0, 300);
+          return reject(new Error('Erro da API Anthropic (HTTP ' + res.statusCode + ', ' + etype + '): ' + emsg));
         }
-        if (res.statusCode >= 400) return reject(new Error('Erro da API Anthropic (HTTP ' + res.statusCode + ')'));
-        const txt = j.content && j.content[0] && j.content[0].text;
-        if (!txt) return reject(new Error('Resposta vazia da API Anthropic'));
-        resolve(txt);
+        if (res.statusCode >= 400) {
+          return reject(new Error('Erro da API Anthropic (HTTP ' + res.statusCode + '): ' + String(data).slice(0, 300)));
+        }
+        // pipeline454 (fix): extração ROBUSTA — procura o primeiro bloco type==='text' em vez de
+        // fixar content[0] (o modelo 'claude-fable-5' usa "thinking" adaptativo e devolve
+        // content=[{type:'thinking',...}, {type:'text', text:'...'}] — content[0].text era
+        // sempre undefined, causando o falso "Resposta vazia da API Anthropic").
+        const blocks = Array.isArray(j.content) ? j.content : [];
+        const textBlock = blocks.find(b => b && b.type === 'text' && b.text);
+        if (!textBlock) {
+          const kinds = blocks.map(b => b && b.type).join(',') || '(nenhum bloco)';
+          return reject(new Error('Resposta vazia da API Anthropic (stop_reason=' + (j.stop_reason || '?') + ', blocos=' + kinds + ') — provavelmente estourou max_tokens antes do texto; tente um período/lote menor.'));
+        }
+        resolve(textBlock.text);
       });
     });
     req.on('error', (e) => reject(new Error('Falha de rede ao chamar a API Anthropic: ' + e.message)));
@@ -197,7 +218,7 @@ async function runConversionReport(id, fromIso, toIso) {
       const userText = chunks[i].map((item, idx) => '--- LEAD ' + (idx + 1) + ' ---\n' + buildLeadContext(item)).join('\n\n');
       let out;
       try {
-        out = await callClaude(apiKey, model, 2000, MAP_SYSTEM, userText);
+        out = await callClaude(apiKey, model, MAP_MAX_TOKENS, MAP_SYSTEM, userText);
       } catch (e) {
         if (/chave Anthropic inválida/i.test(e.message)) throw e;
         throw new Error('Falha ao processar chunk ' + (i + 1) + '/' + chunks.length + ': ' + e.message);
@@ -215,7 +236,7 @@ async function runConversionReport(id, fromIso, toIso) {
       'Evidências por lead (JSON):\n' + JSON.stringify(evidences).slice(0, 60000);
     let finalMd;
     try {
-      finalMd = await callClaude(apiKey, model, 4000, REDUCE_SYSTEM, reduceInput);
+      finalMd = await callClaude(apiKey, model, REDUCE_MAX_TOKENS, REDUCE_SYSTEM, reduceInput);
     } catch (e) {
       throw new Error('Falha ao gerar o relatório final: ' + e.message);
     }
