@@ -3373,6 +3373,41 @@ app.post('/api/settings/services', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// pipeline449: Origens de lead (Configurações → Identificação): lista editável que alimenta o
+// combo "Origem do lead" do modal do card. Seed na 1ª leitura se ainda não houver nada salvo.
+const LEAD_ORIGINS_SEED = ['Google Ads', 'Meta Ads', 'Ferramenta de IA (GPT, Gemini, etc)', 'Orgânico', 'Indicação', 'Passou na Frente da Loja'];
+app.get('/api/settings/lead-origins', authenticateToken, async (req, res) => {
+  try {
+    let row = await getRow("SELECT value FROM app_settings WHERE key = 'lead_origins'");
+    if (!row || !row.value) {
+      await runQuery(
+        "INSERT INTO app_settings (key, value) VALUES ('lead_origins', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [JSON.stringify(LEAD_ORIGINS_SEED)]
+      );
+      row = { value: JSON.stringify(LEAD_ORIGINS_SEED) };
+    }
+    let arr = [];
+    try { arr = JSON.parse(row.value); } catch (e) { arr = []; }
+    if (!Array.isArray(arr) || !arr.length) arr = LEAD_ORIGINS_SEED;
+    res.json(arr);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/settings/lead-origins', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === 'Vendedor') {
+    return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
+  }
+  try {
+    const arr = Array.isArray(req.body) ? req.body : ((req.body && req.body.items) || []);
+    const clean = arr.map(x => String(x == null ? '' : x).trim()).filter(Boolean).slice(0, 20);
+    if (!clean.length) return res.status(400).json({ error: 'Informe ao menos 1 origem' });
+    await runQuery(
+      "INSERT INTO app_settings (key, value) VALUES ('lead_origins', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [JSON.stringify(clean)]
+    );
+    res.json({ success: true, count: clean.length, items: clean });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Enviar formulário de coleta de dados DS-160 (sistema de contratos gerencia_ds-160).
 // Cria a credencial/token (DRAFT) e o PRÓPRIO servidor de contratos envia o e-mail ao cliente.
 // Servidor-a-servidor: a senha de admin NÃO trafega pelo navegador.
@@ -5150,6 +5185,16 @@ function leadChannelCat(l) {
   if (synth === 'Google Ads') return 'ga';
   if (synth === 'Meta Ads') return 'meta';
   if (ch) return 'org';
+  // pipeline449: origem EXPLÍCITA (travada pelo combo do modal OU só digitada no campo source)
+  // conta como org mesmo SEM prova de tracking — antes um lead com source='Orgânico' travado mas
+  // sem tracking (ex.: Israel Tenorio) caía em semclass por engano. Só falta real de origem
+  // (vazio/"sem identificação"/placeholders internos) cai em semclass.
+  const srcNorm = String((l && l.source) || '').trim().toLowerCase();
+  // 'venda' é placeholder interno (gravado em backfills de pós-venda, não é origem real — ver
+  // merge de duplicados que já trata acc.source === 'Venda' como "vazio" mais acima no arquivo).
+  const isExplicitSource = !!srcNorm && srcNorm !== 'manual' && srcNorm !== 'marketing' &&
+    srcNorm !== 'venda' && srcNorm.indexOf('sem ') !== 0 && srcNorm !== 'planilha americano';
+  if (isExplicitSource) return 'org';
   return 'semclass';
 }
 
