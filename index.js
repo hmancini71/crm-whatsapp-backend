@@ -4686,6 +4686,38 @@ app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET: detalhe de um dia (+ opcionalmente um SEGMENTO/categoria) do quadro "Faturamento e vendas
+// por dia" — pipeline447, pedido do Henry: clicar num segmento da barra deve listar SÓ os clientes
+// daquele segmento/origem naquele dia (antes o popup (crmShowSalesDay) listava TODAS as vendas do
+// dia, sem filtro de categoria, direto de window._crmLeadMap no navegador). Mesma query canônica
+// do /dashboard/sales-daily (stage='convertida', archived=0, exclui "Planilha Americano", dia =
+// sale_date válido senão createdAt) + mesma função leadChannelCat (fonte única) para o filtro de
+// categoria — nunca diverge do que o gráfico já mostra.
+app.get('/api/dashboard/sales-daily-leads', authenticateToken, async (req, res) => {
+  try {
+    const day = String(req.query.day || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ error: 'day inválido (use YYYY-MM-DD)' });
+    const cat = String(req.query.cat || '').trim().toLowerCase();
+    if (cat && ['ga', 'meta', 'org', 'semclass'].indexOf(cat) === -1) return res.status(400).json({ error: 'cat inválido (use ga|meta|org|semclass)' });
+    const rows = await allRows(
+      "SELECT id, name, value, tags, tracking, source FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
+      "(sale_date IS NOT NULL AND TRIM(sale_date) <> '' AND substr(sale_date,1,10) = ?) OR " +
+      "((sale_date IS NULL OR TRIM(sale_date) = '') AND substr(createdAt,1,10) = ?))",
+      [day, day]
+    );
+    let leads = rows.map(l => {
+      let service = '—';
+      try { const tg = JSON.parse(l.tags || '[]'); if (Array.isArray(tg) && tg[0]) service = String(tg[0]); } catch (e) {}
+      return { id: l.id, name: l.name || '(sem nome)', value: Number(l.value) || 0, service, cat: leadChannelCat(l) };
+    });
+    if (cat) leads = leads.filter(l => l.cat === cat);
+    leads.sort((a, b) => b.value - a.value);
+    leads = leads.map(l => ({ id: l.id, name: l.name, value: l.value, service: l.service }));
+    const totals = leads.reduce((s, l) => { s.count++; s.value += l.value; return s; }, { count: 0, value: 0 });
+    res.json({ day, cat: cat || null, leads, totals });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET: Ponto ótimo de investimento (Google Ads) — janela FIXA de 30 dias, auto-calibrada com
 // dados reais (google_ads_daily + leads do CRM). Contrato fixo consumido pelo frontend
 // (crmRenderOptPoint): { window, ads, funnel, ticket, updated_at }.
