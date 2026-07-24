@@ -1,5 +1,7 @@
 node_modules/
 sessions/
 database.db
+database.db-shm
+database.db-wal
 .env
 index.js.bak-otimo
