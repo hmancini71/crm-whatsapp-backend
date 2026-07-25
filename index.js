@@ -4070,6 +4070,32 @@ app.post('/api/leads/:id/boleto-dismiss', authenticateToken, async (req, res) =>
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// pipeline458: LIXEIRINHA no modal (Envios registrados) — remove UM envio de boleto específico,
+// identificado por {due, sent} (se houver duplicata exata, remove UMA ocorrência apenas).
+// Tudo derivado (linha do card, piscar, cor, tag GERAR AGENDAMENTO, ordenação) recalcula sozinho
+// a partir do array atualizado — inclusive com array vazio (_lastDue vira undefined, linha some).
+app.delete('/api/leads/:id/boleto', authenticateToken, async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  const due = String((req.body && req.body.due) || '').trim();
+  const sent = String((req.body && req.body.sent) || '').trim();
+  if (!due || !sent) return res.status(400).json({ error: 'Parâmetros due e sent são obrigatórios.' });
+  try {
+    const lead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    let arr = [];
+    try { arr = JSON.parse(lead.boletos || '[]'); if (!Array.isArray(arr)) arr = []; } catch (e) { arr = []; }
+    const idx = arr.findIndex(b => b && String(b.due) === due && String(b.sent) === sent);
+    if (idx === -1) return res.status(404).json({ error: 'Envio de boleto não encontrado.' });
+    arr.splice(idx, 1); // remove UMA ocorrência, mesmo havendo duplicata exata (due+sent iguais)
+    bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
+    await runQuery("UPDATE leads SET boletos = ? WHERE id = ?", [JSON.stringify(arr), id]);
+    const [dy, dm, dd] = due.split('-');
+    try { logLeadHistory({ leadId: id, phone: lead.phone, name: lead.name, type: 'nota', detail: `Boleto removido: venc. ${dd}/${dm}/${dy}` }); } catch (e) {}
+    const updatedLead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({ ...updatedLead, tags: updatedLead.tags ? JSON.parse(updatedLead.tags) : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ===== IA (Gemini): configurações + teste =====
 app.get('/api/settings/ai', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
