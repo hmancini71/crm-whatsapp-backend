@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
-const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams, getOriginMsgRules, setOriginMsgRules, reclassifyLeadsByFirstMsg } = require('./db');
+const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams, getOriginMsgRules, setOriginMsgRules, reclassifyLeadsByFirstMsg, getConversationsCache, setConversationsCache, bustConversationsCache } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
 const { getAiSettings, saveAiSettings, callGemini, getFollowUpReply } = require('./ai');
 const { createConversionReportJob, listConversionReports, getConversionReport, getLatestConversionReport } = require('./reports');
@@ -915,7 +915,7 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       try {
         await runQuery("UPDATE leads SET service_closed = 1, lastClientReply = NULL, priority = '' WHERE id = ?", [id]);
         const convo = await findConvoForLead(cur);
-        if (convo) await runQuery("UPDATE conversations SET archived = 1, unread = 0 WHERE id = ?", [convo.id]);
+        if (convo) { await runQuery("UPDATE conversations SET archived = 1, unread = 0 WHERE id = ?", [convo.id]); bustConversationsCache(); }
       } catch (e) {}
       logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Atendimento ENCERRADO automaticamente ao mover para "Lead declinou/cancelado"', meta: { to: 'declinado', encerrado: 1, auto: 1 } });
     }
@@ -1573,14 +1573,28 @@ async function getLastMessagesMap() {
 
 app.get('/api/conversations', authenticateToken, async (req, res) => {
   const { account } = req.query;
+  const _allParam = String(req.query.all || '') === '1';
   try {
+    // MICRO-CACHE (pipeline461, mesmo padrão do GET /api/leads): a chave inclui account/all E o
+    // ambiente do usuário (isPos) porque a resposta varia por token (pós vê um recorte diferente
+    // de pré/admin) — sem isso um usuário poderia ver o cache montado para o outro ambiente.
+    const _isPosForCache = await userIsPos(req);
+    const _cacheKey = (account || 'all') + '::' + (_allParam ? '1' : '0') + '::' + (_isPosForCache ? 'pos' : 'pre');
+    const _cachedBody = getConversationsCache(_cacheKey);
+    if (_cachedBody) {
+      res.type('application/json').send(_cachedBody);
+      return;
+    }
     let convs;
-    // Ordena pela mensagem mais recente (a conversa com atividade mais nova fica no topo).
-    const ORDER = " ORDER BY (SELECT MAX(m.timestamp) FROM messages m WHERE m.conversationId = conversations.id) DESC";
+    // pipeline461: removida a ORDER BY com subquery correlacionada (1 busca em `messages` por
+    // conversa — 1.400+ buscas a cada request). A rota já chama getLastMessagesMap() logo abaixo
+    // (1 única query agregada) só para anexar lastMessage; agora essa MESMA estrutura também
+    // decide a ordem (mensagem mais recente no topo), então a ordenação é feita em JS reaproveitando
+    // o mesmo mapa — sem consulta extra.
     if (account && account !== 'all') {
-      convs = await allRows("SELECT * FROM conversations WHERE account = ? AND (archived IS NULL OR archived = 0)" + ORDER, [account]);
+      convs = await allRows("SELECT * FROM conversations WHERE account = ? AND (archived IS NULL OR archived = 0)", [account]);
     } else {
-      convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)" + ORDER);
+      convs = await allRows("SELECT * FROM conversations WHERE (archived IS NULL OR archived = 0)");
     }
 
     // Filtra por LOGIN: PÓS-venda (Alexandre) vê SÓ conversas das linhas pós (2030);
@@ -1590,7 +1604,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     try {
       const { posSet } = await getSaleLineFilter();
       if (posSet.size && String(req.query.all) !== '1') {
-        const isPos = await userIsPos(req);
+        const isPos = _isPosForCache; // já calculado acima p/ a chave do micro-cache (evita 2ª chamada)
         if (isPos) {
           // Pós: SÓ conversas cujo lead está NO PIPELINE pós (2030 + Vendas Concretizadas + Clientes
           // Antigos), incluindo o HISTÓRICO em linhas do pré (read-only, com o nº do pré). Conversas
@@ -1632,7 +1646,20 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       lastMessage: lastMsgMap.get(c.id) || null
     }));
 
-    res.json(detailedConvs);
+    // pipeline461: ordenação em JS (mensagem mais recente no topo), substituindo a antiga ORDER BY
+    // com subquery correlacionada. Mesmo critério de desempate do SQL antigo (MAX(timestamp), e
+    // dentro do empate o maior id — já resolvido dentro de getLastMessagesMap). Conversa sem
+    // nenhuma mensagem (lastMessage null) vai para o fim, como o SQL antigo fazia (NULL por último
+    // em ORDER BY ... DESC no SQLite).
+    detailedConvs.sort((a, b) => {
+      const ta = a.lastMessage ? Number(a.lastMessage.timestamp) || 0 : -Infinity;
+      const tb = b.lastMessage ? Number(b.lastMessage.timestamp) || 0 : -Infinity;
+      return tb - ta;
+    });
+
+    const _body = JSON.stringify(detailedConvs);
+    setConversationsCache(_cacheKey, _body);
+    res.type('application/json').send(_body);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1651,6 +1678,7 @@ app.patch('/api/conversations/:id', authenticateToken, async (req, res) => {
     if (updates.length) {
       params.push(id);
       await runQuery("UPDATE conversations SET " + updates.join(', ') + " WHERE id = ?", params);
+      bustConversationsCache(); // escreve em conversations — derruba o micro-cache do GET /api/conversations
     }
     const updated = await getRow("SELECT * FROM conversations WHERE id = ?", [id]);
     res.json({ ...updated, online: Boolean(updated.online) });
@@ -1690,12 +1718,14 @@ app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
 app.post('/api/conversations/:id/read', authenticateToken, async (req, res) => {
   try {
     await runQuery("UPDATE conversations SET unread = 0 WHERE id = ?", [req.params.id]);
+    bustConversationsCache(); // muda 'unread' — derruba o micro-cache do GET /api/conversations
     res.json({ success: true, unread: 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/conversations/:id/mark-unread', authenticateToken, async (req, res) => {
   try {
     await runQuery("UPDATE conversations SET unread = CASE WHEN unread > 0 THEN unread ELSE 1 END WHERE id = ?", [req.params.id]);
+    bustConversationsCache(); // muda 'unread' — derruba o micro-cache do GET /api/conversations
     const c = await getRow("SELECT unread FROM conversations WHERE id = ?", [req.params.id]);
     res.json({ success: true, unread: (c && c.unread) || 1 });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1759,6 +1789,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     // função, sem índice). A chamada está logo após o res.json.
     const doSendBookkeeping = async () => {
     await runQuery("UPDATE conversations SET unread = 0 WHERE id = ?", [id]);
+    bustConversationsCache(); // 'unread' muda depois do res.json (fire-and-forget) — derruba de novo
     try {
       if (convo.whatsapp_jid) {
         await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ?", [convo.whatsapp_jid]);
@@ -1829,6 +1860,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       }
       await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)", [msgId, id, 'me', text, timeStr, Date.now()]);
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
+      bustConversationsCache(); // escreve em messages/conversations — derruba o micro-cache do GET /api/conversations
       res.json({ id: msgId, conversationId: id, from: 'me', text: text, time: timeStr, timestamp: Date.now() });
       doSendBookkeeping().catch(() => {});
       return;
@@ -1865,6 +1897,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       };
     }
 
+    bustConversationsCache(); // escreve em messages/conversations — derruba o micro-cache do GET /api/conversations
     res.json(messageObj);
     doSendBookkeeping().catch(() => {});
   } catch (err) {
@@ -1946,6 +1979,7 @@ app.post('/api/leads/:leadId/start-conversation', authenticateToken, async (req,
       if (accNum) await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE id = ?", [accountId, accNum, lead.id]);
     } catch (e) { /* ignore */ }
 
+    bustConversationsCache(); // conversa nova/mensagem — derruba o micro-cache do GET /api/conversations
     res.json({ conversation: { ...convo, account: accountId }, message: messageObj });
   } catch (err) {
     console.error('start-conversation error:', err && err.message);
@@ -2003,6 +2037,7 @@ app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file')
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
       messageObj = { id: msgId, from: 'me', text: '[Mensagem de voz]', time: timeStr, type: 'audio' };
     }
+    bustConversationsCache(); // escreve em messages/conversations — derruba o micro-cache do GET /api/conversations
     res.json(messageObj);
   } catch (err) {
     console.error("Error sending audio:", err);
@@ -2058,6 +2093,7 @@ app.post('/api/conversations/:id/media', authenticateToken, uploadSingle('file')
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
       messageObj = { id: msgId, from: 'me', text: fileName || '[Arquivo]', time: timeStr, type: type };
     }
+    bustConversationsCache(); // escreve em messages/conversations — derruba o micro-cache do GET /api/conversations
     res.json(messageObj);
   } catch (err) {
     console.error("Error sending media:", err);
@@ -2095,6 +2131,7 @@ app.delete('/api/conversations/:id', authenticateToken, async (req, res) => {
     } catch (e) { console.error('[history] snapshot falhou:', e && e.message); }
     await runQuery("DELETE FROM messages WHERE conversationId = ?", [id]);
     await runQuery("DELETE FROM conversations WHERE id = ?", [id]);
+    bustConversationsCache(); // conversa apagada — derruba o micro-cache do GET /api/conversations
     res.json({ ok: true, id });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2121,6 +2158,7 @@ app.patch('/api/conversations/:id/messages/:mid', authenticateToken, async (req,
     if (convo.account === 'ig') return res.status(400).json({ error: 'Edição não é suportada no Instagram.' });
     if (!(sessions[convo.account] && sessions[convo.account].ws && sessions[convo.account].ws.isOpen)) return res.status(409).json({ error: 'A linha do WhatsApp está desconectada.' });
     const r = await editWhatsAppMessage(convo.account, id, mid, String(text).trim());
+    bustConversationsCache(); // mensagem editada — derruba o micro-cache do GET /api/conversations
     res.json(r);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2144,6 +2182,7 @@ app.delete('/api/conversations/:id/messages/:mid', authenticateToken, async (req
     if (convo.account === 'ig') return res.status(400).json({ error: 'Apagar não é suportado no Instagram.' });
     if (!(sessions[convo.account] && sessions[convo.account].ws && sessions[convo.account].ws.isOpen)) return res.status(409).json({ error: 'A linha do WhatsApp está desconectada.' });
     const r = await deleteWhatsAppMessage(convo.account, id, mid);
+    bustConversationsCache(); // mensagem apagada — derruba o micro-cache do GET /api/conversations
     res.json(r);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2151,6 +2190,7 @@ app.delete('/api/conversations/:id/messages/:mid', authenticateToken, async (req
 app.post('/api/conversations/:id/archive', authenticateToken, async (req, res) => {
   try {
     await runQuery("UPDATE conversations SET archived = 1 WHERE id = ?", [req.params.id]);
+    bustConversationsCache(); // escreve em conversations — derruba o micro-cache do GET /api/conversations
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2177,6 +2217,7 @@ app.patch('/api/conversations/:id/account', authenticateToken, async (req, res) 
     if (cleanP.length >= 8) {
       await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?", [account, newNumber, `%${cleanP.slice(-8)}%`]);
     }
+    bustConversationsCache(); // conversa migrou de linha — derruba o micro-cache do GET /api/conversations
     res.json({ success: true, account, number: newNumber });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2354,7 +2395,7 @@ app.post('/api/leads/:id/close-service', authenticateToken, async (req, res) => 
     );
     try {
       const convo = await findConvoForLead(lead);
-      if (convo) await runQuery("UPDATE conversations SET archived = 1, unread = 0 WHERE id = ?", [convo.id]);
+      if (convo) { await runQuery("UPDATE conversations SET archived = 1, unread = 0 WHERE id = ?", [convo.id]); bustConversationsCache(); }
     } catch (e) {}
     try { logLeadHistory({ leadId: id, phone: lead.phone, name: lead.name, type: 'movimentacao', detail: 'Atendimento ENCERRADO — Lead declinou/cancelado. Motivo: ' + reason, meta: { to: 'declinado', motivo: reason, encerrado: 1 } }); } catch (e) {}
     res.json({ ok: true });
@@ -2403,6 +2444,7 @@ app.post('/api/leads/:id/open-conversation', authenticateToken, async (req, res)
     } else if (convo.archived === 1) {
       await runQuery("UPDATE conversations SET archived = 0 WHERE id = ?", [convo.id]);
     }
+    bustConversationsCache(); // conversa criada/desarquivada — derruba o micro-cache do GET /api/conversations
 
     res.json({ ...convo, online: Boolean(convo.online) });
   } catch (err) {
@@ -3143,6 +3185,7 @@ app.post('/api/leads/from-conversation', authenticateToken, async (req, res) => 
         if (extracted) {
           leadPhone = '+' + extracted;
           await runQuery("UPDATE conversations SET phone = ? WHERE id = ?", [leadPhone, convo.id]);
+          bustConversationsCache(); // telefone da conversa mudou — derruba o micro-cache do GET /api/conversations
         }
       } catch (e) { console.error('[from-conversation] falha ao extrair telefone do texto da conversa:', e && e.message); }
     }

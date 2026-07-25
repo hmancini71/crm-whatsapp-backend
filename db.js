@@ -347,6 +347,12 @@ db.serialize(() => {
   // Índices de performance (busca por conversa/lead/linha usados no dia a dia).
   db.run("CREATE INDEX IF NOT EXISTS idx_msgs_convo ON messages(conversationId)");
   db.run("CREATE INDEX IF NOT EXISTS idx_msgs_ts ON messages(timestamp)");
+  // pipeline461 (F1-f): índice composto p/ acelerar getLastMessagesMap() (GROUP BY conversationId
+  // + MAX(timestamp) usado no JOIN) — cobre a rota /api/conversations sem precisar da subquery
+  // correlacionada antiga (removida). Não criamos índice novo em conversations: a ordenação
+  // passou a ser feita em JS a partir do próprio lastMsgMap, então a subquery que o justificaria
+  // não existe mais.
+  db.run("CREATE INDEX IF NOT EXISTS idx_msgs_convo_ts ON messages(conversationId, timestamp)");
   db.run("CREATE INDEX IF NOT EXISTS idx_leads_jid ON leads(whatsapp_jid)");
   db.run("CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone)");
   db.run("CREATE INDEX IF NOT EXISTS idx_conv_account ON conversations(account)");
@@ -1314,6 +1320,23 @@ const allRows = (sql, params = []) => {
   });
 };
 
+// MICRO-CACHE do GET /api/conversations (pipeline461, mesmo padrão do _leadsCache de /api/leads,
+// 2026-07-10). Vive aqui em db.js (não em index.js) porque whatsapp.js também escreve em
+// messages/conversations (messages.upsert, autoReply, envio de texto/áudio/mídia) e precisa
+// derrubar o cache SEM criar um require circular com index.js. TTL curto (4s) — não é cache de
+// longo prazo, só evita reconsultar/reordenar 1.400+ conversas a cada poll de 20s de várias abas.
+const CONV_CACHE_TTL_MS = 4000;
+const _convCache = new Map();
+function getConversationsCache(key) {
+  const hit = _convCache.get(key);
+  if (hit && (Date.now() - hit.t) < CONV_CACHE_TTL_MS) return hit.body;
+  return null;
+}
+function setConversationsCache(key, body) {
+  _convCache.set(key, { t: Date.now(), body });
+}
+function bustConversationsCache() { _convCache.clear(); }
+
 module.exports = {
   db,
   runQuery,
@@ -1326,5 +1349,9 @@ module.exports = {
   originFromFirstMsg,
   getOriginMsgRules,
   setOriginMsgRules,
-  reclassifyLeadsByFirstMsg
+  reclassifyLeadsByFirstMsg,
+  CONV_CACHE_TTL_MS,
+  getConversationsCache,
+  setConversationsCache,
+  bustConversationsCache
 };

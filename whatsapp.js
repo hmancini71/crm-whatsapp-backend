@@ -10,7 +10,7 @@ const fs = require('fs');
 const QRCode = require('qrcode');
 const ffmpegPath = require('ffmpeg-static');
 const ffmpeg = require('fluent-ffmpeg');
-const { runQuery, getRow, allRows, isGoogleAdsFirstMsg, originFromFirstMsg } = require('./db');
+const { runQuery, getRow, allRows, isGoogleAdsFirstMsg, originFromFirstMsg, bustConversationsCache } = require('./db');
 const { getNovoLeadReply, getAiSettings } = require('./ai');
 const antiban = require('./antiban'); // governador anti-banimento (caps, warm-up, pacing, humano)
 // ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
@@ -256,6 +256,7 @@ async function maybeAutoReply(sock, fromJid, convoId) {
     const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
     await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, our_number) VALUES (?, ?, ?, ?, ?, ?, ?)", [msgId, convoId, 'me', texto, timeStr, Date.now(), sockNumber(sock)]);
     await runQuery("UPDATE conversations SET lastTime = ?, last_autoreply = ? WHERE id = ?", [timeStr, Date.now(), convoId]);
+    bustConversationsCache(); // auto-resposta gravada — derruba o micro-cache do GET /api/conversations
     console.log(`[autoReply] mensagem ${feriado ? 'de FERIADO' : 'fora do horário'} ENVIADA para ${fromJid}`);
   } catch (e) { console.error('[autoReply] erro:', e && e.message); }
 }
@@ -680,6 +681,9 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
           "INSERT OR IGNORE INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number, quotedId, quotedText, quotedFrom) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           [msgId, convoId, isMine ? 'me' : 'them', text, timeStr, msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(), incomingType, incomingMediaPath, isMine ? sockNumber(sock) : null, quotedId, quotedText, quotedFrom]
         );
+        // pipeline461: mensagem nova (recebida ou eco de enviada por outro dispositivo) — derruba o
+        // micro-cache do GET /api/conversations para refletir na próxima leitura (até 4s de TTL).
+        bustConversationsCache();
 
         // Regras de lead só valem para mensagens RECEBIDAS (do cliente), não para as nossas
         if (!isMine) {
