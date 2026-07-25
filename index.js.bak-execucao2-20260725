@@ -4377,31 +4377,6 @@ app.post('/api/reports/daily/run', authenticateToken, async (req, res) => {
   setImmediate(() => { dailyReports.runDailyReports().catch((e) => console.error('[daily-report] run manual:', e && e.message)); });
   res.status(202).json({ queued: true });
 });
-// execucao2 (2026-07-25): prazo de análise do relatório (horas) — app_settings, default 48.
-async function dailyPrazoHoras() {
-  try {
-    const row = await getRow("SELECT value FROM app_settings WHERE key = 'daily_report_prazo_horas'");
-    const n = parseInt(row && row.value, 10);
-    return (Number.isFinite(n) && n >= 1 && n <= 720) ? n : 48;
-  } catch (e) { return 48; }
-}
-// Salvar o prazo — mesma regra do /run (só quem não é Vendedor).
-app.post('/api/reports/daily/prazo', authenticateToken, async (req, res) => {
-  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
-  const n = parseInt(req.body && req.body.horas, 10);
-  if (!Number.isFinite(n) || n < 1 || n > 720) return res.status(400).json({ error: 'Prazo inválido — use um número de horas entre 1 e 720.' });
-  try {
-    await runQuery("INSERT INTO app_settings (key, value) VALUES ('daily_report_prazo_horas', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [String(n)]);
-    res.json({ ok: true, horas: n });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-// Marcar como ANALISADO (quando o usuário abre o relatório completo) — qualquer usuário logado.
-app.post('/api/reports/daily/:id/analyzed', authenticateToken, async (req, res) => {
-  try {
-    await runQuery("UPDATE ai_reports SET analyzed_at = ? WHERE id = ? AND type IN ('daily-pre','daily-pos') AND analyzed_at IS NULL", [new Date().toISOString(), req.params.id]);
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
 // Histórico (sem o corpo, para a lista ficar leve). env=pre|pos; default = ambiente do usuário.
 app.get('/api/reports/daily', authenticateToken, async (req, res) => {
   try {
@@ -4415,14 +4390,14 @@ app.get('/api/reports/daily/latest', authenticateToken, async (req, res) => {
     const env = ['pre', 'pos'].includes(String(req.query.env)) ? String(req.query.env) : ((await userIsPos(req)) ? 'pos' : 'pre');
     const r = await dailyReports.latestDaily(env);
     if (!r) return res.status(404).json({ error: 'Nenhum relatório diário gerado ainda.' });
-    res.json(Object.assign({}, r, { prazo_horas: await dailyPrazoHoras() }));
+    res.json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/reports/daily/:id', authenticateToken, async (req, res) => {
   try {
     const r = await dailyReports.getDaily(req.params.id);
     if (!r) return res.status(404).json({ error: 'Relatório não encontrado.' });
-    res.json(Object.assign({}, r, { prazo_horas: await dailyPrazoHoras() }));
+    res.json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

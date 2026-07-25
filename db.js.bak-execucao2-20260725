@@ -318,15 +318,6 @@ db.serialize(() => {
     created_at TEXT
   )`);
   db.run("CREATE INDEX IF NOT EXISTS idx_ai_reports_created ON ai_reports(created_at DESC)");
-  // execucao2 (2026-07-25): prazo de análise do relatório diário — analyzed_at (ISO) marca quando
-  // o usuário abriu o relatório completo; null = ainda não analisado (card cobra dentro do prazo).
-  db.all("PRAGMA table_info(ai_reports)", (arErr, arCols) => {
-    if (!arErr && arCols && arCols.length && !arCols.find(c => c.name === 'analyzed_at')) {
-      db.run("ALTER TABLE ai_reports ADD COLUMN analyzed_at TEXT", (alterErr) => {
-        if (!alterErr) console.log("Migration: added 'analyzed_at' column to ai_reports.");
-      });
-    }
-  });
 
   // 5c. Calendly (2026-07-07): eventos já processados pela integração — evita retrabalho e
   // detecta remarcação/cancelamento (ver calendly.js).

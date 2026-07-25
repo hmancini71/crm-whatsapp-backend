@@ -94,22 +94,7 @@ Responda APENAS um array JSON, um objeto por lead, no formato:
 Critérios de temperatura: cliente aguardando resposta, prazo de viagem próximo, pediu preço/proposta, pagamento em andamento = quente; sumiu há dias, respostas frias, fora de escopo = frio.
 Baseie-se SOMENTE no texto. Não inclua nada fora do JSON.`;
 
-// execucao2 (2026-07-25): contato entre parênteses após o nome no ranking — telefone WhatsApp
-// ou, na falta dele, o e-mail do lead. Mapa determinístico (nome normalizado → contato) montado
-// a partir do banco; o modelo NUNCA gera o contato (evita alucinação de números).
-function montaContactMap(picked) {
-  const map = {};
-  for (const item of picked) {
-    const l = item.lead || {};
-    const key = String(l.name || '').trim().toLowerCase();
-    if (!key || map[key] !== undefined) continue; // nome duplicado: primeiro vence
-    map[key] = (l.phone && String(l.phone).trim()) || (l.email && String(l.email).trim()) || null;
-  }
-  return map;
-}
-
-function montaMarkdown(env, dia, itens, total, contactMap) {
-  contactMap = contactMap || {};
+function montaMarkdown(env, dia, itens, total) {
   const label = env === 'pos' ? 'Pós-venda' : 'Pré-venda';
   itens.sort((a, b) => (b.temperatura_0_100 || 0) - (a.temperatura_0_100 || 0));
   const q = itens.filter(i => (i.temperatura_0_100 || 0) >= 70).length;
@@ -123,8 +108,7 @@ function montaMarkdown(env, dia, itens, total, contactMap) {
   for (const i of itens) {
     const t = Number(i.temperatura_0_100) || 0;
     const ico = t >= 70 ? '🔥' : (t >= 40 ? '🌤️' : '❄️');
-    const contato = contactMap[String(i.lead || '').trim().toLowerCase()];
-    linhas.push('## ' + ico + ' ' + t + '° — ' + (i.lead || '(sem nome)') + (contato ? ' (' + contato + ')' : ''));
+    linhas.push('## ' + ico + ' ' + t + '° — ' + (i.lead || '(sem nome)'));
     if (i.situacao) linhas.push('- **Situação:** ' + i.situacao);
     if (i.pendencia) linhas.push('- **Pendência:** ' + i.pendencia);
     if (i.proximo_passo) linhas.push('- **Próximo passo:** ' + i.proximo_passo);
@@ -161,7 +145,7 @@ async function runOne(env, dia) {
       catch (e) { parsed = []; }
       evid.push(...(Array.isArray(parsed) ? parsed : []));
     }
-    const md = montaMarkdown(env, dia, evid, total, montaContactMap(picked));
+    const md = montaMarkdown(env, dia, evid, total);
     await setReport(id, { status: 'done', progress: 'concluído', result: md, error: null });
     console.log('[daily-report]', type, dia, 'concluído:', evid.length, 'leads.');
     return id;
@@ -182,7 +166,7 @@ async function runDailyReports(dia) {
 
 function listDaily(env, limit) {
   const type = env === 'pos' ? 'daily-pos' : 'daily-pre';
-  return allRows("SELECT id, type, period_from, period_to, status, progress, error, created_at, analyzed_at FROM ai_reports WHERE type = ? ORDER BY created_at DESC LIMIT ?", [type, limit || 30]);
+  return allRows("SELECT id, type, period_from, period_to, status, progress, error, created_at FROM ai_reports WHERE type = ? ORDER BY created_at DESC LIMIT ?", [type, limit || 30]);
 }
 function latestDaily(env) {
   const type = env === 'pos' ? 'daily-pos' : 'daily-pre';
