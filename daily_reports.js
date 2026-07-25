@@ -90,9 +90,18 @@ const MAP_SYSTEM = `Você é um analista sênior de vendas/CRM da Vale Visto (co
 Receberá um lote de conversas de WhatsApp entre VENDEDOR e CLIENTES das últimas 72 horas.
 Para CADA lead, avalie o quão QUENTE ele está AGORA (probabilidade de fechar/urgência de atenção) e resuma a situação.
 Responda APENAS um array JSON, um objeto por lead, no formato:
-[{"lead":"nome","temperatura_0_100":N,"situacao":"1 frase objetiva do momento atual","pendencia":"o que está travado/aguardando (ou null)","proximo_passo":"ação concreta recomendada ao vendedor"}]
+[{"lead":"nome","temperatura_0_100":N,"situacao":"1 frase objetiva do momento atual","pendencia":"o que está travado/aguardando (ou null)","proximo_passo":"ação concreta recomendada ao vendedor, aplicando boas práticas de conversão (follow-up com prazo marcado, CTA único e claro, ancoragem de valor antes do preço, tratamento direto da objeção)"}]
 Critérios de temperatura: cliente aguardando resposta, prazo de viagem próximo, pediu preço/proposta, pagamento em andamento = quente; sumiu há dias, respostas frias, fora de escopo = frio.
 Baseie-se SOMENTE no texto. Não inclua nada fora do JSON.`;
+
+// execucao3 (2026-07-25, pedido do Henry): seção final de PROPOSTAS E SUGESTÕES do dia, baseada
+// nas melhores práticas de atendimento/vendas com foco em CONVERSÃO. Gerada numa 2ª chamada ao
+// modelo com o resumo consolidado dos leads do dia (padrões que se repetem > casos isolados).
+const SUGG_SYSTEM = `Você é um consultor sênior de vendas consultivas por WhatsApp, especializado em CONVERSÃO para serviços de assessoria de vistos (Vale Visto).
+Receberá um JSON com o resumo do dia: cada lead com temperatura (0-100), situação, pendência e próximo passo.
+Gere APENAS markdown (sem título de nível 1) com 3 a 6 recomendações CONCRETAS e acionáveis para o time converter mais, baseadas nas melhores práticas de atendimento e vendas: tempo de resposta, follow-up com dia/hora marcados, um único CTA claro por mensagem, ancoragem de valor ANTES do preço, prova social, tratamento direto de objeções, senso de urgência legítimo (prazo de viagem/vaga de agenda), e resgate de leads sumidos.
+Formato de cada recomendação: "- **Título curto:** explicação em 1-2 frases, citando pelo nome os leads do dia a que se aplica."
+Priorize padrões que se repetem em vários leads; termine com a recomendação nº 1 do dia (a de maior impacto em conversão). Não invente dados — use somente o resumo recebido.`;
 
 // execucao2 (2026-07-25): contato entre parênteses após o nome no ranking — telefone WhatsApp
 // ou, na falta dele, o e-mail do lead. Mapa determinístico (nome normalizado → contato) montado
@@ -108,7 +117,7 @@ function montaContactMap(picked) {
   return map;
 }
 
-function montaMarkdown(env, dia, itens, total, contactMap) {
+function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
   contactMap = contactMap || {};
   const label = env === 'pos' ? 'Pós-venda' : 'Pré-venda';
   itens.sort((a, b) => (b.temperatura_0_100 || 0) - (a.temperatura_0_100 || 0));
@@ -131,6 +140,15 @@ function montaMarkdown(env, dia, itens, total, contactMap) {
     linhas.push('');
   }
   if (!itens.length) linhas.push('_Nenhum lead com atividade nas últimas 72h neste ambiente._');
+  // execucao3: propostas e sugestões do dia (melhores práticas de atendimento, foco em conversão).
+  if (sugestoes && String(sugestoes).trim()) {
+    linhas.push('---');
+    linhas.push('');
+    linhas.push('## 💡 Propostas e sugestões do dia (foco em conversão)');
+    linhas.push('');
+    linhas.push(String(sugestoes).trim());
+    linhas.push('');
+  }
   return linhas.join('\n');
 }
 
@@ -161,7 +179,19 @@ async function runOne(env, dia) {
       catch (e) { parsed = []; }
       evid.push(...(Array.isArray(parsed) ? parsed : []));
     }
-    const md = montaMarkdown(env, dia, evid, total, montaContactMap(picked));
+    // execucao3: 2ª chamada — recomendações do dia com base no resumo consolidado dos leads.
+    let sugestoes = '';
+    if (evid.length) {
+      try {
+        await setReport(id, { status: 'running', progress: 'gerando propostas e sugestões…' });
+        const resumo = JSON.stringify(evid.map(i => ({
+          lead: i.lead, temperatura: i.temperatura_0_100, situacao: i.situacao,
+          pendencia: i.pendencia, proximo_passo: i.proximo_passo
+        })));
+        sugestoes = await callClaude(cfg.anthropic_key, model, 2000, SUGG_SYSTEM, resumo);
+      } catch (e) { console.error('[daily-report] sugestões falharam (relatório sai sem a seção):', e && e.message); sugestoes = ''; }
+    }
+    const md = montaMarkdown(env, dia, evid, total, montaContactMap(picked), sugestoes);
     await setReport(id, { status: 'done', progress: 'concluído', result: md, error: null });
     console.log('[daily-report]', type, dia, 'concluído:', evid.length, 'leads.');
     return id;
