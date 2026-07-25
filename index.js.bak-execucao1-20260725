@@ -993,16 +993,7 @@ app.post('/api/leads/:id/history', authenticateToken, async (req, res) => {
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email, responsible, source, destino_visto, tipo_visto, prazo_viagem, qtd_solicitantes, score, status_pagamento, bot_ativo } = req.body;
-
-  // execucao1 Sprint1 (2026-07-25): validações dos campos de qualificação/score/pagamento.
-  if (score !== undefined && score !== null && score !== '') {
-    const _sc = Number(score);
-    if (!Number.isInteger(_sc) || _sc < 1 || _sc > 10) return res.status(400).json({ error: "score deve ser um inteiro de 1 a 10" });
-  }
-  if (status_pagamento !== undefined && !['lead', 'taxa_paga', 'contrato_ativo'].includes(String(status_pagamento))) {
-    return res.status(400).json({ error: "status_pagamento inválido (use: lead, taxa_paga ou contrato_ativo)" });
-  }
+  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email, responsible, source } = req.body;
 
   try {
     bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
@@ -1086,14 +1077,6 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
     if (consulate_date !== undefined) { updates.push("consulate_date = ?"); params.push(String(consulate_date || '')); }
     if (validation_date !== undefined) { updates.push("validation_date = ?"); params.push(String(validation_date || '')); }
     if (access_email !== undefined) { updates.push("access_email = ?"); params.push(String(access_email || '')); }
-    // execucao1 Sprint1 (2026-07-25): qualificação D-P-Q + score + pagamento + kill-switch da IA.
-    if (destino_visto !== undefined) { updates.push("destino_visto = ?"); params.push(String(destino_visto || '')); }
-    if (tipo_visto !== undefined) { updates.push("tipo_visto = ?"); params.push(String(tipo_visto || '')); }
-    if (prazo_viagem !== undefined) { updates.push("prazo_viagem = ?"); params.push(String(prazo_viagem || '')); }
-    if (qtd_solicitantes !== undefined) { updates.push("qtd_solicitantes = ?"); params.push((qtd_solicitantes === null || qtd_solicitantes === '') ? null : (Number(qtd_solicitantes) || null)); }
-    if (score !== undefined) { updates.push("score = ?"); params.push((score === null || score === '') ? null : Number(score)); }
-    if (status_pagamento !== undefined) { updates.push("status_pagamento = ?"); params.push(String(status_pagamento)); }
-    if (bot_ativo !== undefined) { updates.push("bot_ativo = ?"); params.push((bot_ativo === 0 || bot_ativo === '0' || bot_ativo === false) ? 0 : 1); }
 
     if (updates.length > 0) {
       params.push(id);
@@ -3790,139 +3773,10 @@ app.post('/api/contracts', authenticateToken, async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// ===== execucao1 Sprint1 (2026-07-25): COMPROMISSOS =====
-// "Te ligo sábado às 11h" vira registro cobrável: callback / follow-up / retomada agendada.
-const COMPROMISSO_TIPOS = ['callback', 'followup', 'retomada'];
-const hojeSP = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-
-// Lista os compromissos de um lead.
-app.get('/api/leads/:id/compromissos', authenticateToken, async (req, res) => {
-  try {
-    const rows = await allRows("SELECT * FROM compromissos WHERE lead_id = ? ORDER BY data_hora ASC", [req.params.id]);
-    res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Cria um compromisso para o lead.
-app.post('/api/leads/:id/compromissos', authenticateToken, async (req, res) => {
-  const { tipo, data_hora, responsavel, notas } = req.body || {};
-  if (!COMPROMISSO_TIPOS.includes(String(tipo))) return res.status(400).json({ error: "tipo inválido (use: callback, followup ou retomada)" });
-  if (!data_hora || !String(data_hora).trim()) return res.status(400).json({ error: "data_hora é obrigatória" });
-  try {
-    const lead = await getRow("SELECT id, name FROM leads WHERE id = ?", [req.params.id]);
-    if (!lead) return res.status(404).json({ error: "Lead não encontrado" });
-    const cid = 'cp_' + Math.random().toString(36).substr(2, 9);
-    await runQuery(
-      "INSERT INTO compromissos (id, lead_id, tipo, data_hora, responsavel, cumprido, cumprido_em, notas, criado_em, criado_por) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)",
-      [cid, req.params.id, String(tipo), String(data_hora).trim(), String(responsavel || (req.user && req.user.name) || ''), String(notas || ''), new Date().toISOString(), (req.user && req.user.name) || '']
-    );
-    res.json(await getRow("SELECT * FROM compromissos WHERE id = ?", [cid]));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Atualiza um compromisso (marcar cumprido / reagendar / trocar responsável / notas).
-app.patch('/api/compromissos/:id', authenticateToken, async (req, res) => {
-  const { cumprido, data_hora, responsavel, notas } = req.body || {};
-  try {
-    const row = await getRow("SELECT * FROM compromissos WHERE id = ?", [req.params.id]);
-    if (!row) return res.status(404).json({ error: "Compromisso não encontrado" });
-    const upd = [], par = [];
-    if (cumprido !== undefined) {
-      const c = (cumprido === 1 || cumprido === '1' || cumprido === true) ? 1 : 0;
-      upd.push("cumprido = ?"); par.push(c);
-      upd.push("cumprido_em = ?"); par.push(c ? new Date().toISOString() : null);
-    }
-    if (data_hora !== undefined) { upd.push("data_hora = ?"); par.push(String(data_hora || '').trim()); }
-    if (responsavel !== undefined) { upd.push("responsavel = ?"); par.push(String(responsavel || '')); }
-    if (notas !== undefined) { upd.push("notas = ?"); par.push(String(notas || '')); }
-    if (upd.length) { par.push(req.params.id); await runQuery("UPDATE compromissos SET " + upd.join(", ") + " WHERE id = ?", par); }
-    res.json(await getRow("SELECT * FROM compromissos WHERE id = ?", [req.params.id]));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Exclui um compromisso (Administrador ou quem criou).
-app.delete('/api/compromissos/:id', authenticateToken, async (req, res) => {
-  try {
-    const row = await getRow("SELECT * FROM compromissos WHERE id = ?", [req.params.id]);
-    if (!row) return res.status(404).json({ error: "Compromisso não encontrado" });
-    const isAdmin = req.user && req.user.role === 'Administrador';
-    if (!isAdmin && row.criado_por !== ((req.user && req.user.name) || '')) {
-      return res.status(403).json({ error: "Sem permissão para excluir este compromisso" });
-    }
-    await runQuery("DELETE FROM compromissos WHERE id = ?", [req.params.id]);
-    res.json({ success: true, id: req.params.id });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Agenda do dia: compromissos do dia (default hoje, fuso SP), pendentes primeiro, com dados do lead.
-app.get('/api/compromissos', authenticateToken, async (req, res) => {
-  try {
-    const dia = String(req.query.dia || hojeSP()).slice(0, 10);
-    const resp = String(req.query.responsavel || '').trim();
-    let sql = "SELECT c.*, l.name AS lead_name, l.phone AS lead_phone, l.stage AS lead_stage FROM compromissos c LEFT JOIN leads l ON l.id = c.lead_id WHERE substr(c.data_hora, 1, 10) = ?";
-    const par = [dia];
-    if (resp) { sql += " AND c.responsavel = ?"; par.push(resp); }
-    sql += " ORDER BY c.cumprido ASC, c.data_hora ASC";
-    res.json(await allRows(sql, par));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// execucao1 Sprint1 (2026-07-25): FILA DE TRABALHO priorizada por score × pendência.
-// Ordena quem deve ser atendido AGORA (Adriana nota 9 sem boleto acima de lead novo nota 4),
-// nunca por ordem de chegada. Só leitura — não altera nada.
-app.get('/api/worklist', authenticateToken, async (req, res) => {
-  try {
-    const leads = await allRows("SELECT * FROM leads WHERE archived = 0 AND stage NOT IN ('convertida', 'declinado')");
-    const pend = await allRows("SELECT * FROM compromissos WHERE cumprido = 0");
-    const pendByLead = new Map();
-    for (const c of pend) {
-      if (!pendByLead.has(c.lead_id)) pendByLead.set(c.lead_id, []);
-      pendByLead.get(c.lead_id).push(c);
-    }
-    const now = Date.now();
-    const DUAS_HORAS = 2 * 3600 * 1000;
-    const fmtHora = (iso) => { try { return String(iso).slice(11, 16) || String(iso).slice(0, 10); } catch (e) { return ''; } };
-    const items = leads.map(l => {
-      const motivo = [];
-      let s = (Number(l.score) || 4) * 10;
-      motivo.push('nota ' + (Number(l.score) || '4 (padrão)'));
-      if (l.status_pagamento && l.status_pagamento !== 'lead') { s += 40; motivo.push('pagante (' + l.status_pagamento + ')'); }
-      if (l.lastClientReply) { s += 30; motivo.push('cliente aguardando resposta'); }
-      const cps = pendByLead.get(l.id) || [];
-      let temVencido = false, temProximo = false, cpVencido = null, cpProximo = null;
-      for (const c of cps) {
-        const t = Date.parse(c.data_hora);
-        if (isNaN(t)) continue;
-        if (t < now && !temVencido) { temVencido = true; cpVencido = c; }
-        else if (t >= now && t - now <= DUAS_HORAS && !temProximo) { temProximo = true; cpProximo = c; }
-      }
-      if (temVencido) { s += 25; motivo.push(cpVencido.tipo + ' vencido ' + fmtHora(cpVencido.data_hora)); }
-      if (temProximo) { s += 15; motivo.push(cpProximo.tipo + ' às ' + fmtHora(cpProximo.data_hora)); }
-      if (['urgente', 'followup'].includes(String(l.priority || ''))) { s += 10; motivo.push('prioridade ' + l.priority); }
-      return {
-        id: l.id, name: l.name, phone: l.phone, stage: l.stage,
-        score: l.score, status_pagamento: l.status_pagamento || 'lead',
-        responsible: l.responsible || '', compromissos_pendentes: cps.length,
-        motivo, worklist_score: s
-      };
-    });
-    items.sort((a, b) => b.worklist_score - a.worklist_score);
-    res.json(items.slice(0, 100));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
 // 20. Leads Routes: Create lead manually (botão "Novo Lead")
 app.post('/api/leads', authenticateToken, async (req, res) => {
-  const { name, phone, email, value, stage, source, company, priority, account, tags, destino_visto, tipo_visto, prazo_viagem, qtd_solicitantes, score, status_pagamento, bot_ativo } = req.body || {};
+  const { name, phone, email, value, stage, source, company, priority, account, tags } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: "Nome é obrigatório" });
-  // execucao1 Sprint1 (2026-07-25): validações dos campos de qualificação/score/pagamento.
-  if (score !== undefined && score !== null && score !== '') {
-    const _sc = Number(score);
-    if (!Number.isInteger(_sc) || _sc < 1 || _sc > 10) return res.status(400).json({ error: "score deve ser um inteiro de 1 a 10" });
-  }
-  if (status_pagamento !== undefined && !['lead', 'taxa_paga', 'contrato_ativo'].includes(String(status_pagamento))) {
-    return res.status(400).json({ error: "status_pagamento inválido (use: lead, taxa_paga ou contrato_ativo)" });
-  }
   // Regra: todo lead precisa de telefone OU e-mail (necessário p/ casar com a conversa e o rastreamento).
   const _hasPhone = String(phone || '').replace(/\D/g, '').length >= 8;
   const _hasEmail = /.+@.+\..+/.test(String(email || '').trim());
@@ -4016,18 +3870,6 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
     // pipeline443: card já NASCE numa coluna do pós-venda → grava contracted_at (só se vazio).
     if (posStage) {
       await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), id]);
-    }
-    // execucao1 Sprint1 (2026-07-25): campos opcionais de qualificação/score/pagamento no cadastro.
-    {
-      const _qUpd = [], _qPar = [];
-      if (destino_visto !== undefined) { _qUpd.push("destino_visto = ?"); _qPar.push(String(destino_visto || '')); }
-      if (tipo_visto !== undefined) { _qUpd.push("tipo_visto = ?"); _qPar.push(String(tipo_visto || '')); }
-      if (prazo_viagem !== undefined) { _qUpd.push("prazo_viagem = ?"); _qPar.push(String(prazo_viagem || '')); }
-      if (qtd_solicitantes !== undefined) { _qUpd.push("qtd_solicitantes = ?"); _qPar.push((qtd_solicitantes === null || qtd_solicitantes === '') ? null : (Number(qtd_solicitantes) || null)); }
-      if (score !== undefined) { _qUpd.push("score = ?"); _qPar.push((score === null || score === '') ? null : Number(score)); }
-      if (status_pagamento !== undefined) { _qUpd.push("status_pagamento = ?"); _qPar.push(String(status_pagamento)); }
-      if (bot_ativo !== undefined) { _qUpd.push("bot_ativo = ?"); _qPar.push((bot_ativo === 0 || bot_ativo === '0' || bot_ativo === false) ? 0 : 1); }
-      if (_qUpd.length) { _qPar.push(id); await runQuery("UPDATE leads SET " + _qUpd.join(", ") + " WHERE id = ?", _qPar); }
     }
     // Criado DIRETO na ponte: grava o assunto pela regra da última movimentação (quem criou).
     if (bridgeVal === 1) {
@@ -4365,56 +4207,6 @@ app.get('/api/reports/conversion-analysis/:id', authenticateToken, async (req, r
     res.json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
-// ===== execucao1 Sprint1 (2026-07-25): RELATÓRIO DIÁRIO (ranking quente→frio, por ambiente) =====
-// Gerado às 8h SP pelo scheduler abaixo; histórico em ai_reports (daily-pre / daily-pos).
-const dailyReports = require('./daily_reports');
-dailyReports.init({ posLineInfo, POS_STAGES });
-
-// Disparo manual (teste / re-geração do dia) — só Administrador.
-app.post('/api/reports/daily/run', authenticateToken, async (req, res) => {
-  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
-  setImmediate(() => { dailyReports.runDailyReports().catch((e) => console.error('[daily-report] run manual:', e && e.message)); });
-  res.status(202).json({ queued: true });
-});
-// Histórico (sem o corpo, para a lista ficar leve). env=pre|pos; default = ambiente do usuário.
-app.get('/api/reports/daily', authenticateToken, async (req, res) => {
-  try {
-    const env = ['pre', 'pos'].includes(String(req.query.env)) ? String(req.query.env) : ((await userIsPos(req)) ? 'pos' : 'pre');
-    res.json(await dailyReports.listDaily(env, Number(req.query.limit) || 30));
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-// Mais recente CONCLUÍDO do ambiente do usuário (card do topo do Dashboard).
-app.get('/api/reports/daily/latest', authenticateToken, async (req, res) => {
-  try {
-    const env = ['pre', 'pos'].includes(String(req.query.env)) ? String(req.query.env) : ((await userIsPos(req)) ? 'pos' : 'pre');
-    const r = await dailyReports.latestDaily(env);
-    if (!r) return res.status(404).json({ error: 'Nenhum relatório diário gerado ainda.' });
-    res.json(r);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.get('/api/reports/daily/:id', authenticateToken, async (req, res) => {
-  try {
-    const r = await dailyReports.getDaily(req.params.id);
-    if (!r) return res.status(404).json({ error: 'Relatório não encontrado.' });
-    res.json(r);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Scheduler: a cada 60s confere a hora em America/Sao_Paulo; às 8h gera os relatórios do dia
-// (1x por dia — trava por data em app_settings['daily_report_last_run'], sobrevive a restart).
-setInterval(async () => {
-  try {
-    const hora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', hour: '2-digit', hourCycle: 'h23' }).format(new Date());
-    if (parseInt(hora, 10) !== 8) return;
-    const hoje = dailyReports.hojeSPiso();
-    const row = await getRow("SELECT value FROM app_settings WHERE key = 'daily_report_last_run'");
-    if (row && row.value === hoje) return;
-    await runQuery("INSERT INTO app_settings (key, value) VALUES ('daily_report_last_run', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [hoje]);
-    console.log('[daily-report] 8h em São Paulo — gerando relatórios do dia', hoje);
-    dailyReports.runDailyReports(hoje).catch((e) => console.error('[daily-report] scheduler:', e && e.message));
-  } catch (e) { console.error('[daily-report] scheduler tick:', e && e.message); }
-}, 60 * 1000);
 
 app.post('/api/ai/test', authenticateToken, async (req, res) => {
   try {
@@ -4763,8 +4555,7 @@ async function aiFollowUpSweep() {
     }
     const horasMs = (cfg.fu_hours || 24) * 3600 * 1000;
     const leads = await allRows(
-      // execucao1 Sprint1 (2026-07-25): COALESCE(bot_ativo,1)=1 — kill-switch por lead tira do follow-up.
-      "SELECT * FROM leads WHERE archived = 0 AND stage = 'tratamento' AND (priority IS NULL OR priority = '') AND lastClientReply IS NULL AND COALESCE(ai_fu_count, 0) < ? AND COALESCE(bot_ativo, 1) = 1",
+      "SELECT * FROM leads WHERE archived = 0 AND stage = 'tratamento' AND (priority IS NULL OR priority = '') AND lastClientReply IS NULL AND COALESCE(ai_fu_count, 0) < ?",
       [cfg.fu_max || 2]
     );
     if (!leads.length) return;
@@ -4807,10 +4598,8 @@ async function aiFollowUpSweep() {
         //  + last.from==='me' + ai_fu_count < fu_max.)
         // Re-checa o estágio AGORA (o lead pode ter virado Venda convertida entre a consulta e o envio).
         // REGRA: JAMAIS enviar mensagem automática para quem está em 'convertida' (ou fora do 'tratamento').
-        const freshNow = await getRow("SELECT stage, archived, bot_ativo FROM leads WHERE id = ?", [l.id]);
+        const freshNow = await getRow("SELECT stage, archived FROM leads WHERE id = ?", [l.id]);
         if (!freshNow || freshNow.archived || freshNow.stage !== 'tratamento') { console.log(`[IA follow-up] "${l.name}": pulado (estágio agora = ${freshNow && freshNow.stage}).`); continue; }
-        // execucao1 Sprint1 (2026-07-25): re-checa o kill-switch na hora do envio.
-        if (freshNow.bot_ativo === 0) { console.log(`[IA follow-up] "${l.name}": pulado (bot desativado no lead).`); continue; }
         const tentativa = (l.ai_fu_count || 0) + 1;
         const texto = await getFollowUpReply(conv.id, l.name, tentativa);
         if (!texto) continue;

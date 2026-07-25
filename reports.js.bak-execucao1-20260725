@@ -278,7 +278,5 @@ module.exports = {
   createConversionReportJob,
   listConversionReports,
   getConversionReport,
-  getLatestConversionReport,
-  // execucao1 Sprint1 (2026-07-25): reutilizado pelo relatório diário (daily_reports.js).
-  callClaude
+  getLatestConversionReport
 };

@@ -472,41 +472,6 @@ db.serialize(() => {
     if (!has('access_email')) db.run("ALTER TABLE leads ADD COLUMN access_email TEXT DEFAULT ''");
     // Responsável pelo card (pedido do Henry, 2026-07-08): nome do PERFIL DE LOGIN, opcional.
     if (!has('responsible')) db.run("ALTER TABLE leads ADD COLUMN responsible TEXT DEFAULT ''");
-    // execucao1 Sprint1 (2026-07-25): qualificação D-P-Q + score + pagamento + kill-switch da IA.
-    if (!has('destino_visto')) db.run("ALTER TABLE leads ADD COLUMN destino_visto TEXT DEFAULT ''");
-    if (!has('tipo_visto')) db.run("ALTER TABLE leads ADD COLUMN tipo_visto TEXT DEFAULT ''");
-    if (!has('prazo_viagem')) db.run("ALTER TABLE leads ADD COLUMN prazo_viagem TEXT DEFAULT ''");
-    if (!has('qtd_solicitantes')) db.run("ALTER TABLE leads ADD COLUMN qtd_solicitantes INTEGER DEFAULT NULL");
-    if (!has('score')) db.run("ALTER TABLE leads ADD COLUMN score INTEGER DEFAULT NULL");
-    if (!has('status_pagamento')) {
-      db.run("ALTER TABLE leads ADD COLUMN status_pagamento TEXT DEFAULT 'lead'", (spErr) => {
-        // Backfill único e idempotente: quem já assinou contrato vira 'contrato_ativo'.
-        // (guard: só se contract_signed já existir neste banco — em produção existe)
-        if (has('contract_signed')) db.run("UPDATE leads SET status_pagamento = 'contrato_ativo' WHERE contract_signed = 1 AND (status_pagamento IS NULL OR status_pagamento = 'lead')", () => {});
-      });
-    } else if (has('contract_signed')) {
-      db.run("UPDATE leads SET status_pagamento = 'contrato_ativo' WHERE contract_signed = 1 AND (status_pagamento IS NULL OR status_pagamento = 'lead')", () => {});
-    }
-    // bot_ativo = 0 desliga TODA fala automática da IA para o lead (caso Wesley/Eliana).
-    if (!has('bot_ativo')) db.run("ALTER TABLE leads ADD COLUMN bot_ativo INTEGER DEFAULT 1");
-  });
-
-  // execucao1 Sprint1 (2026-07-25): compromissos — "te ligo sábado às 11h" vira registro cobrável.
-  db.run(`CREATE TABLE IF NOT EXISTS compromissos (
-    id TEXT PRIMARY KEY,
-    lead_id TEXT NOT NULL,
-    tipo TEXT NOT NULL,
-    data_hora TEXT NOT NULL,
-    responsavel TEXT DEFAULT '',
-    cumprido INTEGER DEFAULT 0,
-    cumprido_em TEXT DEFAULT NULL,
-    notas TEXT DEFAULT '',
-    criado_em TEXT,
-    criado_por TEXT DEFAULT ''
-  )`, (ceErr) => {
-    if (ceErr) { console.error("Failed to create compromissos:", ceErr); return; }
-    db.run("CREATE INDEX IF NOT EXISTS idx_compromissos_lead ON compromissos(lead_id)");
-    db.run("CREATE INDEX IF NOT EXISTS idx_compromissos_pendentes ON compromissos(cumprido, data_hora)");
   });
   // (b) migração das colunas antigas (decisão do Henry: tudo → "Sem conta", exceto Finalizados →
   // "Concluído"). Idempotente: os ids antigos nunca voltam a existir.

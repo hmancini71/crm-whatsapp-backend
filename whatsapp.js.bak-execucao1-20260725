@@ -806,9 +806,7 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
             "SELECT * FROM leads WHERE archived = 0 AND stage = 'novo' AND (whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)) LIMIT 1",
             [fromJid, `%${sn2}%`]
           );
-          // execucao1 Sprint1 (2026-07-25): bot_ativo=0 no lead desliga a IA para ele (kill-switch).
-          if (aiLead && aiLead.bot_ativo === 0) console.log(`[IA novo-lead] "${aiLead.name}": bot desativado no lead (bot_ativo=0) — sem resposta automática.`);
-          if (aiLead && aiLead.bot_ativo !== 0 && !(await isPosLine(id))) {
+          if (aiLead && !(await isPosLine(id))) {
             const ai = await getNovoLeadReply(convoId, aiLead.name);
             if (ai && ai.reply) {
               // Fora do horário? Seg–Sex 9h–18h, Sáb 9h–13h, Dom fechado (fuso de São Paulo).
@@ -1209,8 +1207,6 @@ async function processNovoBacklog(limit) {
       if (!lastMsg || lastMsg.from !== 'them') continue;
       const account = convo.account || lead.account;
       if (await isPosLine(account)) continue; // IA atua só no pré-venda (nunca no 2030/pós)
-      // execucao1 Sprint1 (2026-07-25): kill-switch por lead — bot_ativo=0 tira o lead do backlog da IA.
-      if (lead.bot_ativo === 0) { skipped.push((lead.name || lead.id) + ' — bot desativado no lead'); done++; continue; }
       const sock = sessions[account];
       if (!sock) { skipped.push((lead.name || lead.id) + ' — linha desconectada'); done++; continue; }
       const jid = sendableJid(convo);
