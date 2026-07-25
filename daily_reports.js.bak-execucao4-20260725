@@ -90,7 +90,7 @@ const MAP_SYSTEM = `Você é um analista sênior de vendas/CRM da Vale Visto (co
 Receberá um lote de conversas de WhatsApp entre VENDEDOR e CLIENTES das últimas 72 horas.
 Para CADA lead, avalie o quão QUENTE ele está AGORA (probabilidade de fechar/urgência de atenção) e resuma a situação.
 Responda APENAS um array JSON, um objeto por lead, no formato:
-[{"lead":"nome","temperatura_0_100":N,"situacao":"1 frase objetiva do momento atual","pendencia":"o que está travado/aguardando (ou null)","proximo_passo":"ação concreta recomendada ao vendedor, aplicando boas práticas de conversão (follow-up com prazo marcado, CTA único e claro, ancoragem de valor antes do preço, tratamento direto da objeção)","ambiente_sugerido":"'pre' se a conversa indica cliente ainda DECIDINDO a contratação, 'pos' se indica cliente que JÁ CONTRATOU/pagou/está com trâmite em andamento (DS-160, CASV, agendamento, suporte), ou null se indeterminado"}]
+[{"lead":"nome","temperatura_0_100":N,"situacao":"1 frase objetiva do momento atual","pendencia":"o que está travado/aguardando (ou null)","proximo_passo":"ação concreta recomendada ao vendedor, aplicando boas práticas de conversão (follow-up com prazo marcado, CTA único e claro, ancoragem de valor antes do preço, tratamento direto da objeção)"}]
 Critérios de temperatura: cliente aguardando resposta, prazo de viagem próximo, pediu preço/proposta, pagamento em andamento = quente; sumiu há dias, respostas frias, fora de escopo = frio.
 Baseie-se SOMENTE no texto. Não inclua nada fora do JSON.`;
 
@@ -99,11 +99,7 @@ Baseie-se SOMENTE no texto. Não inclua nada fora do JSON.`;
 // modelo com o resumo consolidado dos leads do dia (padrões que se repetem > casos isolados).
 const SUGG_SYSTEM = `Você é um consultor sênior de vendas consultivas por WhatsApp, especializado em CONVERSÃO para serviços de assessoria de vistos (Vale Visto).
 Receberá um JSON com o resumo do dia: cada lead com temperatura (0-100), situação, pendência e próximo passo.
-Gere APENAS markdown (sem título de nível 1), com EXATAMENTE dois blocos nesta ordem:
-### ⚠️ Problemas de atendimento identificados
-3 a 5 problemas CONCRETOS observados no dia, cada um "- **Problema:** explicação em 1-2 frases, citando pelo nome os leads onde ocorre." Procure: demora de resposta, cliente aguardando sem retorno, falta de follow-up com prazo, preço passado sem ancoragem de valor, mensagens sem CTA, respostas genéricas/longas, lead quente esfriando sem ação.
-### ✅ Recomendações (melhores práticas)
-3 a 6 recomendações CONCRETAS e acionáveis para o time converter mais, baseadas nas melhores práticas de atendimento e vendas: tempo de resposta, follow-up com dia/hora marcados, um único CTA claro por mensagem, ancoragem de valor ANTES do preço, prova social, tratamento direto de objeções, senso de urgência legítimo (prazo de viagem/vaga de agenda), e resgate de leads sumidos.
+Gere APENAS markdown (sem título de nível 1) com 3 a 6 recomendações CONCRETAS e acionáveis para o time converter mais, baseadas nas melhores práticas de atendimento e vendas: tempo de resposta, follow-up com dia/hora marcados, um único CTA claro por mensagem, ancoragem de valor ANTES do preço, prova social, tratamento direto de objeções, senso de urgência legítimo (prazo de viagem/vaga de agenda), e resgate de leads sumidos.
 Formato de cada recomendação: "- **Título curto:** explicação em 1-2 frases, citando pelo nome os leads do dia a que se aplica."
 Priorize padrões que se repetem em vários leads; termine com a recomendação nº 1 do dia (a de maior impacto em conversão). Não invente dados — use somente o resumo recebido.`;
 
@@ -128,22 +124,11 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
   const q = itens.filter(i => (i.temperatura_0_100 || 0) >= 70).length;
   const m = itens.filter(i => (i.temperatura_0_100 || 0) >= 40 && (i.temperatura_0_100 || 0) < 70).length;
   const f = itens.length - q - m;
-  // execucao4: normaliza o ambiente sugerido pelo modelo ('pre'|'pos'|null) para a sinalização.
-  const ambDe = (i) => { const a = String(i.ambiente_sugerido || '').toLowerCase(); return (a === 'pre' || a === 'pos') ? a : null; };
-  const errados = itens.filter(i => ambDe(i) && ambDe(i) !== env).length;
   const linhas = [];
   linhas.push('# Relatório diário — ' + label + ' — ' + dataBR(dia));
   linhas.push('');
-  // execucao4 (pedido do Henry): hora de geração + janela coberta pelo relatório.
-  const geradoEm = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date());
-  linhas.push('_Gerado em ' + geradoEm + ' (horário de Brasília) — análise das conversas das últimas ' + Math.round(JANELA_MS / 3600000) + ' horas._');
-  linhas.push('');
   linhas.push('**' + itens.length + ' leads analisados** (' + total + ' com atividade nas últimas 72h) — 🔥 ' + q + ' quentes · 🌤️ ' + m + ' mornos · ❄️ ' + f + ' frios. Do mais quente ao menos quente:');
   linhas.push('');
-  if (errados > 0) {
-    linhas.push('🚨 **' + errados + ' lead(s) possivelmente no AMBIENTE ERRADO** — veja as linhas "⚠️ Ambiente" nos cards abaixo.');
-    linhas.push('');
-  }
   for (const i of itens) {
     const t = Number(i.temperatura_0_100) || 0;
     const ico = t >= 70 ? '🔥' : (t >= 40 ? '🌤️' : '❄️');
@@ -152,11 +137,6 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
     if (i.situacao) linhas.push('- **Situação:** ' + i.situacao);
     if (i.pendencia) linhas.push('- **Pendência:** ' + i.pendencia);
     if (i.proximo_passo) linhas.push('- **Próximo passo:** ' + i.proximo_passo);
-    // execucao4: sinaliza lead cujo teor da conversa indica o OUTRO ambiente (pré↔pós).
-    const amb = ambDe(i);
-    if (amb && amb !== env) {
-      linhas.push('- **⚠️ Ambiente:** a conversa indica ' + (amb === 'pos' ? 'PÓS-VENDA' : 'PRÉ-VENDA') + ' — este lead está no ambiente ' + (env === 'pos' ? 'PÓS-venda' : 'PRÉ-venda') + ' (verificar transferência).');
-    }
     linhas.push('');
   }
   if (!itens.length) linhas.push('_Nenhum lead com atividade nas últimas 72h neste ambiente._');
@@ -164,7 +144,7 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
   if (sugestoes && String(sugestoes).trim()) {
     linhas.push('---');
     linhas.push('');
-    linhas.push('## 🔎 Diagnóstico do atendimento e propostas (foco em conversão)');
+    linhas.push('## 💡 Propostas e sugestões do dia (foco em conversão)');
     linhas.push('');
     linhas.push(String(sugestoes).trim());
     linhas.push('');

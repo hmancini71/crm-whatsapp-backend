@@ -4412,31 +4412,10 @@ app.get('/api/reports/daily', authenticateToken, async (req, res) => {
 // Mais recente CONCLUÍDO do ambiente do usuário (card do topo do Dashboard).
 app.get('/api/reports/daily/latest', authenticateToken, async (req, res) => {
   try {
-    const qEnv = ['pre', 'pos'].includes(String(req.query.env)) ? String(req.query.env) : null;
-    const prazo = await dailyPrazoHoras();
-    // execucao4 (pedido do Henry): usuário NÃO-Vendedor (admin) sem ?env explícito recebe o
-    // relatório COMBINADO — seção Pré-venda + seção Pós-venda num único documento (type
-    // 'daily-combo', ids com os 2 relatórios p/ marcar analisado). Vendedor: só o próprio ambiente.
-    if (!qEnv && !(req.user && req.user.role === 'Vendedor')) {
-      const rPre = await dailyReports.latestDaily('pre');
-      const rPos = await dailyReports.latestDaily('pos');
-      if (!rPre && !rPos) return res.status(404).json({ error: 'Nenhum relatório diário gerado ainda.' });
-      if (rPre && rPos) {
-        const base = (Date.parse(rPos.created_at || 0) >= Date.parse(rPre.created_at || 0)) ? rPos : rPre;
-        return res.json(Object.assign({}, base, {
-          combo: 1, ids: [rPre.id, rPos.id], type: 'daily-combo',
-          result: String(rPre.result || '') + '\n\n---\n\n' + String(rPos.result || ''),
-          analyzed_at: (rPre.analyzed_at && rPos.analyzed_at) ? (rPre.analyzed_at > rPos.analyzed_at ? rPre.analyzed_at : rPos.analyzed_at) : null,
-          prazo_horas: prazo
-        }));
-      }
-      const only = rPre || rPos;
-      return res.json(Object.assign({}, only, { combo: 1, ids: [only.id], prazo_horas: prazo }));
-    }
-    const env = qEnv || ((await userIsPos(req)) ? 'pos' : 'pre');
+    const env = ['pre', 'pos'].includes(String(req.query.env)) ? String(req.query.env) : ((await userIsPos(req)) ? 'pos' : 'pre');
     const r = await dailyReports.latestDaily(env);
     if (!r) return res.status(404).json({ error: 'Nenhum relatório diário gerado ainda.' });
-    res.json(Object.assign({}, r, { prazo_horas: prazo }));
+    res.json(Object.assign({}, r, { prazo_horas: await dailyPrazoHoras() }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/reports/daily/:id', authenticateToken, async (req, res) => {
