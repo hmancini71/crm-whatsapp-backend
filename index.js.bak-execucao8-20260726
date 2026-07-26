@@ -3482,33 +3482,6 @@ app.post('/api/settings/lead-origins', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// execucao8 (pedido do Henry, 2026-07-26): Configuração dos Cards — visibilidade por parâmetro,
-// por coluna do pipeline (pré e pós) e por posição (fora/dentro do card). JSON livre no formato
-// { "<pre|pos>:<stageId>": { ext: {param:0}, int: {param:0} } } — só os OCULTOS são gravados
-// (ausente = visível). Quem aplica é o inject (crmApplyCardVis / crmModalApplyVis).
-app.get('/api/settings/card-visibility', authenticateToken, async (req, res) => {
-  try {
-    const row = await getRow("SELECT value FROM app_settings WHERE key = 'card_visibility'");
-    let cfg = {};
-    try { cfg = row && row.value ? JSON.parse(row.value) : {}; } catch (e) { cfg = {}; }
-    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) cfg = {};
-    res.json(cfg);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.post('/api/settings/card-visibility', authenticateToken, async (req, res) => {
-  if (req.user && req.user.role === 'Vendedor') {
-    return res.status(403).json({ detail: "Sem permissão para alterar configurações" });
-  }
-  try {
-    const cfg = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
-    await runQuery(
-      "INSERT INTO app_settings (key, value) VALUES ('card_visibility', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      [JSON.stringify(cfg)]
-    );
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // Enviar formulário de coleta de dados DS-160 (sistema de contratos gerencia_ds-160).
 // Cria a credencial/token (DRAFT) e o PRÓPRIO servidor de contratos envia o e-mail ao cliente.
 // Servidor-a-servidor: a senha de admin NÃO trafega pelo navegador.
@@ -3644,32 +3617,10 @@ async function ds160AdminToken() {
   if (!lr.ok || !lj.token) throw new Error('Falha ao autenticar no sistema de contratos.');
   return lj.token;
 }
-// execucao8: contratos MANUAIS locais (tabela manual_contracts) — mesclados à lista do PHP.
-async function manualContractsList() {
-  try {
-    const rows = await allRows("SELECT * FROM manual_contracts ORDER BY created_at DESC");
-    return (rows || []).map(m => ({
-      id: m.id,
-      manual: 1,
-      closedNumber: null,
-      clientName: m.client_name || '',
-      clientEmail: m.client_email || '',
-      clientPhone: m.client_phone || '',
-      status: 'manual_local',
-      sendFlag: Number(m.send_flag) || 0,
-      createdAt: m.created_at || null,
-      clientSignedAt: null,
-      adminSignedAt: null,
-      price: m.price || ''
-    }));
-  } catch (e) { return []; }
-}
 app.get('/api/contracts', authenticateToken, async (req, res) => {
-  // cache de 30s (evita re-login a cada abertura/poll) — o cache guarda SÓ a lista do PHP;
-  // os manuais locais são lidos frescos a cada request (baratos, SQLite local).
-  const manual = await manualContractsList();
+  // cache de 30s (evita re-login a cada abertura/poll)
   if (_contractsCache.data && (Date.now() - _contractsCache.ts < 30 * 1000)) {
-    return res.json(manual.concat(_contractsCache.data));
+    return res.json(_contractsCache.data);
   }
   try {
     const token = await ds160AdminToken();
@@ -3693,49 +3644,12 @@ app.get('/api/contracts', authenticateToken, async (req, res) => {
       price: c.price || ''
     }));
     _contractsCache = { ts: Date.now(), data: list };
-    res.json(manual.concat(list));
+    res.json(list);
   } catch (e) {
-    // em falha, devolve o último resultado bom se houver (sempre com os manuais na frente)
-    if (_contractsCache.data) return res.json(manual.concat(_contractsCache.data));
+    // em falha, devolve o último resultado bom se houver
+    if (_contractsCache.data) return res.json(_contractsCache.data);
     res.status(502).json({ error: e.message });
   }
-});
-
-// execucao8: criar contrato MANUAL (opção "não enviar para assinatura") — grava só no CRM.
-// DEFINIDO ANTES de /api/contracts/:id para não ser sombreado pela rota de detalhe do PHP.
-app.post('/api/contracts/manual', authenticateToken, async (req, res) => {
-  if (req.user && req.user.role === 'Vendedor') {
-    return res.status(403).json({ detail: 'Sem permissão para criar contratos' });
-  }
-  try {
-    const b = req.body || {};
-    const name = String(b.clientName || '').trim();
-    if (!name) return res.status(400).json({ error: 'Informe o nome do cliente' });
-    const id = 'M-' + require('crypto').randomBytes(4).toString('hex').toUpperCase();
-    const docs = Array.isArray(b.docs) ? b.docs.slice(0, 30) : [];
-    await runQuery(
-      "INSERT INTO manual_contracts (id, client_name, client_email, client_phone, client_cpf, title, contract_text, payment_terms, price, docs, send_flag, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-      [id, name, String(b.clientEmail || '').trim(), String(b.clientPhone || '').trim(),
-       String(b.clientCpf || '').trim(), String(b.title || '').trim(), String(b.contractText || ''),
-       String(b.paymentTerms || ''), String(b.price || '').trim(), JSON.stringify(docs), 0,
-       new Date().toISOString()]
-    );
-    res.json({ success: true, id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-// Detalhe de um contrato manual (a rota /:id do PHP não o conhece).
-app.get('/api/contracts/manual/:id', authenticateToken, async (req, res) => {
-  try {
-    const m = await getRow("SELECT * FROM manual_contracts WHERE id = ?", [String(req.params.id || '')]);
-    if (!m) return res.status(404).json({ error: 'Contrato manual não encontrado' });
-    let docs = []; try { docs = JSON.parse(m.docs || '[]'); } catch (e) {}
-    res.json({
-      id: m.id, manual: 1, clientName: m.client_name || '', clientEmail: m.client_email || '',
-      clientPhone: m.client_phone || '', clientCpf: m.client_cpf || '', title: m.title || '',
-      contractText: m.contract_text || '', paymentTerms: m.payment_terms || '', price: m.price || '',
-      docs, createdAt: m.created_at || null
-    });
-  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // 19c-0. Modelos de contrato reutilizáveis (lista) — proxy. DEFINIDO ANTES de /:id para não ser sombreado.

@@ -416,24 +416,6 @@ db.serialize(() => {
     value TEXT
   )`);
 
-  // execucao8 (pedido do Henry, 2026-07-26): contratos criados MANUALMENTE no CRM sem envio
-  // para assinatura do cliente — ficam SÓ aqui (não vão ao sistema PHP Vale Visto). A guia
-  // Contratos mescla esta tabela à lista do PHP (GET /api/contracts) com flag manual:1.
-  db.run(`CREATE TABLE IF NOT EXISTS manual_contracts (
-    id TEXT PRIMARY KEY,
-    client_name TEXT,
-    client_email TEXT,
-    client_phone TEXT,
-    client_cpf TEXT,
-    title TEXT,
-    contract_text TEXT,
-    payment_terms TEXT,
-    price TEXT,
-    docs TEXT,
-    send_flag INTEGER DEFAULT 0,
-    created_at TEXT
-  )`);
-
   // Métricas diárias do Google Ads (conta Vale Visto) — alimentadas pela sincronização
   // (Supermetrics → CRM). O dashboard lê desta tabela, filtrado por data.
   db.run(`CREATE TABLE IF NOT EXISTS google_ads_daily (
