@@ -1251,20 +1251,16 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     // Leads por CANAL de origem por dia (MESMA base do weeklyLeads → o total por dia BATE com
     // "Leads na Semana"). Canal derivado de lead.tracking; sem rastreamento = "Sem classificação".
     const _byDay = {};
-    _range.forEach(d => { _byDay[d.iso] = { day: d.label, ga: 0, meta: 0, org: 0, semclass: 0, total: 0, origins: {} }; });
+    _range.forEach(d => { _byDay[d.iso] = { day: d.label, ga: 0, meta: 0, org: 0, semclass: 0, total: 0 }; });
     const _allInRange = await allRows(
-      "SELECT createdAt, tracking, source, source_locked, tags FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'",
+      "SELECT createdAt, tracking, source FROM leads WHERE substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'",
       [_range[0].iso, _range[_range.length - 1].iso]
     );
-    // execucao7: origem DINÂMICA (lista configurada em Configurações → Origens de lead) por dia,
-    // em paralelo aos 4 baldes antigos (retrocompat) — o front novo lê slot.origins.
-    const _originsCfg = await getLeadOriginsList();
     _allInRange.forEach(l => {
       const k = String(l.createdAt || '').slice(0, 10);
       const slot = _byDay[k]; if (!slot) return;
       const cat = leadChannelCat(l); // mesma classificação do endpoint /dashboard/channel-leads (popup)
       slot[cat]++; slot.total++;
-      try { const lb = leadOriginLabel(l, _originsCfg); slot.origins[lb] = (slot.origins[lb] || 0) + 1; } catch (e) {}
     });
     const weeklyByChannel = _range.map(d => _byDay[d.iso]);
 
@@ -1297,17 +1293,13 @@ app.get('/api/dashboard/channel-leads', authenticateToken, async (req, res) => {
   try {
     const date = String(req.query.date || '').slice(0, 10);
     const channel = String(req.query.channel || '');
-    // execucao7: aceita ALTERNATIVAMENTE origin=<rótulo> (origem dinâmica da lista configurada) —
-    // usado pelo gráfico novo; channel=ga|meta|org|semclass continua p/ retrocompat.
-    const origin = String(req.query.origin || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || (!origin && ['ga', 'meta', 'org', 'semclass'].indexOf(channel) < 0)) {
-      return res.status(400).json({ error: 'Parâmetros: date=YYYY-MM-DD e channel=ga|meta|org|semclass (ou origin=<rótulo>)' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || ['ga', 'meta', 'org', 'semclass'].indexOf(channel) < 0) {
+      return res.status(400).json({ error: 'Parâmetros: date=YYYY-MM-DD e channel=ga|meta|org|semclass' });
     }
     // Importados da planilha (legado) fora — mesma exclusão do gráfico, p/ o popup bater.
     const rows = await allRows("SELECT * FROM leads WHERE substr(createdAt,1,10) = ? AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano'", [date]);
-    const _originsCfg = origin ? await getLeadOriginsList() : null;
     const leads = rows
-      .filter(l => origin ? (leadOriginLabel(l, _originsCfg) === origin) : (leadChannelCat(l) === channel))
+      .filter(l => leadChannelCat(l) === channel)
       .map(l => Object.assign({}, l, { tags: l.tags ? (function () { try { return JSON.parse(l.tags); } catch (e) { return []; } })() : [] }));
     res.json(leads);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -5121,14 +5113,11 @@ app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
     const days = daysRangeSP(req.query.from, req.query.to, 15);
     const fromIso = days[0].iso, toIso = days[days.length - 1].iso;
     const rows = await allRows(
-      "SELECT sale_date, createdAt, tracking, source, source_locked, tags, value FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
+      "SELECT sale_date, createdAt, tracking, source, value FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
       "(sale_date IS NOT NULL AND TRIM(sale_date) <> '' AND substr(sale_date,1,10) >= ? AND substr(sale_date,1,10) <= ?) OR " +
       "((sale_date IS NULL OR TRIM(sale_date) = '') AND substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?))",
       [fromIso, toIso, fromIso, toIso]
     );
-    // execucao7: byOrigin/byOriginCount = quebra pela origem DINÂMICA (lista configurada) — o
-    // front novo usa esses mapas; byCat/byCatCount (4 baldes) continuam p/ retrocompat.
-    const _originsCfg = await getLeadOriginsList();
     const byDay = {};
     rows.forEach(l => {
       const sd = l.sale_date && String(l.sale_date).trim();
@@ -5138,30 +5127,23 @@ app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
       // fonte única também da pizza "Vendas convertidas por origem" (antes calculada solta no
       // navegador por createdAt, sem excluir archived/"Planilha Americano" → divergia do quadro
       // canônico). Mesma leadChannelCat, mesma query — os dois quadros nunca mais divergem.
-      if (!byDay[day]) byDay[day] = { count: 0, value: 0, byCat: { ga: 0, meta: 0, org: 0, semclass: 0 }, byCatCount: { ga: 0, meta: 0, org: 0, semclass: 0 }, byOrigin: {}, byOriginCount: {} };
+      if (!byDay[day]) byDay[day] = { count: 0, value: 0, byCat: { ga: 0, meta: 0, org: 0, semclass: 0 }, byCatCount: { ga: 0, meta: 0, org: 0, semclass: 0 } };
       const val = Number(l.value) || 0;
       const cat = leadChannelCat(l);
       byDay[day].count++;
       byDay[day].value += val;
       byDay[day].byCat[cat] = (byDay[day].byCat[cat] || 0) + val;
       byDay[day].byCatCount[cat] = (byDay[day].byCatCount[cat] || 0) + 1;
-      try {
-        const lb = leadOriginLabel(l, _originsCfg);
-        byDay[day].byOrigin[lb] = (byDay[day].byOrigin[lb] || 0) + val;
-        byDay[day].byOriginCount[lb] = (byDay[day].byOriginCount[lb] || 0) + 1;
-      } catch (e) {}
     });
     const emptyCat = () => ({ ga: 0, meta: 0, org: 0, semclass: 0 });
     const series = days.map(d => {
-      const e = byDay[d.iso] || { count: 0, value: 0, byCat: emptyCat(), byCatCount: emptyCat(), byOrigin: {}, byOriginCount: {} };
-      return { day: d.iso, label: d.label, count: e.count, value: e.value, byCat: e.byCat, byCatCount: e.byCatCount, byOrigin: e.byOrigin || {}, byOriginCount: e.byOriginCount || {} };
+      const e = byDay[d.iso] || { count: 0, value: 0, byCat: emptyCat(), byCatCount: emptyCat() };
+      return { day: d.iso, label: d.label, count: e.count, value: e.value, byCat: e.byCat, byCatCount: e.byCatCount };
     });
-    const totals = { count: 0, value: 0, byCat: emptyCat(), byCatCount: emptyCat(), byOrigin: {}, byOriginCount: {} };
+    const totals = { count: 0, value: 0, byCat: emptyCat(), byCatCount: emptyCat() };
     series.forEach(d => {
       totals.count += d.count; totals.value += d.value;
       Object.keys(totals.byCat).forEach(k => { totals.byCat[k] += (d.byCat[k] || 0); totals.byCatCount[k] += (d.byCatCount[k] || 0); });
-      Object.keys(d.byOrigin || {}).forEach(k => { totals.byOrigin[k] = (totals.byOrigin[k] || 0) + d.byOrigin[k]; });
-      Object.keys(d.byOriginCount || {}).forEach(k => { totals.byOriginCount[k] = (totals.byOriginCount[k] || 0) + d.byOriginCount[k]; });
     });
     res.json({ from: fromIso, to: toIso, days: series, totals, updated_at: new Date().toISOString() });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -5187,23 +5169,19 @@ app.get('/api/dashboard/sales-daily-leads', authenticateToken, async (req, res) 
     if (!hasDay && !hasRange) return res.status(400).json({ error: 'informe day=YYYY-MM-DD OU from=&to=YYYY-MM-DD' });
     const fromIso = hasDay ? day : fromQ, toIso = hasDay ? day : toQ;
     const cat = String(req.query.cat || '').trim().toLowerCase();
-    // execucao7: aceita ALTERNATIVAMENTE origin=<rótulo> (origem dinâmica da lista configurada).
-    const origin = String(req.query.origin || '').trim();
     if (cat && ['ga', 'meta', 'org', 'semclass'].indexOf(cat) === -1) return res.status(400).json({ error: 'cat inválido (use ga|meta|org|semclass)' });
     const rows = await allRows(
-      "SELECT id, name, value, tags, tracking, source, source_locked FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
+      "SELECT id, name, value, tags, tracking, source FROM leads WHERE stage = 'convertida' AND archived = 0 AND COALESCE(source,'') <> 'Planilha Americano' AND (" +
       "(sale_date IS NOT NULL AND TRIM(sale_date) <> '' AND substr(sale_date,1,10) >= ? AND substr(sale_date,1,10) <= ?) OR " +
       "((sale_date IS NULL OR TRIM(sale_date) = '') AND substr(createdAt,1,10) >= ? AND substr(createdAt,1,10) <= ?))",
       [fromIso, toIso, fromIso, toIso]
     );
-    const _originsCfg = origin ? await getLeadOriginsList() : null;
     let leads = rows.map(l => {
       let service = '—';
       try { const tg = JSON.parse(l.tags || '[]'); if (Array.isArray(tg) && tg[0]) service = String(tg[0]); } catch (e) {}
-      return { id: l.id, name: l.name || '(sem nome)', value: Number(l.value) || 0, service, cat: leadChannelCat(l), origem: origin ? leadOriginLabel(l, _originsCfg) : null };
+      return { id: l.id, name: l.name || '(sem nome)', value: Number(l.value) || 0, service, cat: leadChannelCat(l) };
     });
-    if (origin) leads = leads.filter(l => l.origem === origin);
-    else if (cat) leads = leads.filter(l => l.cat === cat);
+    if (cat) leads = leads.filter(l => l.cat === cat);
     leads.sort((a, b) => b.value - a.value);
     leads = leads.map(l => ({ id: l.id, name: l.name, value: l.value, service: l.service }));
     const totals = leads.reduce((s, l) => { s.count++; s.value += l.value; return s; }, { count: 0, value: 0 });
@@ -5641,39 +5619,6 @@ function leadChannelCat(l) {
     srcNorm !== 'venda' && srcNorm.indexOf('sem ') !== 0 && srcNorm !== 'planilha americano';
   if (isExplicitSource) return 'org';
   return 'semclass';
-}
-
-// execucao7 (pedido do Henry, 2026-07-26): ORIGEM DINÂMICA para os gráficos do dashboard.
-// A lista configurável de "Origens de lead" (Configurações) passa a rotular os gráficos —
-// leads com origem explícita (ex.: Indicação, Ferramenta de IA, Passou na Frente da Loja)
-// aparecem com o PRÓPRIO nome em vez de caírem em "Sem identificação"/"Orgânico" genérico.
-// leadChannelCat NÃO muda (retrocompat: ponto ótimo, filtros, popups antigos).
-async function getLeadOriginsList() {
-  try {
-    const row = await getRow("SELECT value FROM app_settings WHERE key = 'lead_origins'");
-    const arr = row && row.value ? JSON.parse(row.value) : null;
-    if (Array.isArray(arr) && arr.length) return arr.map(x => String(x == null ? '' : x).trim()).filter(Boolean);
-  } catch (e) {}
-  return LEAD_ORIGINS_SEED.slice();
-}
-// Rótulo de origem de um lead p/ os gráficos: ga/meta/semclass viram os rótulos padrão;
-// 'org' é refinado — origem explícita que casa (case-insensitive) com a lista configurada
-// devolve o item da LISTA; origem explícita fora da lista devolve o próprio texto do card;
-// senão 'Orgânico'.
-function leadOriginLabel(l, origins) {
-  const cat = leadChannelCat(l);
-  if (cat === 'ga') return 'Google Ads';
-  if (cat === 'meta') return 'Meta Ads';
-  if (cat === 'semclass') return 'Sem identificação';
-  const raw = String((l && l.source) || '').trim();
-  const s = raw.toLowerCase();
-  if (s) {
-    const match = (origins || []).find(o => String(o).trim().toLowerCase() === s);
-    if (match) return String(match).trim();
-    if (s !== 'manual' && s !== 'marketing' && s !== 'venda' && s !== 'planilha americano' &&
-        s.indexOf('sem ') !== 0 && !/^org/.test(s)) return raw;
-  }
-  return 'Orgânico';
 }
 
 // ===== CANAL de chegada para o HISTÓRICO (Google / Meta / Orgânico / Outros) =====
