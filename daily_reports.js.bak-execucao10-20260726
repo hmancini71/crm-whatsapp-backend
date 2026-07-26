@@ -99,9 +99,7 @@ Baseie-se SOMENTE no texto. Não inclua nada fora do JSON.`;
 // modelo com o resumo consolidado dos leads do dia (padrões que se repetem > casos isolados).
 const SUGG_SYSTEM = `Você é um consultor sênior de vendas consultivas por WhatsApp, especializado em CONVERSÃO para serviços de assessoria de vistos (Vale Visto).
 Receberá um JSON com o resumo do dia: cada lead com temperatura (0-100), situação, pendência e próximo passo.
-Gere APENAS markdown (sem título de nível 1), com EXATAMENTE três blocos nesta ordem:
-### 🩺 Diagnóstico geral — padrões fora das melhores práticas
-3 a 6 PADRÕES GERAIS do dia que NÃO se alinham às melhores práticas de atendimento/vendas — SEM citar leads individuais aqui (visão de conjunto): ex. "a maioria das conversas fica sem follow-up com prazo marcado", "preço é passado antes da ancoragem de valor em boa parte dos atendimentos", "tempo médio de 1ª resposta acima do ideal". Cada item "- **Padrão:** explicação em 1-2 frases + qual melhor prática está sendo ferida."
+Gere APENAS markdown (sem título de nível 1), com EXATAMENTE dois blocos nesta ordem:
 ### ⚠️ Problemas de atendimento identificados
 3 a 5 problemas CONCRETOS observados no dia, cada um "- **Problema:** explicação em 1-2 frases, citando pelo nome os leads onde ocorre." Procure: demora de resposta, cliente aguardando sem retorno, falta de follow-up com prazo, preço passado sem ancoragem de valor, mensagens sem CTA, respostas genéricas/longas, lead quente esfriando sem ação.
 ### ✅ Recomendações (melhores práticas)
@@ -146,18 +144,6 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
     linhas.push('🚨 **' + errados + ' lead(s) possivelmente no AMBIENTE ERRADO** — veja as linhas "⚠️ Ambiente" nos cards abaixo.');
     linhas.push('');
   }
-  // execucao10 (pedido do Henry, 2026-07-26): o DIAGNÓSTICO GERAL (padrões vs melhores práticas)
-  // vem ANTES dos casos específicos — seção 1 = visão de conjunto; seção 2 = caso a caso.
-  if (sugestoes && String(sugestoes).trim()) {
-    linhas.push('## 1️⃣ Diagnóstico geral do atendimento (padrões × melhores práticas)');
-    linhas.push('');
-    linhas.push(String(sugestoes).trim());
-    linhas.push('');
-    linhas.push('---');
-    linhas.push('');
-  }
-  linhas.push('## 2️⃣ Casos específicos — ranking do mais quente ao menos quente');
-  linhas.push('');
   for (const i of itens) {
     const t = Number(i.temperatura_0_100) || 0;
     const ico = t >= 70 ? '🔥' : (t >= 40 ? '🌤️' : '❄️');
@@ -174,7 +160,15 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
     linhas.push('');
   }
   if (!itens.length) linhas.push('_Nenhum lead com atividade nas últimas 72h neste ambiente._');
-  // execucao10: a seção de diagnóstico/propostas foi MOVIDA para o TOPO (seção 1️⃣, acima).
+  // execucao3: propostas e sugestões do dia (melhores práticas de atendimento, foco em conversão).
+  if (sugestoes && String(sugestoes).trim()) {
+    linhas.push('---');
+    linhas.push('');
+    linhas.push('## 🔎 Diagnóstico do atendimento e propostas (foco em conversão)');
+    linhas.push('');
+    linhas.push(String(sugestoes).trim());
+    linhas.push('');
+  }
   return linhas.join('\n');
 }
 
