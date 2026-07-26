@@ -3650,44 +3650,6 @@ app.get('/api/contracts/templates', authenticateToken, async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// ===== execucao5 (2026-07-25): anexos de documentos da proposta + assinatura padrão da Vale Visto.
-// ATENÇÃO À ORDEM: /signature (path fixo) precisa vir ANTES do GET /api/contracts/:id abaixo.
-const CONTRACT_DOCS_DIR = path.join(__dirname, 'contract_docs');
-try { fs.mkdirSync(CONTRACT_DOCS_DIR, { recursive: true }); } catch (e) {}
-app.post('/api/contracts/docs', authenticateToken, upload.array('files', 10), async (req, res) => {
-  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
-  try {
-    const out = [];
-    for (const f of (req.files || [])) {
-      const safe = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8) + '-' + String(f.originalname || 'doc').replace(/[^\w.\- ]/g, '_').slice(0, 120);
-      fs.writeFileSync(path.join(CONTRACT_DOCS_DIR, safe), f.buffer);
-      out.push({ name: f.originalname || safe, file: safe, url: '/api/contracts/docs/' + encodeURIComponent(safe) });
-    }
-    res.json({ files: out });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.get('/api/contracts/docs/:file', authenticateToken, (req, res) => {
-  const safe = String(req.params.file || '').replace(/[\\/]/g, '');
-  const fp = path.join(CONTRACT_DOCS_DIR, safe);
-  if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Arquivo não encontrado.' });
-  res.sendFile(fp);
-});
-app.get('/api/contracts/signature', authenticateToken, async (req, res) => {
-  try {
-    const row = await getRow("SELECT value FROM app_settings WHERE key = 'contract_admin_signature'");
-    res.json({ signature: (row && row.value) || null });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.post('/api/contracts/signature', authenticateToken, async (req, res) => {
-  if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ error: 'Sem permissão' });
-  const sig = String((req.body && req.body.signature) || '');
-  if (sig.indexOf('data:image/') !== 0 || sig.length > 500000) return res.status(400).json({ error: 'Assinatura inválida.' });
-  try {
-    await runQuery("INSERT INTO app_settings (key, value) VALUES ('contract_admin_signature', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [sig]);
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // 19c. Detalhe de UM contrato (para o "Visualizar" do CRM, sem abrir a página de assinatura).
 app.get('/api/contracts/:id', authenticateToken, async (req, res) => {
   const id = String(req.params.id || '').trim();
@@ -3799,11 +3761,6 @@ app.post('/api/contracts', authenticateToken, async (req, res) => {
   const basePrice = Number(b.basePrice) || 0;
   const paymentTerms = String(b.paymentTerms || 'À vista via PIX').trim();
   const customClauses = String(b.customClauses || '').trim();
-  // execucao5 (2026-07-25): dados extras do cliente + anexos — vão dentro do servicesScope
-  // (blob livre que o contracts.php guarda como veio; nenhuma mudança no PHP).
-  const clientPhone = String(b.clientPhone || '').trim();
-  const clientCpf = String(b.clientCpf || '').trim();
-  const contractDocs = Array.isArray(b.docs) ? b.docs.slice(0, 10) : [];
 
   // Serviços opcionais (mesmos rótulos do painel)
   const optionalServices = [];
@@ -3823,7 +3780,7 @@ app.post('/api/contracts', authenticateToken, async (req, res) => {
         contractText,
         paymentTerms,
         price: String(basePrice),
-        servicesScope: { applicantsRange, basePrice, optionalServices, customClauses, clientPhone, clientCpf, docs: contractDocs }
+        servicesScope: { applicantsRange, basePrice, optionalServices, customClauses }
       })
     });
     const cj = await cr.json().catch(() => null);
