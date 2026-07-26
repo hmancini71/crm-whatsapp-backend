@@ -178,11 +178,21 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
   return linhas.join('\n');
 }
 
+const STALE_RUNNING_MS = 20 * 60 * 1000; // job 'running'/'queued' há mais tempo que isso é considerado morto (ex.: pm2 restart no meio do job) e libera nova tentativa.
+
 async function runOne(env, dia) {
   const type = env === 'pos' ? 'daily-pos' : 'daily-pre';
-  // 1 job por vez por tipo (mesmo padrão do reports.js).
-  const running = await getRow("SELECT id FROM ai_reports WHERE type = ? AND status IN ('queued','running') LIMIT 1", [type]);
-  if (running) { console.log('[daily-report]', type, 'já em andamento — pulando.'); return null; }
+  // 1 job por vez por tipo (mesmo padrão do reports.js) — MAS com destrava automático de jobs
+  // travados (ex.: pm2 restart durante a execução deixava a linha em 'running' pra sempre e
+  // bloqueava TODAS as gerações seguintes deste tipo, sem erro nenhum aparecer pro usuário).
+  const running = await getRow("SELECT id, created_at FROM ai_reports WHERE type = ? AND status IN ('queued','running') LIMIT 1", [type]);
+  if (running) {
+    const age = Date.now() - (Date.parse(running.created_at || '') || 0);
+    if (age < STALE_RUNNING_MS) { console.log('[daily-report]', type, 'já em andamento — pulando.'); return null; }
+    console.warn('[daily-report]', type, 'job', running.id, 'travado há', Math.round(age / 60000), 'min — marcando como erro e liberando nova geração.');
+    await runQuery("UPDATE ai_reports SET status='error', progress=NULL, error=? WHERE id=?",
+      ['Job travado (processo reiniciado durante a execução?) — marcado como erro automaticamente após ' + Math.round(age / 60000) + ' min sem concluir.', running.id]);
+  }
   const id = newId();
   await runQuery(
     "INSERT INTO ai_reports (id, type, period_from, period_to, status, progress, result, error, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
