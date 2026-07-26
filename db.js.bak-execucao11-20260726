@@ -433,18 +433,6 @@ db.serialize(() => {
     send_flag INTEGER DEFAULT 0,
     created_at TEXT
   )`);
-  // execucao11 (pedido do Henry, 2026-07-26): campos extras do contrato manual — endereço,
-  // nº de solicitantes, primeiro visto/renovação, 2º e-mail e "como nos conheceu" (obrigatório).
-  db.all("PRAGMA table_info(manual_contracts)", (mcErr, mcCols) => {
-    if (mcErr || !mcCols || !mcCols.length) return;
-    [['address', 'TEXT'], ['applicants', 'TEXT'], ['visa_type', 'TEXT'], ['email2', 'TEXT'], ['referral', 'TEXT']].forEach(cd => {
-      if (!mcCols.find(c => c.name === cd[0])) {
-        db.run('ALTER TABLE manual_contracts ADD COLUMN ' + cd[0] + ' ' + cd[1], (aErr) => {
-          if (!aErr) console.log("Migration: added '" + cd[0] + "' to manual_contracts.");
-        });
-      }
-    });
-  });
 
   // Métricas diárias do Google Ads (conta Vale Visto) — alimentadas pela sincronização
   // (Supermetrics → CRM). O dashboard lê desta tabela, filtrado por data.

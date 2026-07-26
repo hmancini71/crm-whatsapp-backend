@@ -3714,13 +3714,11 @@ app.post('/api/contracts/manual', authenticateToken, async (req, res) => {
     const id = 'M-' + require('crypto').randomBytes(4).toString('hex').toUpperCase();
     const docs = Array.isArray(b.docs) ? b.docs.slice(0, 30) : [];
     await runQuery(
-      "INSERT INTO manual_contracts (id, client_name, client_email, client_phone, client_cpf, title, contract_text, payment_terms, price, docs, send_flag, created_at, address, applicants, visa_type, email2, referral) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO manual_contracts (id, client_name, client_email, client_phone, client_cpf, title, contract_text, payment_terms, price, docs, send_flag, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
       [id, name, String(b.clientEmail || '').trim(), String(b.clientPhone || '').trim(),
        String(b.clientCpf || '').trim(), String(b.title || '').trim(), String(b.contractText || ''),
        String(b.paymentTerms || ''), String(b.price || '').trim(), JSON.stringify(docs), 0,
-       new Date().toISOString(),
-       String(b.address || '').trim(), String(b.applicants || '').trim(),
-       String(b.visaType || '').trim(), String(b.email2 || '').trim(), String(b.referral || '').trim()]
+       new Date().toISOString()]
     );
     res.json({ success: true, id });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3735,9 +3733,7 @@ app.get('/api/contracts/manual/:id', authenticateToken, async (req, res) => {
       id: m.id, manual: 1, clientName: m.client_name || '', clientEmail: m.client_email || '',
       clientPhone: m.client_phone || '', clientCpf: m.client_cpf || '', title: m.title || '',
       contractText: m.contract_text || '', paymentTerms: m.payment_terms || '', price: m.price || '',
-      docs, createdAt: m.created_at || null,
-      address: m.address || '', applicants: m.applicants || '', visaType: m.visa_type || '',
-      email2: m.email2 || '', referral: m.referral || ''
+      docs, createdAt: m.created_at || null
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
