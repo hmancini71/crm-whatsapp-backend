@@ -20,6 +20,20 @@ const JANELA_MS = 72 * 3600 * 1000; // atividade das últimas 72h define quem en
 let _deps = null;
 function init(deps) { _deps = deps; } // { posLineInfo, POS_STAGES }
 
+// pipeline462 (fix — Henry reportou relatórios travados 'running' pra sempre): o timeout de
+// socket do callClaude (reports.js, 120s + 1 retry) depende do socket ficar OCIOSO; se a API
+// mandar qualquer byte de keep-alive no meio de uma resposta lenta, o timer reseta e a promise
+// NUNCA resolve/rejeita — o job fica 'running' indefinidamente (visto ao vivo numa validação:
+// >10min travado no lote 1/10 sem log de erro nenhum). Deadline externo dura (Promise.race)
+// garante que o job SEMPRE termina (sucesso ou erro claro) em vez de travar pra sempre.
+const HARD_DEADLINE_MS = 280000; // folga acima do pior caso teórico do callClaude (120s x2 + margem)
+function withHardDeadline(promise, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('Tempo limite (' + Math.round(HARD_DEADLINE_MS / 1000) + 's) excedido aguardando ' + label + ' — a API não respondeu a tempo (trave de rede/keep-alive).')), HARD_DEADLINE_MS);
+    promise.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
 const newId = () => crypto.randomBytes(12).toString('hex');
 const hojeSPiso = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const dataBR = (iso) => { const [y, m, d] = String(iso).split('-'); return d + '/' + m + '/' + y; };
@@ -209,7 +223,7 @@ async function runOne(env, dia) {
     for (let i = 0; i < chunks.length; i++) {
       await setReport(id, { status: 'running', progress: 'lote ' + (i + 1) + '/' + chunks.length });
       const userText = chunks[i].map((it, x) => '--- LEAD ' + (x + 1) + ' ---\n' + buildLeadContext(it)).join('\n\n');
-      const out = await callClaude(cfg.anthropic_key, model, MAP_MAX_TOKENS, MAP_SYSTEM, userText);
+      const out = await withHardDeadline(callClaude(cfg.anthropic_key, model, MAP_MAX_TOKENS, MAP_SYSTEM, userText), 'lote ' + (i + 1) + '/' + chunks.length);
       let parsed;
       try { const mm = out.match(/\[[\s\S]*\]/); parsed = JSON.parse(mm ? mm[0] : out); }
       catch (e) { parsed = []; }
@@ -224,7 +238,7 @@ async function runOne(env, dia) {
           lead: i.lead, temperatura: i.temperatura_0_100, situacao: i.situacao,
           pendencia: i.pendencia, proximo_passo: i.proximo_passo
         })));
-        sugestoes = await callClaude(cfg.anthropic_key, model, 2000, SUGG_SYSTEM, resumo);
+        sugestoes = await withHardDeadline(callClaude(cfg.anthropic_key, model, 2000, SUGG_SYSTEM, resumo), 'propostas e sugestões');
       } catch (e) { console.error('[daily-report] sugestões falharam (relatório sai sem a seção):', e && e.message); sugestoes = ''; }
     }
     const md = montaMarkdown(env, dia, evid, total, montaContactMap(picked), sugestoes);
