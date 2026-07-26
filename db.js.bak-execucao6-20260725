@@ -327,15 +327,6 @@ db.serialize(() => {
       });
     }
   });
-  // execucao6 (2026-07-25): vínculo card ↔ contrato da base Vale Visto (botão "📄 Contrato" do
-  // modal). Gravado automaticamente quando o contrato é localizado, ou pela conexão manual.
-  db.all("PRAGMA table_info(leads)", (ctErr, ctCols) => {
-    if (!ctErr && ctCols && ctCols.length && !ctCols.find(c => c.name === 'contract_id')) {
-      db.run("ALTER TABLE leads ADD COLUMN contract_id TEXT", (alterErr) => {
-        if (!alterErr) console.log("Migration: added 'contract_id' column to leads.");
-      });
-    }
-  });
 
   // 5c. Calendly (2026-07-07): eventos já processados pela integração — evita retrabalho e
   // detecta remarcação/cancelamento (ver calendly.js).
