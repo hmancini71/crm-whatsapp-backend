@@ -107,23 +107,26 @@ async function callClaude(apiKey, model, maxTokens, systemText, userText) {
 // callGemini pensados para mensagens curtas do WhatsApp (4000 chars / 2048 tokens / 30s). Por
 // isso passamos opts com limites próprios para o caminho dos relatórios; o atendente de IA do
 // WhatsApp (ai.js) não é afetado, pois continua chamando callGemini SEM opts.
-// pipeline463 (teste ao vivo, passo 5): com só maxChars/maxOutputTokens/timeoutMs, os lotes
-// voltavam com JSON CORTADO NO MEIO na maioria das vezes (ex.: chunk 1/11, 2/11... "Unterminated
-// string") e o relatório final saía com só 1 das 5 seções obrigatórias, sem erro visível. Causa:
-// o modelo ativo em produção ('gemini-flash-latest') NÃO casa com o regex /2.5/ do ai.js, então
-// o "thinking" interno dele consumia a maior parte do maxOutputTokens antes de escrever o JSON —
-// o mesmo bug de fundo que motivou o thinkingBudget:0, só que noutro nome de modelo. Corrigido
-// pedindo disableThinking:true (ai.js agora aceita isso p/ QUALQUER modelo; o atendente de
-// WhatsApp não passa opts, então não é afetado).
+// pipeline463 (teste ao vivo, passo 5 — 1ª tentativa): com só maxChars/maxOutputTokens/timeoutMs
+// (maxOutputTokens = maxTokens do chamador, 3000 no MAP / 4000 no REDUCE), os lotes voltavam com
+// JSON CORTADO NO MEIO na maioria das vezes (ex.: chunk 1/11, 2/11... "Unterminated string") e o
+// relatório final saía com só 1 das 5 seções obrigatórias, sem erro visível — 3000-4000 tokens
+// não é suficiente pra um JSON detalhado (5 campos, vários deles arrays) de até 8 leads por lote.
+// Tentamos também opts.disableThinking (forçar thinkingConfig:{thinkingBudget:0} em ai.js mesmo
+// fora do regex /2.5/), mas a API do Gemini rejeitou com "Request contains an invalid argument"
+// para o modelo ativo em produção ('gemini-flash-latest') — esse modelo não aceita desligar o
+// thinking assim, então essa tentativa foi REVERTIDA em ai.js. A correção que funcionou foi só
+// dar bem mais headroom de saída (o próprio thinking, quando existe, sai desse mesmo orçamento):
+// piso de 8000 tokens em vez do maxTokens pedido pelo chamador (3000/4000), preservando o
+// maxTokens do chamador só quando ele pedir mais que isso.
 const { callGemini } = require('./ai');
 async function callAI(cfg, model, maxTokens, systemText, userText) {
   if (cfg && cfg.gemini_key) {
     console.log('[relatorio] motor: Gemini');
     return await callGemini(cfg, systemText, [{ role: 'user', text: userText }], false, {
       maxChars: 60000,
-      maxOutputTokens: Math.max(maxTokens || 2048, 2048),
-      timeoutMs: 180000,
-      disableThinking: true
+      maxOutputTokens: Math.max(maxTokens || 2048, 8000),
+      timeoutMs: 180000
     });
   }
   console.log('[relatorio] motor: Anthropic (fallback)');
