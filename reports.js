@@ -107,6 +107,14 @@ async function callClaude(apiKey, model, maxTokens, systemText, userText) {
 // callGemini pensados para mensagens curtas do WhatsApp (4000 chars / 2048 tokens / 30s). Por
 // isso passamos opts com limites próprios para o caminho dos relatórios; o atendente de IA do
 // WhatsApp (ai.js) não é afetado, pois continua chamando callGemini SEM opts.
+// pipeline463 (teste ao vivo, passo 5): com só maxChars/maxOutputTokens/timeoutMs, os lotes
+// voltavam com JSON CORTADO NO MEIO na maioria das vezes (ex.: chunk 1/11, 2/11... "Unterminated
+// string") e o relatório final saía com só 1 das 5 seções obrigatórias, sem erro visível. Causa:
+// o modelo ativo em produção ('gemini-flash-latest') NÃO casa com o regex /2.5/ do ai.js, então
+// o "thinking" interno dele consumia a maior parte do maxOutputTokens antes de escrever o JSON —
+// o mesmo bug de fundo que motivou o thinkingBudget:0, só que noutro nome de modelo. Corrigido
+// pedindo disableThinking:true (ai.js agora aceita isso p/ QUALQUER modelo; o atendente de
+// WhatsApp não passa opts, então não é afetado).
 const { callGemini } = require('./ai');
 async function callAI(cfg, model, maxTokens, systemText, userText) {
   if (cfg && cfg.gemini_key) {
@@ -114,7 +122,8 @@ async function callAI(cfg, model, maxTokens, systemText, userText) {
     return await callGemini(cfg, systemText, [{ role: 'user', text: userText }], false, {
       maxChars: 60000,
       maxOutputTokens: Math.max(maxTokens || 2048, 2048),
-      timeoutMs: 180000
+      timeoutMs: 180000,
+      disableThinking: true
     });
   }
   console.log('[relatorio] motor: Anthropic (fallback)');

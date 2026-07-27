@@ -202,6 +202,18 @@ function callGeminiOnce(model, cfg, systemText, contents, jsonMode, opts) {
   const _maxChars = (opts && opts.maxChars) || 4000;
   const _maxOut = (opts && opts.maxOutputTokens) || 2048;
   const _timeout = (opts && opts.timeoutMs) || 30000;
+  // pipeline463 (2026-07-27, teste ao vivo passo 5): validação em produção mostrou os lotes dos
+  // relatórios (chunk 1/11, 2/11... e lotes do daily-report) voltando com JSON CORTADO NO MEIO
+  // (erros "Unterminated string"/"Expected ',' or '}' after property value") mesmo com
+  // maxOutputTokens elevado (3000-4000) — o mesmo bug de "thinking consome a cota de saída" que
+  // motivou o thinkingBudget:0 para modelos /2.5/, só que o modelo realmente ativo em produção é
+  // 'gemini-flash-latest' (não casa com /2.5/), que TAMBÉM reserva parte do orçamento de saída
+  // para raciocínio interno por padrão. Chamadores que já sabem que o payload é grande (opts com
+  // maxOutputTokens/maxChars maiores, hoje só reports.js/daily_reports.js) podem pedir
+  // opts.disableThinking=true para desligar o thinking em QUALQUER modelo, não só /2.5/. Sem
+  // opts (atendente de IA do WhatsApp), o comportamento NÃO muda: só /2.5/ desliga thinking,
+  // exatamente como antes desta mudança.
+  const _disableThinking = !!(opts && opts.disableThinking);
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       system_instruction: { parts: [{ text: systemText || '' }] },
@@ -221,7 +233,7 @@ function callGeminiOnce(model, cfg, systemText, contents, jsonMode, opts) {
         { temperature: (typeof cfg.temperature === 'number' ? cfg.temperature : 0.3), maxOutputTokens: _maxOut },
         // Modelos 2.5 são de "raciocínio": sem isso, o thinking consome a cota de saída e o
         // JSON volta truncado/vazio (a IA não responde). thinkingBudget:0 desliga o raciocínio.
-        /2\.5/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {},
+        (/2\.5/.test(model) || _disableThinking) ? { thinkingConfig: { thinkingBudget: 0 } } : {},
         jsonMode ? { responseMimeType: 'application/json' } : {}
       )
     });
