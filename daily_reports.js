@@ -7,7 +7,7 @@
 const crypto = require('crypto');
 const { runQuery, getRow, allRows } = require('./db');
 const { getAiSettings } = require('./ai');
-const { callClaude } = require('./reports');
+const { callClaude, callAI } = require('./reports'); // execucao14: callAI = Gemini quando configurado
 
 const CHUNK_SIZE = 8;           // mesmos limites do reports.js (folga p/ thinking do modelo)
 const LEAD_CAP = 80;            // por ambiente, priorizando conversas mais ativas
@@ -214,7 +214,12 @@ async function runOne(env, dia) {
   );
   try {
     const cfg = await getAiSettings();
-    if (!cfg.anthropic_key) throw new Error('chave Anthropic não configurada');
+    // execucao14: Gemini (gemini_key, a mesma do atendimento) tem prioridade; Anthropic é fallback.
+    if (!cfg.anthropic_key && !cfg.gemini_key) throw new Error('nenhuma chave de IA configurada (Gemini ou Anthropic)');
+    // pipeline463 (2026-07-27): este nome de modelo só é USADO por callAI (reports.js) no caminho
+    // de FALLBACK (Anthropic) — quando cfg.gemini_key existe, callAI ignora `model` e usa a lista
+    // de modelos Gemini (ai.js/GEMINI_MODELS) com fallback próprio. Mantido válido só para não
+    // quebrar o caminho Anthropic quando não houver gemini_key.
     const model = cfg.anthropic_model || 'claude-fable-5';
     const { picked, total } = await findCandidates(env);
     const evid = [];
@@ -223,10 +228,17 @@ async function runOne(env, dia) {
     for (let i = 0; i < chunks.length; i++) {
       await setReport(id, { status: 'running', progress: 'lote ' + (i + 1) + '/' + chunks.length });
       const userText = chunks[i].map((it, x) => '--- LEAD ' + (x + 1) + ' ---\n' + buildLeadContext(it)).join('\n\n');
-      const out = await withHardDeadline(callClaude(cfg.anthropic_key, model, MAP_MAX_TOKENS, MAP_SYSTEM, userText), 'lote ' + (i + 1) + '/' + chunks.length);
+      const out = await withHardDeadline(callAI(cfg, model, MAP_MAX_TOKENS, MAP_SYSTEM, userText), 'lote ' + (i + 1) + '/' + chunks.length);
       let parsed;
       try { const mm = out.match(/\[[\s\S]*\]/); parsed = JSON.parse(mm ? mm[0] : out); }
-      catch (e) { parsed = []; }
+      catch (e) {
+        // pipeline463: antes este catch sumia em silêncio (parsed=[] sem log) — agora deixa
+        // rastro no pm2 (só tamanho da resposta, SEM texto de cliente) para diagnosticar
+        // truncamento por maxOutputTokens ou bloqueio de safety em vez de virar relatório pobre
+        // sem ninguém perceber.
+        console.warn('[daily-report]', type, 'lote', (i + 1) + '/' + chunks.length, ': JSON não parseável (' + (out ? out.length : 0) + ' chars recebidos) — erro:', e.message);
+        parsed = [];
+      }
       evid.push(...(Array.isArray(parsed) ? parsed : []));
     }
     // execucao3: 2ª chamada — recomendações do dia com base no resumo consolidado dos leads.
@@ -238,7 +250,7 @@ async function runOne(env, dia) {
           lead: i.lead, temperatura: i.temperatura_0_100, situacao: i.situacao,
           pendencia: i.pendencia, proximo_passo: i.proximo_passo
         })));
-        sugestoes = await withHardDeadline(callClaude(cfg.anthropic_key, model, 2000, SUGG_SYSTEM, resumo), 'propostas e sugestões');
+        sugestoes = await withHardDeadline(callAI(cfg, model, 2000, SUGG_SYSTEM, resumo), 'propostas e sugestões');
       } catch (e) { console.error('[daily-report] sugestões falharam (relatório sai sem a seção):', e && e.message); sugestoes = ''; }
     }
     const md = montaMarkdown(env, dia, evid, total, montaContactMap(picked), sugestoes);

@@ -194,7 +194,14 @@ function isModelUnavailableError(statusCode, errBody) {
 // texto da resposta ou rejeita com um Error; quando a rejeição é por modelo indisponível, o
 // Error carrega `.modelIssue = true` para o orquestrador (callGemini, abaixo) decidir se tenta
 // o próximo candidato da lista.
-function callGeminiOnce(model, cfg, systemText, contents, jsonMode) {
+// pipeline463 (2026-07-27): 6º parâmetro OPCIONAL `opts` — permite que chamadores com payloads
+// maiores (ex.: relatórios em reports.js/daily_reports.js) peçam mais espaço sem afetar o
+// atendente de IA do WhatsApp, que continua chamando SEM opts. Sem opts, os defaults abaixo são
+// EXATAMENTE os de antes desta mudança: 4000 chars / 2048 maxOutputTokens / 30000ms de timeout.
+function callGeminiOnce(model, cfg, systemText, contents, jsonMode, opts) {
+  const _maxChars = (opts && opts.maxChars) || 4000;
+  const _maxOut = (opts && opts.maxOutputTokens) || 2048;
+  const _timeout = (opts && opts.timeoutMs) || 30000;
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       system_instruction: { parts: [{ text: systemText || '' }] },
@@ -202,7 +209,7 @@ function callGeminiOnce(model, cfg, systemText, contents, jsonMode) {
       // OUVE mensagens de voz do cliente (inline_data). Ver buildContents.
       contents: contents.map(c => {
         const parts = [];
-        const t = String(c.text || '').slice(0, 4000);
+        const t = String(c.text || '').slice(0, _maxChars);
         if (t) parts.push({ text: t });
         if (c.audioB64) parts.push({ inline_data: { mime_type: c.audioMime || 'audio/ogg', data: c.audioB64 } });
         if (!parts.length) parts.push({ text: '…' });
@@ -211,7 +218,7 @@ function callGeminiOnce(model, cfg, systemText, contents, jsonMode) {
       generationConfig: Object.assign(
         // Temperatura baixa = mais fiel às instruções, menos "criatividade"/invenção
         // (ex.: deixar de inventar preços). Pode ser sobrescrita via cfg.temperature.
-        { temperature: (typeof cfg.temperature === 'number' ? cfg.temperature : 0.3), maxOutputTokens: 2048 },
+        { temperature: (typeof cfg.temperature === 'number' ? cfg.temperature : 0.3), maxOutputTokens: _maxOut },
         // Modelos 2.5 são de "raciocínio": sem isso, o thinking consome a cota de saída e o
         // JSON volta truncado/vazio (a IA não responde). thinkingBudget:0 desliga o raciocínio.
         /2\.5/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {},
@@ -223,7 +230,7 @@ function callGeminiOnce(model, cfg, systemText, contents, jsonMode) {
       path: '/v1beta/models/' + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(cfg.gemini_key),
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 30000
+      timeout: _timeout
     }, (res) => {
       let data = '';
       res.on('data', (d) => { data += d; });
@@ -261,7 +268,10 @@ function callGeminiOnce(model, cfg, systemText, contents, jsonMode) {
 // '[IA] modelo ativo: <modelo>'. Erros que NÃO sejam de modelo (rate limit, rede, chave
 // inválida etc.) são propagados imediatamente — mesmo comportamento de erro de antes desta
 // mudança, mantendo o try/catch das rotas chamadoras intacto.
-async function callGemini(cfg, systemText, contents, jsonMode) {
+// pipeline463 (2026-07-27): 5º parâmetro OPCIONAL `opts` ({maxChars, maxOutputTokens, timeoutMs})
+// repassado a callGeminiOnce em cada tentativa do fallback. Chamadores existentes (atendente de
+// IA do WhatsApp) NÃO passam opts e continuam com os defaults de sempre (4000/2048/30000ms).
+async function callGemini(cfg, systemText, contents, jsonMode, opts) {
   if (!cfg.gemini_key) throw new Error('Chave da API Gemini não configurada');
   const candidates = _geminiModelOk
     ? [_geminiModelOk].concat(GEMINI_MODELS.filter(m => m !== _geminiModelOk))
@@ -270,7 +280,7 @@ async function callGemini(cfg, systemText, contents, jsonMode) {
   for (let i = 0; i < candidates.length; i++) {
     const model = candidates[i];
     try {
-      const txt = await callGeminiOnce(model, cfg, systemText, contents, jsonMode);
+      const txt = await callGeminiOnce(model, cfg, systemText, contents, jsonMode, opts);
       if (_geminiModelOk !== model) {
         _geminiModelOk = model;
         console.log('[IA] modelo ativo: ' + model);

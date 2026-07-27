@@ -97,6 +97,30 @@ async function callClaude(apiKey, model, maxTokens, systemText, userText) {
   }
 }
 
+// execucao14 (pedido do Henry, 2026-07-26): PROVEDOR DE IA dos relatórios — quando a chave do
+// GEMINI está configurada (a MESMA do atendimento WhatsApp, cfg.gemini_key), os relatórios
+// (crítico + diários) usam o Gemini (callGemini do ai.js, com fallback de modelo embutido);
+// sem gemini_key, cai na Anthropic (callClaude) como antes. Os parsers de JSON dos dois
+// relatórios já toleram texto ao redor (regex \[[\s\S]*\]), então a troca é transparente.
+// pipeline463 (2026-07-27): os relatórios processam lotes de até 8 leads x 2500 chars (~20.000
+// chars) e pedem JSON de até 3000-4000 tokens de saída — MUITO acima dos limites padrão do
+// callGemini pensados para mensagens curtas do WhatsApp (4000 chars / 2048 tokens / 30s). Por
+// isso passamos opts com limites próprios para o caminho dos relatórios; o atendente de IA do
+// WhatsApp (ai.js) não é afetado, pois continua chamando callGemini SEM opts.
+const { callGemini } = require('./ai');
+async function callAI(cfg, model, maxTokens, systemText, userText) {
+  if (cfg && cfg.gemini_key) {
+    console.log('[relatorio] motor: Gemini');
+    return await callGemini(cfg, systemText, [{ role: 'user', text: userText }], false, {
+      maxChars: 60000,
+      maxOutputTokens: Math.max(maxTokens || 2048, 2048),
+      timeoutMs: 180000
+    });
+  }
+  console.log('[relatorio] motor: Anthropic (fallback)');
+  return await callClaude(cfg.anthropic_key, model, maxTokens, systemText, userText);
+}
+
 // ===== Seleção de leads do "Tratamento inicial" no período =====
 // Mesmo padrão de join lead→conversa usado em /api/dashboard/response-time (index.js): casa por
 // whatsapp_jid exato ou pelos últimos 8 dígitos do telefone.
@@ -202,7 +226,8 @@ async function runConversionReport(id, fromIso, toIso) {
     const cfg = await getAiSettings();
     const apiKey = cfg.anthropic_key;
     const model = cfg.anthropic_model || 'claude-fable-5';
-    if (!apiKey) throw new Error('chave Anthropic não configurada');
+    // execucao14: basta UMA das chaves (Gemini tem prioridade; Anthropic é o fallback).
+    if (!apiKey && !cfg.gemini_key) throw new Error('nenhuma chave de IA configurada (Gemini ou Anthropic)');
 
     const { picked, truncated, totalCandidates } = await findLeadsAndMessages(fromIso, toIso);
     console.log('[reports] conversion-analysis', id, 'leads candidatos:', totalCandidates, 'selecionados:', picked.length, 'cortado:', !!truncated);
@@ -218,7 +243,7 @@ async function runConversionReport(id, fromIso, toIso) {
       const userText = chunks[i].map((item, idx) => '--- LEAD ' + (idx + 1) + ' ---\n' + buildLeadContext(item)).join('\n\n');
       let out;
       try {
-        out = await callClaude(apiKey, model, MAP_MAX_TOKENS, MAP_SYSTEM, userText);
+        out = await callAI(cfg, model, MAP_MAX_TOKENS, MAP_SYSTEM, userText);
       } catch (e) {
         if (/chave Anthropic inválida/i.test(e.message)) throw e;
         throw new Error('Falha ao processar chunk ' + (i + 1) + '/' + chunks.length + ': ' + e.message);
@@ -227,7 +252,12 @@ async function runConversionReport(id, fromIso, toIso) {
       try {
         const m = out.match(/\[[\s\S]*\]/);
         parsed = JSON.parse(m ? m[0] : out);
-      } catch (e) { parsed = [{ raw: out.slice(0, 1500) }]; }
+      } catch (e) {
+        // pipeline463: rastro no pm2 SEM texto de cliente — só tamanho da resposta, para
+        // diagnosticar truncamento (maxOutputTokens) ou bloqueio de safety sem sumir em silêncio.
+        console.warn('[reports] chunk ' + (i + 1) + '/' + chunks.length + ': JSON não parseável (' + (out ? out.length : 0) + ' chars recebidos) — erro: ' + e.message);
+        parsed = [{ raw: out.slice(0, 1500) }];
+      }
       evidences.push(...(Array.isArray(parsed) ? parsed : [parsed]));
     }
 
@@ -236,7 +266,7 @@ async function runConversionReport(id, fromIso, toIso) {
       'Evidências por lead (JSON):\n' + JSON.stringify(evidences).slice(0, 60000);
     let finalMd;
     try {
-      finalMd = await callClaude(apiKey, model, REDUCE_MAX_TOKENS, REDUCE_SYSTEM, reduceInput);
+      finalMd = await callAI(cfg, model, REDUCE_MAX_TOKENS, REDUCE_SYSTEM, reduceInput);
     } catch (e) {
       throw new Error('Falha ao gerar o relatório final: ' + e.message);
     }
@@ -280,5 +310,6 @@ module.exports = {
   getConversionReport,
   getLatestConversionReport,
   // execucao1 Sprint1 (2026-07-25): reutilizado pelo relatório diário (daily_reports.js).
-  callClaude
+  callClaude,
+  callAI
 };
