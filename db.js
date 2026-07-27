@@ -960,8 +960,9 @@ db.serialize(() => {
       ['u_alexandre', 'alexandre@valevisto.com.br', alexHash, 'Alexandre', 'Vendedor', 'AL', 'pos'],
       (e) => {
         if (e) console.error("Seed Alexandre falhou:", e);
-        // Garante wa_type='pos' mesmo se o usuário já existia com outro tipo.
-        db.run("UPDATE users SET wa_type='pos' WHERE email='alexandre@valevisto.com.br'");
+        // pipeline464: a partir de agora o ambiente do usuário (wa_type) é definido SOMENTE
+        // pela tela de Usuários (PATCH /api/users/:id -> wa_type). O seed não sobrescreve mais
+        // nada aqui, senão a configuração do administrador é perdida a cada restart do backend.
       }
     );
   } catch (e) { console.error("Seed Alexandre erro:", e && e.message); }
