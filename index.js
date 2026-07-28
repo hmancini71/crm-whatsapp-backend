@@ -4953,9 +4953,15 @@ app.get('/api/audit/awaiting-reply', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ===== IA: protocolo de FOLLOW-UP (colunas 2-3 do Tratamento inicial) =====
+// ===== IA: protocolo de FOLLOW-UP (colunas 3-4 do Tratamento inicial + Novo Leads) =====
 // A cada 30 min procura leads em 'tratamento' SEM prioridade e SEM bolinha
 // (nós falamos por último) parados há X horas; manda follow-up gerado pela IA.
+// fix-followup-novo (2026-07-28, Henry): inclui também stage='novo' — lead que recebeu a
+// 1ª mensagem da IA e NUNCA respondeu ficava preso em "Novo Leads" para sempre e o
+// protocolo de follow-up jamais o alcançava (o sweep só olhava 'tratamento').
+// Leads de 'novo' seguem o MESMO protocolo (janela 9-17h, fu_hours, fu_max, antiban) e
+// NÃO passam pelo gate de coluna 3/4 (isso é conceito do Tratamento). A tag 'novolead'
+// (col 1 do Tratamento) continua FORA do follow-up automático (decisão do Henry 2026-07-28).
 let _fuRunning = false;
 async function aiFollowUpSweep() {
   if (_fuRunning) return;
@@ -4985,7 +4991,7 @@ async function aiFollowUpSweep() {
     const horasMs = (cfg.fu_hours || 24) * 3600 * 1000;
     const leads = await allRows(
       // execucao1 Sprint1 (2026-07-25): COALESCE(bot_ativo,1)=1 — kill-switch por lead tira do follow-up.
-      "SELECT * FROM leads WHERE archived = 0 AND stage = 'tratamento' AND (priority IS NULL OR priority = '') AND lastClientReply IS NULL AND COALESCE(ai_fu_count, 0) < ? AND COALESCE(bot_ativo, 1) = 1",
+      "SELECT * FROM leads WHERE archived = 0 AND stage IN ('tratamento','novo') AND (priority IS NULL OR priority = '') AND lastClientReply IS NULL AND COALESCE(ai_fu_count, 0) < ? AND COALESCE(bot_ativo, 1) = 1",
       [cfg.fu_max || 2]
     );
     if (!leads.length) return;
@@ -5010,9 +5016,12 @@ async function aiFollowUpSweep() {
       if (processed >= PER_RUN_CAP) { console.log(`[IA follow-up] limite da rodada (${PER_RUN_CAP}) atingido; o restante segue na próxima.`); break; }
       try {
         // pipeline431: ticks de coluna do follow-up (Henry) — col3 = regra do Resgate; col4 = demais
-        const _q = (Number(l.conv_msg_count) || 0) >= minMessages && (!requireClientMsg || (Number(l.conv_client_msg_count) || 0) >= 1);
-        const _col = _q ? 3 : 4;
-        if ((_col === 3 && !fuCol3) || (_col === 4 && !fuCol4)) continue;
+        // fix-followup-novo: o gate de coluna só vale para o Tratamento; lead em 'novo' entra sempre.
+        if (l.stage !== 'novo') {
+          const _q = (Number(l.conv_msg_count) || 0) >= minMessages && (!requireClientMsg || (Number(l.conv_client_msg_count) || 0) >= 1);
+          const _col = _q ? 3 : 4;
+          if ((_col === 3 && !fuCol3) || (_col === 4 && !fuCol4)) continue;
+        }
         const lt = norm(l.phone).slice(-8);
         const conv = convs.find(c =>
           (l.whatsapp_jid && c.whatsapp_jid && c.whatsapp_jid === l.whatsapp_jid) ||
@@ -5029,7 +5038,8 @@ async function aiFollowUpSweep() {
         // Re-checa o estágio AGORA (o lead pode ter virado Venda convertida entre a consulta e o envio).
         // REGRA: JAMAIS enviar mensagem automática para quem está em 'convertida' (ou fora do 'tratamento').
         const freshNow = await getRow("SELECT stage, archived, bot_ativo FROM leads WHERE id = ?", [l.id]);
-        if (!freshNow || freshNow.archived || freshNow.stage !== 'tratamento') { console.log(`[IA follow-up] "${l.name}": pulado (estágio agora = ${freshNow && freshNow.stage}).`); continue; }
+        // fix-followup-novo: aceita 'tratamento' e 'novo' (se saiu desses estágios, ex.: virou venda, pula).
+        if (!freshNow || freshNow.archived || (freshNow.stage !== 'tratamento' && freshNow.stage !== 'novo')) { console.log(`[IA follow-up] "${l.name}": pulado (estágio agora = ${freshNow && freshNow.stage}).`); continue; }
         // execucao1 Sprint1 (2026-07-25): re-checa o kill-switch na hora do envio.
         if (freshNow.bot_ativo === 0) { console.log(`[IA follow-up] "${l.name}": pulado (bot desativado no lead).`); continue; }
         const tentativa = (l.ai_fu_count || 0) + 1;
@@ -5066,7 +5076,9 @@ async function autoDeclineExhaustedFollowups() {
     if (fuMax < 1) return; // follow-up desligado → não declina automaticamente
     const cutoff = Date.now() - AUTO_DECLINE_AFTER_MS;
     const leads = await allRows(
-      "SELECT * FROM leads WHERE archived = 0 AND stage = 'tratamento' AND (priority IS NULL OR priority = '') " +
+      // fix-followup-novo (2026-07-28): inclui stage='novo' — quem esgotou os follow-ups em Novo Leads
+      // também é movido para "Lead declinou/cancelou" 48h após a última tentativa (regra 1.3b).
+      "SELECT * FROM leads WHERE archived = 0 AND stage IN ('tratamento','novo') AND (priority IS NULL OR priority = '') " +
       "AND lastClientReply IS NULL AND COALESCE(ai_fu_count,0) >= ? AND COALESCE(ai_fu_last,0) > 0 AND COALESCE(ai_fu_last,0) <= ?",
       [fuMax, cutoff]
     );
@@ -5079,7 +5091,7 @@ async function autoDeclineExhaustedFollowups() {
         if (last && last.from === 'them') continue;
       }
       const reason = 'Sem resposta após ' + (l.ai_fu_count || fuMax) + ' follow-up(s)';
-      await runQuery("UPDATE leads SET stage = 'declinado', priority = '', decline_reason = ? WHERE id = ? AND stage = 'tratamento'", [reason, l.id]);
+      await runQuery("UPDATE leads SET stage = 'declinado', priority = '', decline_reason = ? WHERE id = ? AND stage IN ('tratamento','novo')", [reason, l.id]);
       const note = '🚫 [Automático] Movido para "Lead declinou/cancelou": ' + reason +
         ', 48h após a última tentativa (' + new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) + ').';
       await runQuery("UPDATE leads SET comments = TRIM(COALESCE(comments,'') || char(10) || ?) WHERE id = ?", [note, l.id]);
