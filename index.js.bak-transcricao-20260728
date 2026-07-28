@@ -31,8 +31,7 @@ const {
   sessions,
   MEDIA_DIR, sendWhatsAppMedia,
   editWhatsAppMessage, deleteWhatsAppMessage,
-  avatarFileForJid, fetchAndStoreAvatar,
-  fireTranscricaoAudio } = require('./whatsapp');
+  avatarFileForJid, fetchAndStoreAvatar } = require('./whatsapp');
 
 // Redirect console logs to an in-memory buffer
 const logBuffer = [];
@@ -1728,7 +1727,7 @@ app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
     }
 
     const messages = await allRows(
-      "SELECT id, \`from\`, text, time, type, timestamp, status, edited, deleted, our_number, quotedId, quotedText, quotedFrom, transcription FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
+      "SELECT id, \`from\`, text, time, type, timestamp, status, edited, deleted, our_number, quotedId, quotedText, quotedFrom FROM messages WHERE conversationId = ? ORDER BY timestamp ASC",
       [id]
     );
 
@@ -2066,8 +2065,6 @@ app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file')
         [msgId, id, 'me', '[Mensagem de voz]', timeStr, Date.now(), 'audio', mediaPath]
       );
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, id]);
-      // transcricao-20260728: transcreve o áudio salvo offline em segundo plano (fire-and-forget).
-      fireTranscricaoAudio(msgId, mediaPath);
       messageObj = { id: msgId, from: 'me', text: '[Mensagem de voz]', time: timeStr, type: 'audio' };
     }
     bustConversationsCache(); // escreve em messages/conversations — derruba o micro-cache do GET /api/conversations
@@ -2252,32 +2249,6 @@ app.patch('/api/conversations/:id/account', authenticateToken, async (req, res) 
     }
     bustConversationsCache(); // conversa migrou de linha — derruba o micro-cache do GET /api/conversations
     res.json({ success: true, account, number: newNumber });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 9b2. TRANSCRIÇÃO ON-DEMAND (transcricao-20260728): transcreve um áudio ANTIGO (gravado antes
-// da transcrição automática existir, ou cuja transcrição falhou — transcription NULL). O
-// frontend mostra o botão "📝 Transcrever" nesses casos e chama esta rota. Diferente dos hooks
-// fire-and-forget, aqui o await é proposital: o usuário está esperando o texto na tela.
-app.post('/api/messages/:msgId/transcribe', authenticateToken, async (req, res) => {
-  try {
-    const msg = await getRow("SELECT id, type, mediaPath, transcription FROM messages WHERE id = ?", [req.params.msgId]);
-    if (!msg || msg.type !== 'audio' || !msg.mediaPath) {
-      return res.status(404).json({ error: "Mensagem de áudio não encontrada" });
-    }
-    if (msg.transcription !== null && msg.transcription !== undefined) {
-      return res.json({ transcription: msg.transcription }); // já transcrita — devolve sem custo
-    }
-    const { transcreverAudio } = require('./ai');
-    const t = await transcreverAudio(msg.mediaPath);
-    if (t === null || t === undefined) {
-      return res.status(502).json({ error: "Falha na transcrição" });
-    }
-    await runQuery("UPDATE messages SET transcription = ? WHERE id = ?", [t, msg.id]);
-    bustConversationsCache(); // messages mudou — derruba o micro-cache do GET /api/conversations
-    res.json({ transcription: t });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

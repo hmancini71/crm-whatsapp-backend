@@ -441,38 +441,4 @@ async function getFollowUpReply(convoId, leadName, tentativa) {
   return san.blocked ? null : (san.safe || null);
 }
 
-// TRANSCRIÇÃO DE ÁUDIO (transcricao-20260728): transcreve um arquivo de áudio (.ogg do
-// WhatsApp) em texto pt-BR usando a MESMA infra Gemini do atendente (callGemini, com fallback
-// de modelos e gemini_key do banco). Usada nos hooks de áudio recebido/enviado (whatsapp.js e
-// index.js) em modo fire-and-forget, e no endpoint on-demand POST /api/messages/:id/transcribe.
-// Retorna: string transcrita (pode ser '' se não houver fala) ou null em erro/sem chave/arquivo
-// grande demais. NUNCA lança — o caminho crítico das mensagens não pode quebrar por causa disto.
-const TRANSCRIBE_MAX_BYTES = 15 * 1024 * 1024; // pula áudios > 15 MB (custo/limite da API)
-async function transcreverAudio(mediaPath) {
-  try {
-    if (!mediaPath || !fs.existsSync(mediaPath)) return null;
-    const st = fs.statSync(mediaPath);
-    if (!st.size || st.size > TRANSCRIBE_MAX_BYTES) return null;
-    const cfg = await getAiSettings();
-    if (!cfg.gemini_key) return null; // sem chave configurada → segue sem transcrição, sem erro
-    const b64 = fs.readFileSync(mediaPath).toString('base64');
-    const ext = String(mediaPath).toLowerCase();
-    const mime = ext.endsWith('.mp3') ? 'audio/mpeg' : ext.endsWith('.m4a') ? 'audio/mp4'
-      : ext.endsWith('.webm') ? 'audio/webm' : ext.endsWith('.mp4') ? 'audio/mp4' : 'audio/ogg';
-    const prompt = 'Transcreva este áudio em português do Brasil. Responda SOMENTE com o texto ' +
-      'transcrito, sem comentários, sem prefixos. Se não houver fala, responda com texto vazio.';
-    const txt = await callGemini(
-      cfg,
-      'Você é um transcritor de áudio. Transcreva fielmente, sem inventar conteúdo.',
-      [{ role: 'user', text: prompt, audioB64: b64, audioMime: mime }],
-      false,
-      { maxOutputTokens: 4096, timeoutMs: 60000 }
-    );
-    return String(txt || '').trim();
-  } catch (e) {
-    console.error('[transcricao] Falha ao transcrever ' + mediaPath + ':', e && e.message ? e.message : e);
-    return null;
-  }
-}
-
-module.exports = { getAiSettings, saveAiSettings, callGemini, getNovoLeadReply, getFollowUpReply, transcreverAudio, AI_DEFAULTS: DEFAULTS };
+module.exports = { getAiSettings, saveAiSettings, callGemini, getNovoLeadReply, getFollowUpReply, AI_DEFAULTS: DEFAULTS };

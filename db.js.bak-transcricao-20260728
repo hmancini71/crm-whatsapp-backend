@@ -1127,18 +1127,6 @@ db.serialize(() => {
     }
   });
 
-  // Safe migration: coluna 'transcription' em messages (transcricao-20260728) — texto transcrito
-  // do áudio via Gemini. NULL = ainda não transcrito (frontend mostra botão Transcrever);
-  // '' = transcrito porém vazio/sem fala. Preenchida de forma assíncrona (fire-and-forget).
-  db.all("PRAGMA table_info(messages)", (err, cols) => {
-    if (!err && cols && !cols.find(c => c.name === 'transcription')) {
-      db.run("ALTER TABLE messages ADD COLUMN transcription TEXT DEFAULT NULL", (alterErr) => {
-        if (alterErr) console.error("Failed to add transcription column to messages:", alterErr);
-        else console.log("Migration: added 'transcription' column to messages table.");
-      });
-    }
-  });
-
   // Safe migration: colunas 'edited' e 'deleted' em messages (editar/apagar mensagens enviadas)
   db.all("PRAGMA table_info(messages)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'edited')) {

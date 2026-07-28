@@ -11,23 +11,8 @@ const QRCode = require('qrcode');
 const ffmpegPath = require('ffmpeg-static');
 const ffmpeg = require('fluent-ffmpeg');
 const { runQuery, getRow, allRows, isGoogleAdsFirstMsg, originFromFirstMsg, bustConversationsCache } = require('./db');
-const { getNovoLeadReply, getAiSettings, transcreverAudio } = require('./ai');
+const { getNovoLeadReply, getAiSettings } = require('./ai');
 const antiban = require('./antiban'); // governador anti-banimento (caps, warm-up, pacing, humano)
-
-// TRANSCRIÇÃO (transcricao-20260728): dispara a transcrição de um áudio em segundo plano e
-// grava o resultado em messages.transcription. Fire-and-forget: NUNCA bloqueia nem derruba o
-// fluxo de mensagens — qualquer erro só loga. Usada nos áudios RECEBIDOS e ENVIADOS.
-function fireTranscricaoAudio(msgId, mediaPath) {
-  try {
-    if (!msgId || !mediaPath) return;
-    transcreverAudio(mediaPath).then((t) => {
-      if (t === null || t === undefined) return; // falha/sem chave → mantém NULL (botão de retry no CRM)
-      runQuery("UPDATE messages SET transcription = ? WHERE id = ?", [t, msgId])
-        .then(() => { try { bustConversationsCache(); } catch (e) {} })
-        .catch((e) => console.error('[transcricao] Falha ao gravar transcrição de ' + msgId + ':', e && e.message));
-    }).catch((e) => console.error('[transcricao] Erro inesperado (' + msgId + '):', e && e.message));
-  } catch (e) { /* nunca propaga */ }
-}
 // ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
 const _aiSentIds = new Set();
 
@@ -700,9 +685,6 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
         // micro-cache do GET /api/conversations para refletir na próxima leitura (até 4s de TTL).
         bustConversationsCache();
 
-        // transcricao-20260728: áudio (recebido OU eco de enviado) → transcreve em segundo plano.
-        if (incomingType === 'audio' && incomingMediaPath) fireTranscricaoAudio(msgId, incomingMediaPath);
-
         // Regras de lead só valem para mensagens RECEBIDAS (do cliente), não para as nossas
         if (!isMine) {
         // Nosso número que RECEBEU esta mensagem (carimbado no lead p/ ficar
@@ -1104,9 +1086,6 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
 
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
 
-  // transcricao-20260728: transcreve o áudio ENVIADO em segundo plano (fire-and-forget).
-  fireTranscricaoAudio(msgId, mediaPath);
-
   return { id: msgId, from: 'me', text: '[Mensagem de voz]', time: timeStr, type: 'audio' };
 }
 
@@ -1293,6 +1272,5 @@ module.exports = {
   MEDIA_DIR,
   AVATAR_DIR,
   avatarFileForJid,
-  fetchAndStoreAvatar,
-  fireTranscricaoAudio
+  fetchAndStoreAvatar
 };
