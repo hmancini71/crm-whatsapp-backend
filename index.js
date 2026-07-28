@@ -5881,23 +5881,65 @@ async function getLeadOriginsList() {
   } catch (e) {}
   return LEAD_ORIGINS_SEED.slice();
 }
-// Rótulo de origem de um lead p/ os gráficos: ga/meta/semclass viram os rótulos padrão;
-// 'org' é refinado — origem explícita que casa (case-insensitive) com a lista configurada
-// devolve o item da LISTA; origem explícita fora da lista devolve o próprio texto do card;
-// senão 'Orgânico'.
+// Rótulo de origem de um lead p/ os gráficos — pipeline496 (caso Angela, 2026-07-28): ESPELHO
+// EXATO do _srcBucket() do modal (inject_modal.js), que desde o pipeline495 é o ÚNICO
+// identificador de origem exibido no CRM. Antes esta função lia a coluna source CRUA: um lead
+// SEM origem travada mas com canal deduzido pelo tracking aparecia "Orgânico" no combo do modal
+// e caía em "Sem identificação" (ou no texto cru tipo "WhatsApp"/"Formulário de Contato") nos
+// gráficos — card e dashboard divergiam. Regra espelhada:
+//  - source_locked=1 (combo salvo no modal): GA/Meta por alias do source; casa com a lista
+//    configurada → item da LISTA; /^org/ → Orgânico; texto explícito fora da lista → o próprio
+//    texto (origem custom digitada); vazio/placeholders (manual/marketing/venda/planilha
+//    americano/"sem ...") → Sem identificação.
+//  - NÃO travado: canal deduzido do tracking (deriveChannel, mesma extração do front); source
+//    alias GA/Meta corrige canal deduzido que não comprovou anúncio pago; tag "comentário Meta"
+//    só quando nada mais rotulou. Canal deduzido que não é GA/Meta → "Orgânico" (igual ao
+//    combo); nada deduzido → "Sem identificação". A coluna source crua NÃO é mais exibida
+//    quando não travada — era exatamente o que fazia o gráfico discordar do card.
+// leadChannelCat NÃO muda (retrocompat: ponto ótimo, ROAS, filtros, popups antigos por cat) e
+// NÃO é usada aqui nem para GA/Meta: a PRECEDÊNCIA do modal é diferente (source alias corrige
+// canal deduzido não-pago; tag só entra por último) e usar o cat reintroduziria divergência
+// exatamente nesses casos de borda (provado no teste diferencial de 28/07/2026).
+const META_SOURCE_ALIASES = ['meta ads', 'facebook ads', 'facebook', 'instagram', 'meta', 'comentário meta', 'comentario meta'];
 function leadOriginLabel(l, origins) {
-  const cat = leadChannelCat(l);
-  if (cat === 'ga') return 'Google Ads';
-  if (cat === 'meta') return 'Meta Ads';
-  if (cat === 'semclass') return 'Sem identificação';
   const raw = String((l && l.source) || '').trim();
   const s = raw.toLowerCase();
-  if (s) {
-    const match = (origins || []).find(o => String(o).trim().toLowerCase() === s);
-    if (match) return String(match).trim();
-    if (s !== 'manual' && s !== 'marketing' && s !== 'venda' && s !== 'planilha americano' &&
-        s.indexOf('sem ') !== 0 && !/^org/.test(s)) return raw;
+  if (Number(l && l.source_locked) === 1) {
+    // ramo TRAVADO — espelho do ramo locked do _srcBucket
+    if (s === 'google ads') return 'Google Ads';
+    if (META_SOURCE_ALIASES.indexOf(s) !== -1) return 'Meta Ads';
+    if (s) {
+      const match = (origins || []).find(o => String(o).trim().toLowerCase() === s);
+      if (match) return String(match).trim();
+    }
+    if (/^org/.test(s)) return 'Orgânico';
+    if (s && s.indexOf('sem ') !== 0 && s !== 'manual' && s !== 'marketing' && s !== 'venda' && s !== 'planilha americano') return raw;
+    return 'Sem identificação';
   }
+  // ramo NÃO travado — espelho de crmLeadChannel + _srcBucket, na MESMA ordem do front:
+  let label = '';
+  // 1) canal deduzido do tracking;
+  try {
+    if (l && l.tracking) {
+      const tk = (typeof l.tracking === 'string') ? JSON.parse(l.tracking) : l.tracking;
+      if (tk && typeof tk === 'object' && Object.keys(tk).length) label = deriveChannel(tk);
+    }
+  } catch (e) {}
+  // 2) source alias GA/Meta corrige canal deduzido que não comprovou anúncio pago;
+  if (label !== 'Google Ads' && label !== 'Meta Ads') {
+    if (s === 'google ads') label = 'Google Ads';
+    else if (META_SOURCE_ALIASES.indexOf(s) !== -1) label = 'Meta Ads';
+  }
+  // 3) tag "comentário Meta"/"Meta" só quando nada mais rotulou.
+  if (!label) {
+    let tg = l && l.tags;
+    try { if (typeof tg === 'string') tg = JSON.parse(tg || '[]'); } catch (e) { tg = null; }
+    if (Array.isArray(tg) && (tg.indexOf('comentário Meta') !== -1 || tg.indexOf('Meta') !== -1)) label = 'Meta Ads';
+  }
+  if (label === 'Google Ads' || label === 'Meta Ads') return label;
+  if (!label) return 'Sem identificação';
+  // Qualquer canal deduzido que não é GA/Meta (WhatsApp, site, utm desconhecida...) = Orgânico,
+  // exatamente como o combo do modal exibe.
   return 'Orgânico';
 }
 
