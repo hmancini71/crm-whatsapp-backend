@@ -730,6 +730,26 @@ db.serialize(() => {
     }
   });
 
+  // fix-cadencia-novo (2026-07-28): estado da cadência dos Novo Leads (PASSO 4 das instruções
+  // da 1ª interação) — novo_nudge_count (0=nada, 1=confirmação 20min, 2=cobrança 2h) e o ts do
+  // último nudge. Safe migration, mesmo padrão das demais.
+  db.all("PRAGMA table_info(leads)", (err, cols) => {
+    if (!err && cols) {
+      if (!cols.find(c => c.name === 'novo_nudge_count')) {
+        db.run("ALTER TABLE leads ADD COLUMN novo_nudge_count INTEGER DEFAULT 0", (e2) => {
+          if (e2) console.error("Failed to add novo_nudge_count column to leads:", e2);
+          else console.log("Migration: added 'novo_nudge_count' column to leads table.");
+        });
+      }
+      if (!cols.find(c => c.name === 'novo_nudge_last')) {
+        db.run("ALTER TABLE leads ADD COLUMN novo_nudge_last INTEGER DEFAULT NULL", (e2) => {
+          if (e2) console.error("Failed to add novo_nudge_last column to leads:", e2);
+          else console.log("Migration: added 'novo_nudge_last' column to leads table.");
+        });
+      }
+    }
+  });
+
   // Safe migration: add 'lastClientReply' column to leads if it doesn't exist yet
   db.all("PRAGMA table_info(leads)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'lastClientReply')) {

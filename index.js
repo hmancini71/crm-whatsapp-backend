@@ -5104,6 +5104,100 @@ async function autoDeclineExhaustedFollowups() {
   finally { _declineRunning = false; }
 }
 
+
+// ===== fix-cadencia-novo (2026-07-28, Henry): cadência dos NOVO LEADS conforme o PASSO 4 das
+// instruções da 1ª interação. A regra escrita no PROMPT não agenda nada (o LLM só gera texto
+// quando o backend dispara) — quem decide a HORA é este código:
+//   • 20 min sem resposta após a saudação da IA → "Olá [nome], gostaria de confirmar se recebeu
+//     a mensagem acima." (nudge 1)
+//   • 2 h sem resposta após o nudge 1 → cobrança educada (nudge 2)
+//   • 24 h depois → tentativa do follow-up (aiFollowUpSweep, que já cobre stage='novo')
+//   • 1 h sem resposta após essa tentativa → move o card para "Tratamento inicial" (cai na
+//     coluna 4 — Cliente com pouco interesse) e a cadência padrão do Tratamento assume.
+// Janela de envio dos nudges: seg–sex 9h–18h e sáb 9h–13h (a mesma da 1ª interação). O estado
+// fica em leads.novo_nudge_count / novo_nudge_last (safe migration no db.js). Como cada envio
+// vira a última mensagem, o tempo é sempre medido da ÚLTIMA mensagem nossa — os esperas de
+// 20min/2h/24h são relativas, exatamente como o Henry escreveu na instrução.
+let _novoCadRunning = false;
+async function novoCadenceSweep() {
+  if (_novoCadRunning) return;
+  _novoCadRunning = true;
+  try {
+    const cfg = await getAiSettings();
+    if (!cfg.enabled || !cfg.novo_enabled) return;
+    const leads = await allRows(
+      "SELECT * FROM leads WHERE archived = 0 AND stage = 'novo' AND (priority IS NULL OR priority = '') AND lastClientReply IS NULL AND COALESCE(bot_ativo, 1) = 1"
+    );
+    if (!leads.length) return;
+    const { posSet: _pos } = await getSaleLineFilter(); // IA nunca atua nas linhas pós (2030)
+    const convs = await allRows("SELECT id, account, phone, whatsapp_jid FROM conversations WHERE (archived IS NULL OR archived = 0)");
+    const norm = (p) => String(p || '').replace(/\D/g, '');
+    let open = false;
+    try {
+      const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+      const wd = p.find(x => x.type === 'weekday').value;
+      const h = parseInt(p.find(x => x.type === 'hour').value, 10);
+      open = (['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(wd) && h >= 9 && h < 18) || (wd === 'Sat' && h >= 9 && h < 13);
+    } catch (e) {}
+    const NUDGE1_MS = 20 * 60 * 1000, NUDGE2_MS = 2 * 3600 * 1000, MOVE_MS = 60 * 60 * 1000;
+    const CAP = 15; // anti-spam por rodada (rodada a cada 5 min)
+    let sent = 0;
+    const firstName = (l) => {
+      const t = String(l.name || '').trim().split(/\s+/)[0] || '';
+      return /^[\p{L}][\p{L}'.-]*$/u.test(t) ? t : '';
+    };
+    for (const l of leads) {
+      try {
+        const lt = norm(l.phone).slice(-8);
+        const conv = convs.find(c =>
+          (l.whatsapp_jid && c.whatsapp_jid && c.whatsapp_jid === l.whatsapp_jid) ||
+          (lt.length === 8 && norm(c.phone).slice(-8) === lt)
+        );
+        if (!conv || !conv.account) continue;
+        if (_pos.has(conv.account)) continue;
+        const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [conv.id]);
+        if (!last || last.from !== 'me') continue; // só quando NÓS falamos por último
+        const elapsed = Date.now() - (Number(last.timestamp) || 0);
+        // "Se não responder em 1 hora [após a cobrança do follow-up], move para Tratamento
+        // inicial / Cliente sem interesse" — mover card não é mensagem: roda a qualquer hora.
+        if ((l.ai_fu_count || 0) >= 1) {
+          if (elapsed >= MOVE_MS) {
+            await runQuery("UPDATE leads SET stage = 'tratamento' WHERE id = ? AND stage = 'novo'", [l.id]);
+            const note = '📥 [Automático] Movido para "Tratamento inicial" (Cliente com pouco interesse): sem resposta 1h após a cobrança do follow-up (PASSO 4 das instruções da 1ª interação).';
+            await runQuery("UPDATE leads SET comments = TRIM(COALESCE(comments,'') || char(10) || ?) WHERE id = ?", [note, l.id]);
+            try { await logLeadHistory({ leadId: l.id, phone: l.phone, name: l.name, type: 'movimentacao', detail: 'Movido para "Tratamento inicial" (sem resposta 1h após o follow-up — PASSO 4)', meta: { to: 'tratamento' } }); } catch (e) {}
+            try { const full = await getRow("SELECT * FROM leads WHERE id = ?", [l.id]); if (full) sendWebhook('lead.stage_changed', { ...full, tags: full.tags ? JSON.parse(full.tags) : [] }); } catch (e) {}
+            console.log('[cadência novo] "' + l.name + '": movido p/ Tratamento (col 4) — sem resposta 1h após o follow-up.');
+          }
+          continue;
+        }
+        const count = Number(l.novo_nudge_count) || 0;
+        if (count >= 2) continue; // daqui em diante quem age é o aiFollowUpSweep (24h)
+        const need = count === 0 ? NUDGE1_MS : NUDGE2_MS;
+        if (elapsed < need) continue;
+        if (!open) continue; // fora da janela: espera abrir (as condições de tempo continuam valendo)
+        if (sent >= CAP) { console.log('[cadência novo] limite da rodada (' + CAP + ') atingido; o restante segue na próxima.'); break; }
+        // Re-checa o estágio AGORA (pode ter mudado entre a consulta e o envio).
+        const freshNow = await getRow("SELECT stage, archived, bot_ativo, lastClientReply FROM leads WHERE id = ?", [l.id]);
+        if (!freshNow || freshNow.archived || freshNow.stage !== 'novo' || freshNow.lastClientReply || freshNow.bot_ativo === 0) continue;
+        const nome = firstName(l);
+        const texto = count === 0
+          ? ('Olá' + (nome ? ' ' + nome : '') + ', gostaria de confirmar se recebeu a mensagem acima.')
+          : ('Olá' + (nome ? ' ' + nome : '') + ', tudo bem? Sigo à disposição para dar sequência ao seu atendimento. Posso te ajudar com as informações sobre o seu processo?');
+        const _gate = await antiban.canSendProactive(conv.account); // cap diário/horário + warm-up
+        if (!_gate.ok) { console.log('[cadência novo] número ' + conv.account + ': ' + _gate.reason + ' — pausando a rodada.'); break; }
+        await antiban.pace(conv.account); // intervalo + jitter anti-rajada
+        await sendWhatsAppMessage(conv.account, conv.id, antiban.varyText(texto));
+        await antiban.recordSend(conv.account);
+        await runQuery("UPDATE leads SET novo_nudge_count = ?, novo_nudge_last = ? WHERE id = ?", [count + 1, Date.now(), l.id]);
+        sent++;
+        console.log('[cadência novo] "' + l.name + '": nudge ' + (count + 1) + ' enviado (' + sent + '/' + CAP + ').');
+      } catch (e) { console.error('[cadência novo]', l && l.name, e && e.message); }
+    }
+  } catch (e) { console.error('[cadência novo sweep]', e && e.message); }
+  finally { _novoCadRunning = false; }
+}
+
 // ===== Integrações: API de entrada (marketing) + export + configurações =====
 async function checkApiKey(req, res, next) {
   try {
@@ -6787,6 +6881,9 @@ app.listen(PORT, async () => {
   // Regra 1.3b: auto-declínio dos que não responderam após os follow-ups (boot + a cada 30 min).
   setTimeout(() => { autoDeclineExhaustedFollowups().catch(() => {}); }, 3 * 60 * 1000);
   setInterval(() => { autoDeclineExhaustedFollowups().catch(() => {}); }, 30 * 60 * 1000);
+  // fix-cadencia-novo (PASSO 4): confirmação 20min + cobrança 2h + move p/ col4 (boot + a cada 5 min).
+  setTimeout(() => { novoCadenceSweep().catch(() => {}); }, 150 * 1000);
+  setInterval(() => { novoCadenceSweep().catch(() => {}); }, 5 * 60 * 1000);
   // Calendly: reunião de validação agendada pelo cliente → data no card (boot + a cada 5 min).
   setTimeout(() => { calendlySweep(logLeadHistory).catch((e) => console.error('[Calendly]', e.message)); }, 90 * 1000);
   setInterval(() => { calendlySweep(logLeadHistory).catch((e) => console.error('[Calendly]', e.message)); }, 5 * 60 * 1000);
