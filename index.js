@@ -2060,6 +2060,12 @@ app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file')
     if (isConnected) {
       messageObj = await sendWhatsAppAudio(accountId, id, buffer);
     } else {
+      // v503 - linha desconectada: NAO grava audio fantasma. Ate 29/07/2026 este ramo
+      // salvava o audio no banco e devolvia 200 — o CRM mostrava como enviado e o cliente
+      // nunca recebia. Na queda de 28-29/07 doze audios ficaram presos assim. Agora
+      // bloqueia igual ao envio de texto (rota /messages).
+      return res.status(409).json({ error: 'A linha do WhatsApp desta conversa esta desconectada. Reconecte-a em Conexoes e grave o audio de novo.' });
+      // (bloco antigo de fallback offline abaixo — inalcancavel, mantido como referencia)
       // Offline fallback: store locally so it still appears in the CRM
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
@@ -2115,6 +2121,9 @@ app.post('/api/conversations/:id/media', authenticateToken, uploadSingle('file')
     if (isConnected) {
       messageObj = await sendWhatsAppMedia(accountId, id, buffer, mimetype, fileName);
     } else {
+      // v503 - mesmo problema do audio: gravava o arquivo e devolvia 200 sem enviar nada.
+      return res.status(409).json({ error: 'A linha do WhatsApp desta conversa esta desconectada. Reconecte-a em Conexoes e envie o arquivo de novo.' });
+      // (bloco antigo de fallback offline abaixo — inalcancavel, mantido como referencia)
       // Offline: guarda localmente para aparecer no CRM mesmo sem conexão
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
