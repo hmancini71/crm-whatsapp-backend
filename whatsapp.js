@@ -13,6 +13,9 @@ const ffmpeg = require('fluent-ffmpeg');
 const { runQuery, getRow, allRows, isGoogleAdsFirstMsg, originFromFirstMsg, bustConversationsCache } = require('./db');
 const { getNovoLeadReply, getAiSettings, transcreverAudio } = require('./ai');
 const antiban = require('./antiban'); // governador anti-banimento (caps, warm-up, pacing, humano)
+// v506: vigia de entrega. Cada envio arma um relogio so daquela mensagem; o recibo desarma.
+// Se o relogio vence sem recibo, isso vira um alerta visivel no CRM. Ver delivery_watch.js.
+const deliveryWatch = require('./delivery_watch');
 
 // TRANSCRIÇÃO (transcricao-20260728): dispara a transcrição de um áudio em segundo plano e
 // grava o resultado em messages.transcription. Fire-and-forget: NUNCA bloqueia nem derruba o
@@ -977,6 +980,9 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
   const bumpMsgStatus = async (mid, st) => {
     if (!mid || typeof st !== 'number' || st < 2) return;
     await runQuery("UPDATE messages SET status = ? WHERE id = ? AND COALESCE(status,0) < ?", [st, mid, st]);
+    // v506: TODO recibo passa por aqui. status >= 3 = entregue de verdade -> desarma o relogio
+    // daquela mensagem e resolve sozinho o alerta, se ja tiver sido criado.
+    deliveryWatch.disarm(mid, st);
   };
   sock.ev.on('messages.update', async (updates) => {
     try {
@@ -1109,6 +1115,9 @@ async function sendWhatsAppMessage(accountId, convoId, text, quotedMsgId) {
     [msgId, convoId, 'me', text, timeStr, Date.now(), Math.max(2, (sent && sent.status) || 0), sockNumber(sock), quotedRow ? quotedRow.id : null, quotedTextTrunc, quotedFromVal]
   );
 
+  // v506: arma o relogio desta mensagem. Se o recibo de entrega nao chegar, ela vira alerta.
+  deliveryWatch.arm(msgId, Date.now());
+
   // Update conversation lastMessage
   await runQuery(
     "UPDATE conversations SET lastTime = ? WHERE id = ?",
@@ -1165,6 +1174,9 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
     [msgId, convoId, 'me', '[Mensagem de voz]', timeStr, Date.now(), 'audio', mediaPath, sockNumber(sock), Math.max(2, (sent && sent.status) || 0)]
   );
 
+  // v506: audio tambem entra no vigia — um PTT que nunca chega e tao invisivel quanto um texto.
+  deliveryWatch.arm(msgId, Date.now());
+
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
 
   // transcricao-20260728: transcreve o áudio ENVIADO em segundo plano (fire-and-forget).
@@ -1197,6 +1209,8 @@ async function sendWhatsAppMedia(accountId, convoId, buffer, mimetype, fileName)
     "INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, type, mediaPath, our_number, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [msgId, convoId, 'me', label, timeStr, Date.now(), type, mediaPath, sockNumber(sock), Math.max(2, (sent && sent.status) || 0)]
   );
+  // v506: foto/video/documento tambem entram no vigia de entrega.
+  deliveryWatch.arm(msgId, Date.now());
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
   return { id: msgId, from: 'me', text: label, time: timeStr, type: type };
 }

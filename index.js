@@ -33,6 +33,9 @@ const {
   editWhatsAppMessage, deleteWhatsAppMessage,
   avatarFileForJid, fetchAndStoreAvatar,
   fireTranscricaoAudio } = require('./whatsapp');
+// v506: vigia de entrega (delivery_watch.js) — alerta dirigido a evento para mensagens nossas
+// que o WhatsApp aceitou mas nunca confirmou como entregues.
+const deliveryWatch = require('./delivery_watch');
 
 // Redirect console logs to an in-memory buffer
 const logBuffer = [];
@@ -1823,6 +1826,39 @@ async function applyOwnerLine(convo, id) {
   if (own.account !== convo.account) convo.account = own.account;
   return { locked: true, error: null };
 }
+
+// ---------------------------------------------------------------------------
+// v506 · VIGIA DE ENTREGA — mensagens nossas que o WhatsApp aceitou (1 tique) e
+// nunca confirmou como entregues. Os alertas nascem de um relogio por mensagem
+// (delivery_watch.js) e se resolvem sozinhos quando o recibo chega; estas rotas
+// so leem o resultado e permitem dar baixa manual no que nunca vai chegar.
+// ---------------------------------------------------------------------------
+app.get('/api/delivery-alerts', authenticateToken, async (req, res) => {
+  try {
+    const rows = await deliveryWatch.listOpen(req.query && req.query.limit);
+    res.json({ count: (rows && rows.length) || 0, janela_horas: deliveryWatch.WATCH_MS / 3600000, alertas: rows || [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/delivery-alerts/count', authenticateToken, async (req, res) => {
+  try {
+    res.json({ count: await deliveryWatch.countOpen() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/delivery-alerts/:msgId/dismiss', authenticateToken, async (req, res) => {
+  try {
+    await deliveryWatch.dismiss(req.params.msgId);
+    res.json({ ok: true, count: await deliveryWatch.countOpen() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/delivery-alerts/dismiss-all', authenticateToken, async (req, res) => {
+  try {
+    const n = await deliveryWatch.dismissAll();
+    res.json({ ok: true, baixados: n, count: await deliveryWatch.countOpen() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // 9. Conversations Routes: Send Message
 app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) => {
@@ -6916,6 +6952,13 @@ app.listen(PORT, async () => {
     await initSessions();
   } catch (err) {
     console.error("Error initializing sessions:", err);
+  }
+  // v506: rearma o vigia de entrega. NAO e rotina periodica — roda uma unica vez, no boot,
+  // para que um `pm2 restart` nao apague os relogios que estavam em memoria.
+  try {
+    await deliveryWatch.init();
+  } catch (err) {
+    console.error("Error initializing delivery watch (v506):", err);
   }
   // Limpa pontos de tempo antigos onde nós já fomos os últimos a responder
   try {
