@@ -36,6 +36,9 @@ const {
 // v506: vigia de entrega (delivery_watch.js) — alerta dirigido a evento para mensagens nossas
 // que o WhatsApp aceitou mas nunca confirmou como entregues.
 const deliveryWatch = require('./delivery_watch');
+// v508: fila de saída (outbox.js) — envio nunca é recusado por linha fora do ar;
+// espera na fila e sai sozinho pela MESMA linha quando ela volta.
+const outbox = require('./outbox');
 
 // Redirect console logs to an in-memory buffer
 const logBuffer = [];
@@ -1805,21 +1808,26 @@ async function resolveOwnerLine(convo) {
       const w = await getRow("SELECT number FROM whatsapp_accounts WHERE id = ?", [owner]);
       if (w && w.number) num = w.number;
     } catch (e) {}
-    return {
-      locked: true,
-      error: 'Só a linha ' + num + ' consegue falar com este cliente no WhatsApp. Ela está desconectada — reconecte-a em Conexões. Enviar por outra linha não chega ao cliente.'
-    };
+    // v508: linha dona fora do ar NÃO recusa mais o envio. Devolvemos o dono do
+    // mesmo jeito, marcado como fora do ar; quem chama põe na fila (outbox.js) e
+    // a mensagem sai sozinha no instante em que a linha voltar. O texto abaixo
+    // vive só no log — o atendente não vê nada, ele só digita e manda.
+    return { locked: true, account: owner, down: true, motivo: 'linha ' + num + ' fora do ar' };
   } catch (e) {
     return { locked: false };
   }
 }
 
-// Aplica o dono na conversa antes do roteamento por ambiente. Devolve o texto do
-// erro (para 409) ou null quando o envio pode seguir.
+// Aplica o dono na conversa antes do roteamento por ambiente. v508: nunca mais
+// devolve erro — devolve a linha dona, esteja ela no ar ou não. Se estiver fora
+// do ar (own.down), o envio vira fila em vez de recusa.
 async function applyOwnerLine(convo, id) {
   const own = await resolveOwnerLine(convo);
-  if (!own.locked) return { locked: false, error: null };
-  if (own.error) return { locked: true, error: own.error };
+  if (!own.locked) return { locked: false, error: null, down: false };
+  if (own.down) {
+    if (own.account && own.account !== convo.account) convo.account = own.account;
+    return { locked: true, error: null, down: true, account: own.account, motivo: own.motivo };
+  }
   // Troca a linha SÓ em memória, para este envio. Não persiste conversations.account
   // de propósito: gravar mudaria o ambiente (pré/pós) em que a conversa aparece e ela
   // sumiria da aba de quem está atendendo. O que importa é sair pelo socket certo.
@@ -1875,7 +1883,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     }
     // v504: antes de qualquer roteamento por ambiente, respeita o DONO do endereço @lid.
     const _own = await applyOwnerLine(convo, id);
-    if (_own.error) return res.status(409).json({ error: _own.error });
+    if (_own.down) console.log('[outbox] texto de ' + id + ' vai para a fila: ' + _own.motivo);
     const _ownLock = _own.locked;
     // Roteamento de linha no envio (vale para TODOS os celulares/ambientes):
     // - Pós: envia sempre por uma linha do pós CONECTADA (mesmo que a linha da conversa seja
@@ -2012,9 +2020,14 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       // Send real WhatsApp message
       messageObj = await sendWhatsAppMessage(accountId, id, text, quotedMsgId);
     } else {
-      // Linha desconectada: NÃO grava mensagem fantasma (antes ela ficava com o relógio
-      // "pendente" para sempre, dando impressão de que enviou). Avisa para reconectar.
-      return res.status(409).json({ error: 'A linha do WhatsApp desta conversa está desconectada. Reconecte-a em Conexões e tente enviar de novo.' });
+      // v508: linha fora do ar não recusa mais o envio. Entra na FILA e sai sozinha
+      // pela MESMA linha no instante em que ela voltar (outbox.js). O atendente vê a
+      // mensagem com o relógio e não precisa fazer nada.
+      messageObj = await outbox.enqueue({ convoId: id, account: accountId, kind: 'text', text, quotedId: quotedMsgId });
+      bustConversationsCache();
+      res.json(messageObj);
+      doSendBookkeeping().catch(() => {});
+      return;
       // (bloco antigo de fallback offline removido)
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
@@ -2138,7 +2151,7 @@ app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file')
     let accountId = convo.account;
     // v504: dono do endereço @lid tem prioridade sobre o roteamento por ambiente.
     const _ownA = await applyOwnerLine(convo, id);
-    if (_ownA.error) return res.status(409).json({ error: _ownA.error });
+    if (_ownA.down) console.log('[outbox] audio de ' + id + ' vai para a fila: ' + _ownA.motivo);
     if (_ownA.locked) accountId = convo.account;
     const _ownLockA = _ownA.locked;
     // Roteia pela linha do AMBIENTE do usuário — MESMA regra do envio de texto (fix 2026-07-04,
@@ -2171,7 +2184,10 @@ app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file')
       // salvava o audio no banco e devolvia 200 — o CRM mostrava como enviado e o cliente
       // nunca recebia. Na queda de 28-29/07 doze audios ficaram presos assim. Agora
       // bloqueia igual ao envio de texto (rota /messages).
-      return res.status(409).json({ error: 'A linha do WhatsApp desta conversa esta desconectada. Reconecte-a em Conexoes e grave o audio de novo.' });
+      // v508: entra na FILA em vez de recusar. Sai sozinha pela mesma linha quando ela voltar.
+      messageObj = await outbox.enqueue({ convoId: id, account: accountId, kind: 'audio', buffer, mimetype: (req.file && req.file.mimetype) || mimetype || 'audio/ogg' });
+      bustConversationsCache();
+      return res.json(messageObj);
       // (bloco antigo de fallback offline abaixo — inalcancavel, mantido como referencia)
       // Offline fallback: store locally so it still appears in the CRM
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
@@ -2209,7 +2225,7 @@ app.post('/api/conversations/:id/media', authenticateToken, uploadSingle('file')
     let accountId = convo.account;
     // v504: dono do endereço @lid tem prioridade sobre o roteamento por ambiente.
     const _ownM = await applyOwnerLine(convo, id);
-    if (_ownM.error) return res.status(409).json({ error: _ownM.error });
+    if (_ownM.down) console.log('[outbox] arquivo de ' + id + ' vai para a fila: ' + _ownM.motivo);
     if (_ownM.locked) accountId = convo.account;
     const _ownLockM = _ownM.locked;
     // Mesma regra de roteamento por ambiente do texto/áudio (fix 2026-07-04) — ver rota /audio.
@@ -2235,7 +2251,10 @@ app.post('/api/conversations/:id/media', authenticateToken, uploadSingle('file')
       messageObj = await sendWhatsAppMedia(accountId, id, buffer, mimetype, fileName);
     } else {
       // v503 - mesmo problema do audio: gravava o arquivo e devolvia 200 sem enviar nada.
-      return res.status(409).json({ error: 'A linha do WhatsApp desta conversa esta desconectada. Reconecte-a em Conexoes e envie o arquivo de novo.' });
+      // v508: entra na FILA em vez de recusar. Sai sozinha pela mesma linha quando ela voltar.
+      messageObj = await outbox.enqueue({ convoId: id, account: accountId, kind: 'media', buffer, mimetype: (req.file && req.file.mimetype) || mimetype, fileName: (req.file && req.file.originalname) || fileName });
+      bustConversationsCache();
+      return res.json(messageObj);
       // (bloco antigo de fallback offline abaixo — inalcancavel, mantido como referencia)
       // Offline: guarda localmente para aparecer no CRM mesmo sem conexão
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
@@ -6959,6 +6978,13 @@ app.listen(PORT, async () => {
     await deliveryWatch.init();
   } catch (err) {
     console.error("Error initializing delivery watch (v506):", err);
+  }
+  // v508: liga a fila de saída. Tudo que ficou esperando linha continua na fila
+  // depois de um restart e sai sozinho assim que o socket abrir.
+  try {
+    await outbox.start();
+  } catch (err) {
+    console.error("Error initializing outbox (v508):", err);
   }
   // Limpa pontos de tempo antigos onde nós já fomos os últimos a responder
   try {
