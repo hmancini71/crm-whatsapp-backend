@@ -872,11 +872,16 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
       let tags = []; try { tags = cur.tags ? JSON.parse(cur.tags) : []; } catch (e) { tags = []; }
       const hasServ = Array.isArray(tags) && tags.length > 0 && String(tags[0] || '').trim() !== '';
       const hasValue = Number(cur.value) > 0;
-      if (!hasServ || !hasValue) {
+      // v498 (pedido do Henry): o COMPROVANTE DE PAGAMENTO passa a ser obrigatorio para entrar
+      // em "Venda convertida". Vale para TODOS os caminhos (arrasto no board, combo do modal e
+      // qualquer automacao), porque esta validacao roda antes de gravar e ignora o force=true.
+      const hasProof = String(cur.payment_proof || '').trim() !== '';
+      if (!hasServ || !hasValue || !hasProof) {
         const faltam = [];
         if (!hasServ) faltam.push('o tipo de serviço (classificação)');
         if (!hasValue) faltam.push('o valor contratado');
-        return res.status(422).json({ error: 'Não foi transferido para "Venda convertida": falta definir ' + faltam.join(' e ') + '.', _missing: { servico: !hasServ, valor: !hasValue } });
+        if (!hasProof) faltam.push('o comprovante de pagamento (anexe o arquivo no card)');
+        return res.status(422).json({ error: 'Não foi transferido para "Venda convertida": falta definir ' + faltam.join(' e ') + '.', _missing: { servico: !hasServ, valor: !hasValue, comprovante: !hasProof } });
       }
     }
     // "Lead declinou/cancelado" exige o motivo do cancelamento preenchido.
