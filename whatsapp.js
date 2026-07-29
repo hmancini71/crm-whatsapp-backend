@@ -278,6 +278,26 @@ async function maybeAutoReply(sock, fromJid, convoId) {
 
 const connectionRetries = {};
 
+// v502 - WATCHDOG DE CONEXAO + BACKOFF EXPONENCIAL
+// Motivo: em 28/07/2026 22:00Z as linhas wa1/wa2/wa3/wa7 cairam com Status Code 405
+// (recusa do WhatsApp). O codigo antigo religava a cada 5s, para sempre, sem limite —
+// o que mantinha a recusa viva — e, quando um socket ficava pendurado no handshake
+// (nem 'open' nem 'close'), sessions[id] nunca era limpo, o early-return no topo de
+// connectWhatsApp devolvia 'connecting' e a linha NAO se recuperava mais sozinha.
+const connectWatchdogs = {};
+const CONNECT_TIMEOUT_MS = 60000;
+function waRetryDelay(id) {
+  const n = connectionRetries[id] || 0;
+  const base = Math.min(5000 * Math.pow(2, n), 300000);
+  return base + Math.floor(Math.random() * 3000);
+}
+function clearConnectWatchdog(id) {
+  if (connectWatchdogs[id]) {
+    try { clearTimeout(connectWatchdogs[id]); } catch (e) {}
+    delete connectWatchdogs[id];
+  }
+}
+
 // Versão do Baileys cacheada: evita um fetch de rede a cada conexão.
 // Esse fetch repetido podia travar o event loop e fazer um socket JÁ
 // conectado estourar o keep-alive (408) quando um número novo conectava.
@@ -364,6 +384,27 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
   // Set status in DB
   await runQuery("UPDATE whatsapp_accounts SET status = ?, connect_at = ? WHERE id = ?", ['connecting', new Date().toISOString(), id]);
 
+  // v502 - arma o watchdog: se em CONNECT_TIMEOUT_MS o socket nao abrir nem fechar, o
+  // handshake esta pendurado. Derruba, limpa sessions[id] e reagenda com backoff.
+  // So vale para sessao JA autenticada (reconexao) — no pareamento por QR e normal
+  // ficar aguardando o usuario escanear, e ali o watchdog nao pode interferir.
+  clearConnectWatchdog(id);
+  connectWatchdogs[id] = setTimeout(async () => {
+    delete connectWatchdogs[id];
+    if (sessions[id] !== sock) return;
+    if (!(state.creds && state.creds.me)) return;
+    if (sock.ws && sock.ws.isOpen) return;
+    console.warn('[watchdog] ' + id + ': handshake pendurado por ' + CONNECT_TIMEOUT_MS + 'ms — derrubando e reagendando.');
+    try { sock.end(); } catch (e) {}
+    if (sessions[id] === sock) delete sessions[id];
+    delete sessionQrs[id];
+    _cachedWaVersion = null;
+    connectionRetries[id] = (connectionRetries[id] || 0) + 1;
+    const _d = waRetryDelay(id);
+    console.log('[watchdog] ' + id + ': nova tentativa em ' + Math.round(_d / 1000) + 's');
+    setTimeout(() => connectWhatsApp(id, true), _d);
+  }, CONNECT_TIMEOUT_MS);
+
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -379,6 +420,7 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
 
     if (connection === 'open') {
       console.log(`WhatsApp Account ${id} Connected!`);
+      clearConnectWatchdog(id); // v502
       sessionQrs[id] = null;
       sessionPairCodes[id] = null;
       connectionRetries[id] = 0;
@@ -425,6 +467,7 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
     }
 
     if (connection === 'close') {
+      clearConnectWatchdog(id); // v502 - fechou de verdade, o watchdog nao precisa mais agir
       const isAuthenticated = !!state.creds?.me;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       
@@ -451,8 +494,14 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
       delete sessionQrs[id];
 
       if (shouldReconnect) {
-        // Try reconnecting in 5 seconds
-        setTimeout(() => connectWhatsApp(id, true), 5000);
+        // v502 - BACKOFF EXPONENCIAL (antes: 5s fixos, para sempre).
+        // Com um 405 o WhatsApp esta recusando a conexao; religar de 5 em 5 segundos
+        // so mantem a recusa viva. Agora: 5s, 10s, 20s, 40s ... ate o teto de 5 min.
+        if (isAuthenticated) connectionRetries[id] = (connectionRetries[id] || 0) + 1;
+        if (statusCode === 405) _cachedWaVersion = null; // 405 costuma ser versao/handshake recusado
+        const _d = waRetryDelay(id);
+        console.log('[reconnect] ' + id + ': nova tentativa em ' + Math.round(_d / 1000) + 's (tentativa ' + (connectionRetries[id] || 0) + ', code ' + statusCode + ')');
+        setTimeout(() => connectWhatsApp(id, true), _d);
       } else {
         // Logged out or not authenticated: Clear session folder and set disconnected in DB
         await runQuery("UPDATE whatsapp_accounts SET status = ? WHERE id = ?", ['disconnected', id]);
