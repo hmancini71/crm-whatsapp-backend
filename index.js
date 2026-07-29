@@ -1767,6 +1767,63 @@ app.post('/api/conversations/:id/mark-unread', authenticateToken, async (req, re
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── v504 ───────────────────────────────────────────────────────────────────
+// DONO DO ENDEREÇO (@lid) — por que esta função existe.
+//
+// O WhatsApp identifica a maioria dos clientes por um endereço @lid (LinkedID),
+// não pelo telefone: 1.435 das 1.599 conversas do CRM usam @lid. Esse endereço
+// só é resolvível DENTRO da sessão da linha que o aprendeu. Se a linha A
+// conheceu o cliente como 7907487821997@lid, mandar essa mesma string pela
+// linha B faz o servidor do WhatsApp ACEITAR a mensagem (1 tique, status 2) e
+// nunca entregar. O CRM mostrava "enviado" e o cliente não recebia nada.
+//
+// Até 29/07/2026 as três rotas de envio (texto, áudio, mídia) trocavam a
+// conversa para "qualquer linha conectada do ambiente" quando a linha da
+// conversa estava caída ou era do outro ambiente. Caso Samira (c_o2l0863yo):
+// conversa cujo endereço pertence à wa7, remetida para wa3/wa2/wa1 — 13
+// mensagens presas em 1 tique entre 24/07 e 29/07, enquanto 100% das enviadas
+// pela wa7 foram entregues e lidas. 134 conversas tinham saídas por mais de uma
+// linha e 50 estavam apontando para uma linha que não fala com o cliente.
+//
+// Regra a partir daqui: conversa com endereço @lid e dono conhecido
+// (conversations.jid_account) só envia pelo dono. Dono desconectado => 409
+// dizendo qual número reconectar. Nunca mais um envio silencioso que não chega.
+async function resolveOwnerLine(convo) {
+  try {
+    const jid = String((convo && convo.whatsapp_jid) || '');
+    if (!/@lid$/i.test(jid)) return { locked: false };
+    const owner = convo.jid_account;
+    if (!owner) return { locked: false };
+    if (sessions[owner] && sessions[owner].ws && sessions[owner].ws.isOpen) {
+      return { locked: true, account: owner };
+    }
+    let num = owner;
+    try {
+      const w = await getRow("SELECT number FROM whatsapp_accounts WHERE id = ?", [owner]);
+      if (w && w.number) num = w.number;
+    } catch (e) {}
+    return {
+      locked: true,
+      error: 'Só a linha ' + num + ' consegue falar com este cliente no WhatsApp. Ela está desconectada — reconecte-a em Conexões. Enviar por outra linha não chega ao cliente.'
+    };
+  } catch (e) {
+    return { locked: false };
+  }
+}
+
+// Aplica o dono na conversa antes do roteamento por ambiente. Devolve o texto do
+// erro (para 409) ou null quando o envio pode seguir.
+async function applyOwnerLine(convo, id) {
+  const own = await resolveOwnerLine(convo);
+  if (!own.locked) return { locked: false, error: null };
+  if (own.error) return { locked: true, error: own.error };
+  if (own.account !== convo.account) {
+    try { await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [own.account, id]); } catch (e) {}
+    convo.account = own.account;
+  }
+  return { locked: true, error: null };
+}
+
 // 9. Conversations Routes: Send Message
 app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) => {
   const { id } = req.params;
@@ -1780,6 +1837,10 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     if (!convo) {
       return res.status(404).json({ error: "Conversa não encontrada" });
     }
+    // v504: antes de qualquer roteamento por ambiente, respeita o DONO do endereço @lid.
+    const _own = await applyOwnerLine(convo, id);
+    if (_own.error) return res.status(409).json({ error: _own.error });
+    const _ownLock = _own.locked;
     // Roteamento de linha no envio (vale para TODOS os celulares/ambientes):
     // - Pós: envia sempre por uma linha do pós CONECTADA (mesmo que a linha da conversa seja
     //   pré ou tenha caído — ex.: número duplicado com um slot caído).
@@ -1792,7 +1853,11 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       const isPos = posSet.size ? await userIsPos(req) : false;
       let convPos = posSet.has(convo.account);
       const lineOpen = isOpenLine(convo.account);
-      if (posSet.size && isPos) {
+      // v504: dono do endereço @lid manda. Se está travado na linha dona, o
+      // roteamento por ambiente abaixo NÃO pode desviar — desviar era exatamente
+      // o que produzia "enviado" que nunca chegava ao cliente.
+      if (_ownLock) { /* linha já definida pelo dono do endereço */ }
+      else if (posSet.size && isPos) {
         if (!convPos || !lineOpen) {
           const posConn = [...posSet].find(isOpenLine);
           if (posConn && posConn !== convo.account) {
@@ -2035,6 +2100,11 @@ app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file')
 
     const buffer = req.file ? req.file.buffer : Buffer.from(audio, 'base64');
     let accountId = convo.account;
+    // v504: dono do endereço @lid tem prioridade sobre o roteamento por ambiente.
+    const _ownA = await applyOwnerLine(convo, id);
+    if (_ownA.error) return res.status(409).json({ error: _ownA.error });
+    if (_ownA.locked) accountId = convo.account;
+    const _ownLockA = _ownA.locked;
     // Roteia pela linha do AMBIENTE do usuário — MESMA regra do envio de texto (fix 2026-07-04,
     // pedido do Henry: "tem que mandar mensagem e áudio independente se mudou ambiente ou
     // WhatsApp"). Card que migrou deixava a conversa presa na linha do outro lado e o áudio
@@ -2042,7 +2112,8 @@ app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file')
     try {
       const { posSet } = await getSaleLineFilter();
       const isOpenLine = (a) => !!(sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
-      if (posSet.size) {
+      if (_ownLockA) { /* v504: linha travada no dono do endereço — não desvia */ }
+      else if (posSet.size) {
         const isPos = await userIsPos(req);
         const ok = (a) => isOpenLine(a) && (isPos ? posSet.has(a) : !posSet.has(a));
         if (!ok(accountId)) {
@@ -2100,11 +2171,17 @@ app.post('/api/conversations/:id/media', authenticateToken, uploadSingle('file')
     const buffer = req.file ? req.file.buffer : Buffer.from(data, 'base64');
     if (buffer.length > 16 * 1024 * 1024) return res.status(400).json({ error: "Arquivo acima de 16 MB" });
     let accountId = convo.account;
+    // v504: dono do endereço @lid tem prioridade sobre o roteamento por ambiente.
+    const _ownM = await applyOwnerLine(convo, id);
+    if (_ownM.error) return res.status(409).json({ error: _ownM.error });
+    if (_ownM.locked) accountId = convo.account;
+    const _ownLockM = _ownM.locked;
     // Mesma regra de roteamento por ambiente do texto/áudio (fix 2026-07-04) — ver rota /audio.
     try {
       const { posSet } = await getSaleLineFilter();
       const isOpenLine = (a) => !!(sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
-      if (posSet.size) {
+      if (_ownLockM) { /* v504: linha travada no dono do endereço — não desvia */ }
+      else if (posSet.size) {
         const isPos = await userIsPos(req);
         const ok = (a) => isOpenLine(a) && (isPos ? posSet.has(a) : !posSet.has(a));
         if (!ok(accountId)) {

@@ -1277,6 +1277,48 @@ db.serialize(() => {
     db.run("UPDATE leads SET phone = '+55 12 98317-6000' WHERE id = 'l_zfe33v8mt' AND (phone = '' OR phone IS NULL)");
   }
 
+  // ─── v504 ──────────────────────────────────────────────────────────────────
+  // Migração segura: coluna 'jid_account' em conversations = a linha DONA do
+  // endereço @lid do cliente.
+  //
+  // Por que existe: um endereço @lid só é resolvível dentro da sessão da linha
+  // que o aprendeu. Enviar o mesmo @lid por outra linha faz o servidor do
+  // WhatsApp aceitar (1 tique, status 2) e nunca entregar — o CRM mostrava
+  // "enviado" e o cliente não recebia nada. 1.435 das 1.599 conversas usam @lid.
+  //
+  // Backfill: dono = a linha do último envio COM RECIBO (status >= 3). Só recibo
+  // de entrega prova que aquela linha fala com aquele cliente; status 2 é
+  // exatamente o sintoma da falha, então não serve como prova.
+  db.all("PRAGMA table_info(conversations)", (err0, cols0) => {
+    if (err0 || !cols0) return;
+    const hasOwner = cols0.find(c => c.name === 'jid_account');
+    const backfillOwner = () => {
+      db.run(
+        "UPDATE conversations SET jid_account = (" +
+        "  SELECT w.id FROM messages m" +
+        "  JOIN whatsapp_accounts w ON w.number = m.our_number" +
+        "  WHERE m.conversationId = conversations.id" +
+        "    AND m.`from` = 'me' AND m.status >= 3" +
+        "  ORDER BY m.timestamp DESC LIMIT 1" +
+        ") WHERE jid_account IS NULL",
+        (upErr) => {
+          if (upErr) console.log("Migration v504: backfill de jid_account falhou:", upErr.message);
+          else console.log("Migration v504: jid_account preenchido pelo histórico de entregas.");
+        }
+      );
+    };
+    if (!hasOwner) {
+      db.run("ALTER TABLE conversations ADD COLUMN jid_account TEXT DEFAULT NULL", (alterErr) => {
+        if (!alterErr) {
+          console.log("Migration v504: coluna 'jid_account' criada em conversations.");
+          backfillOwner();
+        }
+      });
+    } else {
+      backfillOwner();
+    }
+  });
+
   // Safe migration: add 'whatsapp_jid' column to conversations if it doesn't exist yet
   db.all("PRAGMA table_info(conversations)", (err, cols) => {
     if (!err && cols) {

@@ -727,14 +727,28 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
             "UPDATE conversations SET lastTime = ?, unread = " + (isMine ? "0" : "unread + 1") + ", archived = 0 WHERE id = ?",
             [timeStr, convoId]
           );
+          // v504: registra o DONO do endereço @lid — a linha que consegue falar com este cliente.
+          // SÓ marca em mensagem vinda do cliente (!isMine). O eco de saída (isMine) chega no
+          // socket da linha que ENVIOU mesmo quando a entrega falhou; marcar no eco gravaria a
+          // linha errada (foi exatamente o caso Samira, que teria gravado a wa3 quebrada).
+          if (!isMine) {
+            try {
+              await runQuery(
+                "UPDATE conversations SET jid_account = ?, whatsapp_jid = COALESCE(whatsapp_jid, ?) WHERE id = ?",
+                [id, fromJid, convoId]
+              );
+            } catch (e) { /* coluna pode não existir em bases antigas — migração cuida disso */ }
+          }
         } else {
           // Generate new conversation id
           convoId = 'c_' + Math.random().toString(36).substr(2, 9);
           if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] No conversation found. Creating new one with convoId=${convoId}`);
           const avatar = name.slice(0, 2).toUpperCase();
+          // v504: jid_account = dono do endereço. Só quando a mensagem veio do cliente (!isMine),
+          // porque só isso prova que esta linha consegue resolver o @lid dele.
           await runQuery(
-            "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [convoId, id, name, phone, avatar, timeStr, isMine ? 0 : 1, 0, fromJid]
+            "INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid, jid_account) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [convoId, id, name, phone, avatar, timeStr, isMine ? 0 : 1, 0, fromJid, isMine ? null : id]
           );
         }
 
