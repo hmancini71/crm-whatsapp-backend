@@ -2560,7 +2560,14 @@ app.get('/api/leads/:id/conversation', authenticateToken, async (req, res) => {
   try {
     const lead = await getRow("SELECT * FROM leads WHERE id = ?", [req.params.id]);
     if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
-    const convo = await findConvoForLead(lead);
+    // v505: findConvoForLead devolve SÓ { id }. O CRM precisa da linha DONA do endereço
+    // (conversations.jid_account, criada no v504) para mostrar quem realmente consegue falar
+    // com o cliente — e do 'account' real, que o aviso "outro número nosso" já esperava
+    // receber desde o v501. Então devolvemos a linha inteira da conversa, não só o id.
+    const convoRef = await findConvoForLead(lead);
+    const convo = (convoRef && convoRef.id)
+      ? await getRow("SELECT * FROM conversations WHERE id = ?", [convoRef.id])
+      : null;
     res.json(convo || null);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
