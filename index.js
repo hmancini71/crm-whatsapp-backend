@@ -1817,10 +1817,10 @@ async function applyOwnerLine(convo, id) {
   const own = await resolveOwnerLine(convo);
   if (!own.locked) return { locked: false, error: null };
   if (own.error) return { locked: true, error: own.error };
-  if (own.account !== convo.account) {
-    try { await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [own.account, id]); } catch (e) {}
-    convo.account = own.account;
-  }
+  // Troca a linha SÓ em memória, para este envio. Não persiste conversations.account
+  // de propósito: gravar mudaria o ambiente (pré/pós) em que a conversa aparece e ela
+  // sumiria da aba de quem está atendendo. O que importa é sair pelo socket certo.
+  if (own.account !== convo.account) convo.account = own.account;
   return { locked: true, error: null };
 }
 
