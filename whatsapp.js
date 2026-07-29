@@ -1215,7 +1215,13 @@ async function deleteWhatsAppMessage(accountId, convoId, msgId) {
 
 // Auto reconnect active sessions on startup
 async function initSessions() {
-  const connectedAccounts = await allRows("SELECT id FROM whatsapp_accounts WHERE status = 'connected'");
+  // v502 - inclui tambem quem ficou preso em 'connecting'. Antes o filtro era so
+  // status='connected': se uma linha travava no meio do handshake (status fica
+  // 'connecting'), NEM O RESTART do backend a trazia de volta — ela sumia da rotina
+  // de auto-conexao para sempre. Foi exatamente o que manteve wa1/wa2/wa3/wa7 fora
+  // do ar por ~13h em 29/07/2026. A checagem do creds.json logo abaixo continua
+  // sendo a garantia contra slot-fantasma.
+  const connectedAccounts = await allRows("SELECT id FROM whatsapp_accounts WHERE status IN ('connected','connecting')");
   let delay = 0;
   for (const acc of connectedAccounts) {
     const sessionDir = path.join(__dirname, 'sessions', acc.id);
