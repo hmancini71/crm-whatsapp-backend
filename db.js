@@ -292,6 +292,23 @@ db.serialize(() => {
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_lead ON lead_history(lead_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_history_msgid ON lead_history(meta)");
 
+  // 5b-1. Lead Sales Table — vendas ADICIONAIS (upsell) de um cliente já convertido (2026-07-30,
+  // pedido do Henry). O card continua sendo a venda PRINCIPAL (leads.value + leads.sale_date);
+  // cada linha aqui é uma venda extra lançada depois da conversão, soma no faturamento e conta
+  // +1 venda no dia dela (sale_date), sem mexer no valor/data já gravados no lead.
+  db.run(`CREATE TABLE IF NOT EXISTS lead_sales (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT NOT NULL,
+    value REAL NOT NULL,
+    sale_date TEXT NOT NULL,
+    service TEXT,
+    note TEXT,
+    created_by TEXT,
+    created_at TEXT
+  )`);
+  db.run("CREATE INDEX IF NOT EXISTS idx_lead_sales_lead ON lead_sales(lead_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_lead_sales_date ON lead_sales(sale_date)");
+
   // 5b-2. Rascunhos de e-mail (pedido do Henry, 2026-07-08): compositor fechado com conteúdo
   // salva aqui; a aba 📝 Rascunhos lista e reabre para continuar/enviar.
   db.run(`CREATE TABLE IF NOT EXISTS email_drafts (

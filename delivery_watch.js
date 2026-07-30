@@ -148,10 +148,12 @@ async function countOpen() {
 
 // Baixa manual: para a mensagem que realmente nunca vai ser entregue (cliente
 // bloqueou, número morto). Sem isso o contador ficaria preso para sempre.
-async function dismiss(msgId) {
+// v511: 'motivo' registra POR QUE o alerta saiu da lista — 'manual' (clique em Dar baixa),
+// 'reenvio' (a mensagem foi reenviada) ou 'entregue' (chegou antes do clique).
+async function dismiss(msgId, motivo) {
   await runQuery(
-    "UPDATE delivery_alerts SET resolved_at = ?, resolved_by = 'manual' WHERE msg_id = ? AND resolved_at IS NULL",
-    [Date.now(), msgId]
+    "UPDATE delivery_alerts SET resolved_at = ?, resolved_by = ? WHERE msg_id = ? AND resolved_at IS NULL",
+    [Date.now(), motivo || 'manual', msgId]
   );
   _clear(msgId);
   return true;

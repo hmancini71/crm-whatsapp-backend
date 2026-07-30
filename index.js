@@ -1231,7 +1231,10 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     
     // Receita real = soma das VENDAS CONVERTIDAS (não arquivadas)
     const revenueRow = await getRow("SELECT SUM(value) as total FROM leads WHERE stage = 'convertida' AND archived = 0");
-    const totalRevenue = revenueRow.total || 0;
+    // Vendas adicionais (upsell, 2026-07-30): somam na receita total, sem mexer no nº de clientes
+    // fechados (closedLeads continua contando CARDS, não vendas).
+    const extraRevRow = await getRow("SELECT SUM(s.value) AS total FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0");
+    const totalRevenue = (revenueRow.total || 0) + (Number(extraRevRow && extraRevRow.total) || 0);
 
     // Taxa de conversão real = vendas convertidas / total de leads (não arquivados)
     const closedLeads = await getRow("SELECT COUNT(*) as count FROM leads WHERE stage = 'convertida' AND archived = 0");
@@ -1865,6 +1868,74 @@ app.post('/api/delivery-alerts/dismiss-all', authenticateToken, async (req, res)
   try {
     const n = await deliveryWatch.dismissAll();
     res.json({ ok: true, baixados: n, count: await deliveryWatch.countOpen() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// v511 — REENVIAR uma mensagem que nunca foi confirmada (pedido do Henry: "envie novamente
+// a mensagem"). Uma mensagem por clique. A linha de envio é SEMPRE a linha dona da conversa
+// (conversations.jid_account), nunca a que o operador tem aberta: o endereço @lid só é
+// resolvível dentro da sessão da linha que o aprendeu, e mandar por outra o WhatsApp aceita
+// (1 tique) e nunca entrega. Reenviar o que JÁ chegou é o único erro inaceitável aqui, então
+// status >= 3 recusa e dá baixa no alerta.
+app.post('/api/delivery-alerts/:msgId/resend', authenticateToken, async (req, res) => {
+  const msgId = req.params.msgId;
+  try {
+    const m = await getRow("SELECT id, conversationId, text, type, mediaPath, status, deleted, our_number FROM messages WHERE id = ?", [msgId]);
+    if (!m || Number(m.deleted || 0) === 1 || Number(m.status || 0) >= 3) {
+      try { await deliveryWatch.dismiss(msgId, 'entregue'); } catch (e) {}
+      return res.status(409).json({ error: 'Mensagem ja confirmada ou inexistente', count: await deliveryWatch.countOpen() });
+    }
+    const convo = await getRow("SELECT id, account, jid_account, whatsapp_jid FROM conversations WHERE id = ?", [m.conversationId]);
+    if (!convo) return res.status(409).json({ error: 'Conversa nao existe mais' });
+
+    // Linha dona: jid_account primeiro; se não houver, mapeia messages.our_number para a conta.
+    let linha = convo.jid_account || null;
+    if (!linha && m.our_number) {
+      try {
+        const w = await getRow("SELECT id FROM whatsapp_accounts WHERE number = ?", [m.our_number]);
+        if (w && w.id) linha = w.id;
+      } catch (e) {}
+    }
+    if (!linha) linha = convo.account;
+    if (!linha) return res.status(409).json({ error: 'Nao ha linha dona para esta conversa' });
+
+    const tipo = String(m.type || 'text');
+    let buffer = null, mimetype = null, fileName = null;
+    if (tipo !== 'text') {
+      let mp = m.mediaPath ? String(m.mediaPath) : '';
+      if (mp && !fs.existsSync(mp)) mp = path.join(MEDIA_DIR, path.basename(mp));
+      if (!mp || !fs.existsSync(mp)) return res.status(409).json({ error: 'Arquivo de midia nao esta mais no servidor' });
+      buffer = fs.readFileSync(mp);
+      fileName = path.basename(mp);
+      const ext = String(fileName.split('.').pop() || '').toLowerCase();
+      const MIMES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+        mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', ogg: 'audio/ogg', oga: 'audio/ogg',
+        mp3: 'audio/mpeg', m4a: 'audio/mp4', pdf: 'application/pdf', doc: 'application/msword',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xls: 'application/vnd.ms-excel',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+      mimetype = tipo === 'audio' ? 'audio/ogg' : (MIMES[ext] || 'application/octet-stream');
+    }
+
+    // Linha fora do ar não recusa (regra v508): entra na fila e sai sozinha quando ela voltar.
+    const aberta = !!(sessions[linha] && sessions[linha].ws && sessions[linha].ws.isOpen);
+    let novo;
+    if (!aberta) {
+      novo = await outbox.enqueue({ convoId: m.conversationId, account: linha,
+        kind: (tipo === 'text' ? 'text' : (tipo === 'audio' ? 'audio' : 'media')),
+        text: m.text || '', buffer, mimetype, fileName });
+    } else if (tipo === 'text') {
+      novo = await sendWhatsAppMessage(linha, m.conversationId, m.text || '');
+    } else if (tipo === 'audio') {
+      novo = await sendWhatsAppAudio(linha, m.conversationId, buffer);
+    } else {
+      novo = await sendWhatsAppMedia(linha, m.conversationId, buffer, mimetype, fileName);
+    }
+    // A mensagem nova entra pelo caminho normal de envio, portanto o vigia já a arma sozinho.
+    await deliveryWatch.dismiss(msgId, 'reenvio');
+    bustConversationsCache();
+    console.log('[resend] ' + msgId + ' (' + tipo + ') reenviado pela linha ' + linha + (aberta ? '' : ' (na fila)'));
+    res.json({ ok: true, novoId: (novo && novo.id) || null, linha, fila: !aberta, count: await deliveryWatch.countOpen() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2797,6 +2868,74 @@ async function logLeadHistory({ leadId, phone, name, type, detail, meta }) {
   } catch (e) { console.error('[history] log falhou:', e && e.message); }
 }
 
+// ===== VENDAS ADICIONAIS (upsell) — 2026-07-30 =====
+// Um cliente já convertido pode contratar mais serviços depois; cada lançamento
+// vira uma linha em lead_sales (o card continua sendo a venda principal).
+function _saleId() { return 's_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+app.get('/api/leads/:id/sales', authenticateToken, async (req, res) => {
+  try {
+    const rows = await allRows(
+      "SELECT id, value, sale_date, service, note, created_by, created_at FROM lead_sales WHERE lead_id = ? ORDER BY sale_date ASC, created_at ASC",
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error('[lead_sales][GET] erro:', e && e.message);
+    res.status(500).json({ error: 'Erro ao listar vendas adicionais.' });
+  }
+});
+
+app.post('/api/leads/:id/sales', authenticateToken, async (req, res) => {
+  try {
+    const { value, sale_date, service, note } = req.body || {};
+    const lead = await getRow("SELECT id, name, phone, stage FROM leads WHERE id = ?", [req.params.id]);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado.' });
+    // Regra de negócio: só existe venda adicional em cima de venda já convertida.
+    if (lead.stage !== 'convertida') {
+      return res.status(422).json({ error: 'Venda adicional só pode ser lançada em cliente com Venda convertida.' });
+    }
+    const v = Number(value);
+    if (!(v > 0)) return res.status(422).json({ error: 'Informe um valor maior que zero.' });
+    const sd = String(sale_date || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(sd)) return res.status(422).json({ error: 'Data da venda inválida (use AAAA-MM-DD).' });
+
+    const id = _saleId();
+    const createdBy = (req.user && req.user.name) || null;
+    const createdAt = new Date().toISOString();
+    await runQuery(
+      "INSERT INTO lead_sales (id, lead_id, value, sale_date, service, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, lead.id, v, sd, service || null, note || null, createdBy, createdAt]
+    );
+    await logLeadHistory({
+      leadId: lead.id, phone: lead.phone, name: lead.name, type: 'venda',
+      detail: 'Venda adicional: R$ ' + v.toFixed(2) + (service ? ' — ' + String(service) : ''),
+      meta: { kind: 'venda_adicional', sale_id: id, value: v, sale_date: sd }
+    });
+    res.status(201).json({ id, lead_id: lead.id, value: v, sale_date: sd, service: service || null, note: note || null, created_by: createdBy, created_at: createdAt });
+  } catch (e) {
+    console.error('[lead_sales][POST] erro:', e && e.message);
+    res.status(500).json({ error: 'Erro ao lançar venda adicional.' });
+  }
+});
+
+app.delete('/api/leads/:id/sales/:saleId', authenticateToken, async (req, res) => {
+  try {
+    const row = await getRow("SELECT s.*, l.name AS lead_name, l.phone AS lead_phone FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE s.id = ? AND s.lead_id = ?", [req.params.saleId, req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Venda adicional não encontrada.' });
+    await runQuery("DELETE FROM lead_sales WHERE id = ?", [row.id]);
+    await logLeadHistory({
+      leadId: row.lead_id, phone: row.lead_phone, name: row.lead_name, type: 'venda',
+      detail: 'Venda adicional removida: R$ ' + Number(row.value).toFixed(2) + (row.service ? ' — ' + String(row.service) : ''),
+      meta: { kind: 'venda_adicional_removida', sale_id: row.id, value: row.value, sale_date: row.sale_date }
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[lead_sales][DELETE] erro:', e && e.message);
+    res.status(500).json({ error: 'Erro ao remover venda adicional.' });
+  }
+});
+
 app.get('/api/whatsapp/accounts', authenticateToken, async (req, res) => {
   try {
     const accounts = await allRows("SELECT * FROM whatsapp_accounts");
@@ -2935,6 +3074,47 @@ async function resolveMailboxPath(client, box) {
     if (want === 'sent') return bySpecial('\\Sent') || byName(/sent|enviad/i) || 'INBOX';
     return bySpecial('\\Junk') || byName(/spam|junk|lixo/i) || 'INBOX';
   } catch (e) { return 'INBOX'; }
+}
+
+// ===== 📤 Cópia em ENVIADOS (pedido do Henry, 2026-07-29) =====
+// O envio sai pelo relay PHP (mail() do servidor da Vale Visto). Ele ENTREGA a mensagem,
+// mas não grava nada na conta IMAP — por isso o e-mail enviado pelo CRM nunca aparecia na
+// aba "Enviados" (a aba lê a pasta real do IMAP). Aqui gravamos a cópia com APPEND.
+async function appendToSentMailbox({ to, cc, subject, html, attachments }) {
+  const acc = await getRow("SELECT * FROM email_accounts ORDER BY connected_at DESC LIMIT 1");
+  if (!acc || !acc.host || !acc.email || !acc.password) return false;
+  const { ImapFlow } = require('imapflow');
+  const MailComposer = require('nodemailer/lib/mail-composer');
+  const raw = await new Promise((resolve, reject) => {
+    new MailComposer({
+      from: acc.email,
+      to: to,
+      cc: cc || undefined,
+      subject: subject,
+      html: html,
+      date: new Date(),
+      attachments: (attachments || []).map(a => ({
+        filename: a.filename,
+        content: Buffer.from(String(a.content), 'base64'),
+        contentType: a.contentType || undefined
+      }))
+    }).compile().build((err, msg) => err ? reject(err) : resolve(msg));
+  });
+  const client = new ImapFlow({
+    host: acc.host, port: 993, secure: true,
+    auth: { user: acc.email, pass: acc.password },
+    logger: false, tls: { rejectUnauthorized: false }
+  });
+  try {
+    await client.connect();
+    const boxPath = await resolveMailboxPath(client, 'sent');
+    // Sem pasta de enviados no servidor: melhor não gravar nada do que sujar a Entrada.
+    if (!boxPath || boxPath === 'INBOX') return false;
+    await client.append(boxPath, raw, ['\\Seen']);
+    return true;
+  } finally {
+    try { await client.logout(); } catch (e) {}
+  }
 }
 
 // ===== 📝 RASCUNHOS de e-mail (pedido do Henry, 2026-07-08) =====
@@ -3303,6 +3483,10 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
     const ej = await er.json().catch(() => ({}));
     if (!er.ok || !ej.success) return res.status(502).json({ error: (ej && ej.error) || "Falha ao enviar e-mail" });
     res.json({ success: true });
+    // Grava a cópia na pasta Enviados (IMAP APPEND). Roda DEPOIS de responder, para não
+    // segurar o clique do operador — e se falhar, o e-mail já foi enviado do mesmo jeito.
+    appendToSentMailbox({ to, cc, subject, html: bodyHtml, attachments: cleanAtt })
+      .catch(e => console.error('Copia em Enviados falhou:', e && e.message));
   } catch (err) {
     console.error("Email send error:", err && err.message);
     res.status(500).json({ error: (err && err.message) || "Falha ao enviar e-mail" });
@@ -5529,6 +5713,28 @@ app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
         byDay[day].byOriginCount[lb] = (byDay[day].byOriginCount[lb] || 0) + 1;
       } catch (e) {}
     });
+    // VENDAS ADICIONAIS (upsell) — 2026-07-30: cada linha de lead_sales entra no dia DELA (sale_date
+    // própria, não a do card), conta +1 venda e herda a origem/categoria do card (lead pai) via JOIN.
+    const extraRows = await allRows(
+      "SELECT s.value AS s_value, substr(s.sale_date,1,10) AS s_day, l.tracking, l.source, l.source_locked, l.tags FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
+      [fromIso, toIso]
+    );
+    extraRows.forEach(row => {
+      const day = row.s_day;
+      if (!day || day < fromIso || day > toIso) return;
+      if (!byDay[day]) byDay[day] = { count: 0, value: 0, byCat: { ga: 0, meta: 0, org: 0, semclass: 0 }, byCatCount: { ga: 0, meta: 0, org: 0, semclass: 0 }, byOrigin: {}, byOriginCount: {} };
+      const val = Number(row.s_value) || 0;
+      const cat = leadChannelCat(row);
+      byDay[day].count++;
+      byDay[day].value += val;
+      byDay[day].byCat[cat] = (byDay[day].byCat[cat] || 0) + val;
+      byDay[day].byCatCount[cat] = (byDay[day].byCatCount[cat] || 0) + 1;
+      try {
+        const lb = leadOriginLabel(row, _originsCfg);
+        byDay[day].byOrigin[lb] = (byDay[day].byOrigin[lb] || 0) + val;
+        byDay[day].byOriginCount[lb] = (byDay[day].byOriginCount[lb] || 0) + 1;
+      } catch (e) {}
+    });
     const emptyCat = () => ({ ga: 0, meta: 0, org: 0, semclass: 0 });
     const series = days.map(d => {
       const e = byDay[d.iso] || { count: 0, value: 0, byCat: emptyCat(), byCatCount: emptyCat(), byOrigin: {}, byOriginCount: {} };
@@ -5580,6 +5786,18 @@ app.get('/api/dashboard/sales-daily-leads', authenticateToken, async (req, res) 
       try { const tg = JSON.parse(l.tags || '[]'); if (Array.isArray(tg) && tg[0]) service = String(tg[0]); } catch (e) {}
       return { id: l.id, name: l.name || '(sem nome)', value: Number(l.value) || 0, service, cat: leadChannelCat(l), origem: origin ? leadOriginLabel(l, _originsCfg) : null };
     });
+    // VENDAS ADICIONAIS (upsell) — 2026-07-30: extras do mesmo período entram na listagem ANTES dos
+    // filtros de origin/cat e do sort, herdando origem/categoria do card (lead pai) via JOIN.
+    const extraRows = await allRows(
+      "SELECT l.id, l.name, l.tags, l.tracking, l.source, l.source_locked, s.value AS s_value, s.service AS s_service FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
+      [fromIso, toIso]
+    );
+    const extraLeads = extraRows.map(l => {
+      let service = l.s_service || '—';
+      if (!l.s_service) { try { const tg = JSON.parse(l.tags || '[]'); if (Array.isArray(tg) && tg[0]) service = String(tg[0]); } catch (e) {} }
+      return { id: l.id, name: (l.name || '(sem nome)') + ' — venda adicional', value: Number(l.s_value) || 0, service, cat: leadChannelCat(l), origem: origin ? leadOriginLabel(l, _originsCfg) : null };
+    });
+    leads = leads.concat(extraLeads);
     if (origin) leads = leads.filter(l => l.origem === origin);
     else if (cat) leads = leads.filter(l => l.cat === cat);
     leads.sort((a, b) => b.value - a.value);
@@ -5638,6 +5856,21 @@ app.get('/api/dashboard/optimal-point', authenticateToken, async (req, res) => {
       const val = Number(l.value) || 0;
       if (val > 0) ticketAllVals.push(val);
       if (leadChannelCat(l) === 'ga') {
+        convGA++;
+        if (val > 0) ticketGaVals.push(val);
+      }
+    });
+
+    // Vendas adicionais (upsell, 2026-07-30): cada linha de lead_sales conta como CONTRATO no dia
+    // DELA — origem/categoria herdada do lead pai via JOIN, mesmos helpers de classificação.
+    const extraSales = await allRows(
+      "SELECT s.value AS s_value, l.tracking, l.source, l.source_locked FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
+      [fromIso, toIso]
+    );
+    extraSales.forEach(row => {
+      const val = Number(row.s_value) || 0;
+      if (val > 0) ticketAllVals.push(val);
+      if (leadChannelCat(row) === 'ga') {
         convGA++;
         if (val > 0) ticketGaVals.push(val);
       }
@@ -5732,6 +5965,21 @@ app.get('/api/dashboard/optimal-point-meta', authenticateToken, async (req, res)
       const val = Number(l.value) || 0;
       if (val > 0) ticketAllVals.push(val);
       if (leadChannelCat(l) === 'meta') {
+        convGA++;
+        if (val > 0) ticketGaVals.push(val);
+      }
+    });
+
+    // Vendas adicionais (upsell, 2026-07-30): mesmo tratamento do bloco Google — cada linha de
+    // lead_sales conta como CONTRATO no dia DELA, categoria herdada do lead pai via JOIN.
+    const extraSales = await allRows(
+      "SELECT s.value AS s_value, l.tracking, l.source, l.source_locked FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
+      [fromIso, toIso]
+    );
+    extraSales.forEach(row => {
+      const val = Number(row.s_value) || 0;
+      if (val > 0) ticketAllVals.push(val);
+      if (leadChannelCat(row) === 'meta') {
         convGA++;
         if (val > 0) ticketGaVals.push(val);
       }
