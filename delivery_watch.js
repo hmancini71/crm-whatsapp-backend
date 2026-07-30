@@ -65,6 +65,15 @@ async function _fire(msgId) {
     if (!m) return;                                  // mensagem apagada do banco
     if (Number(m.deleted)) return;                   // apagada para todos
     if ((Number(m.status) || 0) > 2) return;         // entregue/lido: nada a alertar
+    // v513: se JA entregamos algo DEPOIS desta nesta mesma conversa, o cliente
+    // esta alcancavel e este tique solitario nao e problema de entrega — nao vira
+    // alerta. Caso Christyan: o "Ola" das 18:57 preso na linha muda continuava em
+    // vermelho mesmo depois de a mensagem longa das 22:08 ser entregue a ele.
+    const _depois = await getRow(
+      "SELECT 1 AS x FROM messages WHERE conversationId = ? AND [from] = 'me' AND timestamp > ? AND COALESCE(status,0) >= 3 LIMIT 1",
+      [m.conversationId, Number(m.timestamp) || 0]
+    );
+    if (_depois) return;
     const c = await getRow("SELECT jid_account FROM conversations WHERE id = ?", [m.conversationId]);
     await runQuery(
       "INSERT OR IGNORE INTO delivery_alerts (msg_id, conversation_id, our_number, owner_line, sent_at, alerted_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -102,6 +111,14 @@ function disarm(msgId, st) {
       "UPDATE delivery_alerts SET resolved_at = ?, resolved_by = 'recibo' WHERE msg_id = ? AND resolved_at IS NULL",
       [Date.now(), msgId]
     ).catch(e => console.error('[v506] falha ao resolver alerta ' + msgId + ':', e && e.message));
+    // v513: se ESTA mensagem chegou, o cliente esta alcancavel nesta conversa.
+    // Qualquer alerta ANTERIOR da mesma conversa e ruido: resolve junto, sem
+    // pedir nada na tela. Caso Christyan: o "Ola" das 18:57 (linha muda) sai do
+    // vermelho no momento em que a mensagem das 22:08 e entregue.
+    runQuery(
+      "UPDATE delivery_alerts SET resolved_at = ?, resolved_by = 'entregue depois' WHERE resolved_at IS NULL AND conversation_id = (SELECT conversationId FROM messages WHERE id = ?) AND sent_at < (SELECT timestamp FROM messages WHERE id = ?)",
+      [Date.now(), msgId, msgId]
+    ).catch(e => console.error('[v513] falha ao resolver alertas anteriores de ' + msgId + ':', e && e.message));
   } catch (e) { /* vigia nunca derruba o recibo */ }
 }
 

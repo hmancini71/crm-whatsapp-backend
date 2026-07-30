@@ -301,6 +301,37 @@ function clearConnectWatchdog(id) {
   }
 }
 
+// v512 - AUTO-CURA DA LINHA MUDA
+// Um socket pode continuar "open" e nao entregar mais nada: em 29/07/2026 a wa1
+// parou de receber recibos e mensagens as 17:40 e seguiu marcada como conectada;
+// o "Ola" das 18:57 ficou em 1 tique para sempre. O watchdog do v502 so cobre o
+// handshake (o terceiro guard e literalmente `if (sock.ws && sock.ws.isOpen) return;`),
+// entao um socket ja estabelecido nunca era reavaliado.
+// Sinal objetivo: 3 min depois de um envio, a mensagem continua com status <= 2 E
+// nada entrou nessa linha desde o envio. Ai o socket e derrubado; o proprio handler
+// de 'close' religa com backoff. Sem aviso na tela, sem varredura periodica.
+const HEALTH_MS = 3 * 60 * 1000;
+const lastInbound = {};
+function noteInbound(id) { if (id) lastInbound[id] = Date.now(); }
+function healthProbe(accountId, msgId, sentAt) {
+  if (!accountId || !msgId) return;
+  const t = setTimeout(async () => {
+    try {
+      const m = await getRow("SELECT status, deleted FROM messages WHERE id = ?", [msgId]);
+      if (!m) return;
+      if ((Number(m.status) || 0) > 2) return;             // recibo chegou: linha viva
+      if ((Number(m.deleted) || 0) === 1) return;
+      if ((lastInbound[accountId] || 0) > sentAt) return;  // entrou algo depois: linha viva
+      const sock = sessions[accountId];
+      if (!sock) return;
+      if (!(sock.ws && sock.ws.isOpen)) return;            // ja caiu: o close religa
+      console.warn('[v512] linha ' + accountId + ' muda desde o envio (msg ' + msgId + ') - derrubando para religar.');
+      try { sock.end(); } catch (e) {}
+    } catch (e) {}
+  }, HEALTH_MS);
+  if (t.unref) t.unref();
+}
+
 // Versão do Baileys cacheada: evita um fetch de rede a cada conexão.
 // Esse fetch repetido podia travar o event loop e fazer um socket JÁ
 // conectado estourar o keep-alive (408) quando um número novo conectava.
@@ -527,6 +558,8 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
     try {
       if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] messages.upsert event received, type: ${m.type}, count: ${m.messages ? m.messages.length : 0}`);
       if (m.type !== 'notify') return;
+      // v512: chegou mensagem de verdade de fora -> esta linha esta viva.
+      try { if ((m.messages || []).some(x => x && x.key && !x.key.fromMe)) noteInbound(id); } catch (e) {}
 
       for (const msg of m.messages) {
         if (process.env.DEBUG_WA === '1') console.log(`[WhatsApp ${id}] Processing message: id=${msg.key && msg.key.id}, from=${msg.key && msg.key.remoteJid}`);
@@ -979,6 +1012,9 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
   // TRAVAVA o tick p/ sempre. (Fix 2026-07-03, "por que não aparece o ✓✓".)
   const bumpMsgStatus = async (mid, st) => {
     if (!mid || typeof st !== 'number' || st < 2) return;
+    // v512: recibo de ENTREGA/LEITURA e a prova de que a linha nao esta muda.
+    // O ack do servidor (st = 2) nao serve: a wa1 recebia ack e nao entregava nada.
+    if (st >= 3) noteInbound(id);
     await runQuery("UPDATE messages SET status = ? WHERE id = ? AND COALESCE(status,0) < ?", [st, mid, st]);
     // v506: TODO recibo passa por aqui. status >= 3 = entregue de verdade -> desarma o relogio
     // daquela mensagem e resolve sozinho o alerta, se ja tiver sido criado.
@@ -1117,6 +1153,9 @@ async function sendWhatsAppMessage(accountId, convoId, text, quotedMsgId) {
 
   // v506: arma o relogio desta mensagem. Se o recibo de entrega nao chegar, ela vira alerta.
   deliveryWatch.arm(msgId, Date.now());
+  // v512: e arma a auto-cura da linha. Se em 3 min nao houver recibo NEM nada entrando
+  // por esta linha, o socket esta mudo — derruba e religa sozinho.
+  healthProbe(accountId, msgId, Date.now());
 
   // Update conversation lastMessage
   await runQuery(
@@ -1176,6 +1215,7 @@ async function sendWhatsAppAudio(accountId, convoId, inputBuffer) {
 
   // v506: audio tambem entra no vigia — um PTT que nunca chega e tao invisivel quanto um texto.
   deliveryWatch.arm(msgId, Date.now());
+  healthProbe(accountId, msgId, Date.now()); // v512
 
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
 
@@ -1211,6 +1251,7 @@ async function sendWhatsAppMedia(accountId, convoId, buffer, mimetype, fileName)
   );
   // v506: foto/video/documento tambem entram no vigia de entrega.
   deliveryWatch.arm(msgId, Date.now());
+  healthProbe(accountId, msgId, Date.now()); // v512
   await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [timeStr, convoId]);
   return { id: msgId, from: 'me', text: label, time: timeStr, type: type };
 }

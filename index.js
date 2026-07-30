@@ -682,6 +682,18 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       ...l,
       tags: l.tags ? JSON.parse(l.tags) : []
     }));
+    // v514 (front): agrega as VENDAS ADICIONAIS (lead_sales) por lead — alimenta o chip 🛒 do
+    // card e a linha "Compras adicionais" da Configuração dos Cards. Uma query só (índice
+    // idx_lead_sales_lead); se falhar, a lista de leads segue sem o agregado (é decorativo).
+    try {
+      const _exAgg = await allRows("SELECT lead_id, COUNT(*) AS c, SUM(value) AS t FROM lead_sales GROUP BY lead_id");
+      const _exMap = {};
+      _exAgg.forEach(r => { _exMap[r.lead_id] = r; });
+      parsedLeads.forEach(l => {
+        const a = _exMap[l.id];
+        if (a) { l.extra_sales_count = a.c; l.extra_sales_total = Number(a.t) || 0; }
+      });
+    } catch (e) { console.error('[lead_sales][agg] erro:', e && e.message); }
     // ?all=1 (pipeline381): devolve os leads dos DOIS ambientes, SEM o filtro pré/pós abaixo —
     // usado pelo filtro 👤 Responsável da guia WhatsApp p/ cruzar conversas com cards que podem
     // estar no ambiente oposto (caso JD Crawford). Mesmo padrão do GET /conversations?all=1.
@@ -2907,6 +2919,7 @@ app.post('/api/leads/:id/sales', authenticateToken, async (req, res) => {
       "INSERT INTO lead_sales (id, lead_id, value, sale_date, service, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       [id, lead.id, v, sd, service || null, note || null, createdBy, createdAt]
     );
+    bustLeadsCache(); // v514: o GET /leads agrega lead_sales — o chip 🛒 do card precisa vir fresco
     await logLeadHistory({
       leadId: lead.id, phone: lead.phone, name: lead.name, type: 'venda',
       detail: 'Venda adicional: R$ ' + v.toFixed(2) + (service ? ' — ' + String(service) : ''),
@@ -2924,6 +2937,7 @@ app.delete('/api/leads/:id/sales/:saleId', authenticateToken, async (req, res) =
     const row = await getRow("SELECT s.*, l.name AS lead_name, l.phone AS lead_phone FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE s.id = ? AND s.lead_id = ?", [req.params.saleId, req.params.id]);
     if (!row) return res.status(404).json({ error: 'Venda adicional não encontrada.' });
     await runQuery("DELETE FROM lead_sales WHERE id = ?", [row.id]);
+    bustLeadsCache(); // v514: idem ao POST — agregado do GET /leads muda ao remover
     await logLeadHistory({
       leadId: row.lead_id, phone: row.lead_phone, name: row.lead_name, type: 'venda',
       detail: 'Venda adicional removida: R$ ' + Number(row.value).toFixed(2) + (row.service ? ' — ' + String(row.service) : ''),
