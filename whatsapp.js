@@ -179,8 +179,17 @@ function _transcodeToOpusOggRaw(inputBuffer) {
 const logger = pino({ level: 'warn' });
 
 function sanitizePhoneNumber(phone) {
+  const raw = String(phone == null ? '' : phone).trim();
   // Strip all non-digit characters
-  let cleaned = phone.replace(/\D/g, '');
+  let cleaned = raw.replace(/\D/g, '');
+  // v524 — numero ja gravado em formato internacional (+DDI...) NUNCA recebe 55.
+  // Caso Samira (30/07/2026): +1 857 452 6888 tem 11 digitos, entao a regra abaixo
+  // colava 55 na frente e o envio ia para 5518574526888@s.whatsapp.net — numero
+  // inexistente. O WhatsApp respondia "error 463: account restricted or missing
+  // tctoken for contact" e nada era entregue. Afeta todo cliente dos EUA/Canada
+  // (DDI +1, 11 digitos), indistinguivel de um celular brasileiro sem DDI pelo
+  // tamanho — o unico sinal confiavel e o "+" que o proprio cadastro guarda.
+  if (raw.charAt(0) === '+') return cleaned;
   // If Brazilian number without country code, prepend 55
   if (cleaned.length === 11 && (cleaned.startsWith('1') || cleaned.startsWith('2') || cleaned.startsWith('3') || cleaned.startsWith('4') || cleaned.startsWith('5') || cleaned.startsWith('6') || cleaned.startsWith('7') || cleaned.startsWith('8') || cleaned.startsWith('9'))) {
     cleaned = '55' + cleaned;

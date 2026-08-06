@@ -14,11 +14,16 @@ const LEAD_CAP = 80;            // por ambiente, priorizando conversas mais ativ
 const MAX_MSGS_PER_LEAD = 50;
 const MAX_CHARS_PER_LEAD = 2500;
 const MAP_MAX_TOKENS = 3000;
-const JANELA_MS = 72 * 3600 * 1000; // atividade das últimas 72h define quem entra no relatório
+// v519 (pedido do Henry, 2026-07-30): a janela de análise NÃO é mais fixa em 72h — ela segue
+// o "Prazo de análise" configurado em Configurações → Relatórios diários
+// (app_settings.daily_report_prazo_horas). Se está 24h, analisa as últimas 24h.
+let _janelaH = 48;                                  // fallback = mesmo default de dailyPrazoHoras()
+function janelaH() { return _janelaH; }
+function janelaMs() { return _janelaH * 3600 * 1000; }
 
 // Dependências do index.js injetadas no boot (regra pré/pós NUNCA é duplicada aqui).
 let _deps = null;
-function init(deps) { _deps = deps; } // { posLineInfo, POS_STAGES }
+function init(deps) { _deps = deps; } // { posLineInfo, POS_STAGES, prazoHoras }
 
 // pipeline462 (fix — Henry reportou relatórios travados 'running' pra sempre): o timeout de
 // socket do callClaude (reports.js, 120s + 1 retry) depende do socket ficar OCIOSO; se a API
@@ -54,7 +59,7 @@ function isPosLead(l, posSet, posDigits) {
   return !!(rn && posDigits.some(d => rn.endsWith(d)));
 }
 
-// Seleciona os leads do ambiente com atividade nas últimas 72h (msgs ou criação recente).
+// Seleciona os leads do ambiente com atividade na janela configurada (msgs ou criação recente).
 async function findCandidates(env) {
   const { posSet, posDigits } = await _deps.posLineInfo();
   const all = await allRows("SELECT * FROM leads WHERE archived = 0");
@@ -65,7 +70,7 @@ async function findCandidates(env) {
   });
   const convs = await allRows("SELECT id, account, phone, whatsapp_jid FROM conversations WHERE (archived IS NULL OR archived = 0)");
   const norm = (p) => String(p || '').replace(/\D/g, '');
-  const since = Date.now() - JANELA_MS;
+  const since = Date.now() - janelaMs();
   const out = [];
   for (const l of doEnv) {
     const lt = norm(l.phone).slice(-8);
@@ -97,11 +102,11 @@ function buildLeadContext(item) {
     'Nota: ' + (l.score || 'sem nota'),
     'Pagamento: ' + (l.status_pagamento || 'lead')
   ].join(' | ');
-  return meta + '\nConversa (últimas 72h):\n' + (text || '(lead novo, sem mensagens no período)');
+  return meta + '\nConversa (últimas ' + janelaH() + 'h):\n' + (text || '(lead novo, sem mensagens no período)');
 }
 
 const MAP_SYSTEM = `Você é um analista sênior de vendas/CRM da Vale Visto (consultoria de vistos e imigração).
-Receberá um lote de conversas de WhatsApp entre VENDEDOR e CLIENTES das últimas 72 horas.
+Receberá um lote de conversas de WhatsApp entre VENDEDOR e CLIENTES das últimas {{JANELA_H}} horas.
 Para CADA lead, avalie o quão QUENTE ele está AGORA (probabilidade de fechar/urgência de atenção) e resuma a situação.
 Responda APENAS um array JSON, um objeto por lead, no formato:
 [{"lead":"nome","temperatura_0_100":N,"situacao":"1 frase objetiva do momento atual","pendencia":"o que está travado/aguardando (ou null)","proximo_passo":"ação concreta recomendada ao vendedor, aplicando boas práticas de conversão (follow-up com prazo marcado, CTA único e claro, ancoragem de valor antes do preço, tratamento direto da objeção)","ambiente_sugerido":"'pre' se a conversa indica cliente ainda DECIDINDO a contratação, 'pos' se indica cliente que JÁ CONTRATOU/pagou/está com trâmite em andamento (DS-160, CASV, agendamento, suporte), ou null se indeterminado"}]
@@ -152,9 +157,9 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
   linhas.push('');
   // execucao4 (pedido do Henry): hora de geração + janela coberta pelo relatório.
   const geradoEm = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date());
-  linhas.push('_Gerado em ' + geradoEm + ' (horário de Brasília) — análise das conversas das últimas ' + Math.round(JANELA_MS / 3600000) + ' horas._');
+  linhas.push('_Gerado em ' + geradoEm + ' (horário de Brasília) — análise das conversas das últimas ' + janelaH() + ' horas._');
   linhas.push('');
-  linhas.push('**' + itens.length + ' leads analisados** (' + total + ' com atividade nas últimas 72h) — 🔥 ' + q + ' quentes · 🌤️ ' + m + ' mornos · ❄️ ' + f + ' frios. Do mais quente ao menos quente:');
+  linhas.push('**' + itens.length + ' leads analisados** (' + total + ' com atividade nas últimas ' + janelaH() + 'h) — 🔥 ' + q + ' quentes · 🌤️ ' + m + ' mornos · ❄️ ' + f + ' frios. Do mais quente ao menos quente:');
   linhas.push('');
   if (errados > 0) {
     linhas.push('🚨 **' + errados + ' lead(s) possivelmente no AMBIENTE ERRADO** — veja as linhas "⚠️ Ambiente" nos cards abaixo.');
@@ -187,7 +192,7 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
     }
     linhas.push('');
   }
-  if (!itens.length) linhas.push('_Nenhum lead com atividade nas últimas 72h neste ambiente._');
+  if (!itens.length) linhas.push('_Nenhum lead com atividade nas últimas ' + janelaH() + 'h neste ambiente._');
   // execucao10: a seção de diagnóstico/propostas foi MOVIDA para o TOPO (seção 1️⃣, acima).
   return linhas.join('\n');
 }
@@ -228,7 +233,9 @@ async function runOne(env, dia) {
     for (let i = 0; i < chunks.length; i++) {
       await setReport(id, { status: 'running', progress: 'lote ' + (i + 1) + '/' + chunks.length });
       const userText = chunks[i].map((it, x) => '--- LEAD ' + (x + 1) + ' ---\n' + buildLeadContext(it)).join('\n\n');
-      const out = await withHardDeadline(callAI(cfg, model, MAP_MAX_TOKENS, MAP_SYSTEM, userText), 'lote ' + (i + 1) + '/' + chunks.length);
+      // v519: o prompt também precisa dizer a janela REAL configurada (senão o modelo raciocina em 72h).
+      const mapSys = MAP_SYSTEM.replace('{{JANELA_H}}', String(janelaH()));
+      const out = await withHardDeadline(callAI(cfg, model, MAP_MAX_TOKENS, mapSys, userText), 'lote ' + (i + 1) + '/' + chunks.length);
       let parsed;
       try { const mm = out.match(/\[[\s\S]*\]/); parsed = JSON.parse(mm ? mm[0] : out); }
       catch (e) {
@@ -267,6 +274,12 @@ async function runOne(env, dia) {
 // Gera os DOIS relatórios do dia (pré e pós), em sequência para não concorrer na API.
 async function runDailyReports(dia) {
   if (!_deps) { console.error('[daily-report] init() não foi chamado — abortado.'); return; }
+  // v519: lê UMA vez por execução o "Prazo de análise" das Configurações e usa como janela.
+  try {
+    const h = _deps.prazoHoras ? parseInt(await _deps.prazoHoras(), 10) : NaN;
+    _janelaH = (Number.isFinite(h) && h >= 1 && h <= 720) ? h : 48;
+  } catch (e) { _janelaH = 48; }
+  console.log('[daily-report] janela de análise =', _janelaH, 'horas (Configurações → Prazo de análise)');
   const d = dia || hojeSPiso();
   await runOne('pre', d);
   await runOne('pos', d);

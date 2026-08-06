@@ -303,11 +303,21 @@ db.serialize(() => {
     sale_date TEXT NOT NULL,
     service TEXT,
     note TEXT,
+    proof TEXT,
     created_by TEXT,
     created_at TEXT
   )`);
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_sales_lead ON lead_sales(lead_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_lead_sales_date ON lead_sales(sale_date)");
+  // Safe migration v519 (pedido do Henry): 'proof' = comprovante de pagamento de CADA venda
+  // adicional (obrigatório no lançamento). Tabelas criadas antes desta versão não têm a coluna.
+  db.all("PRAGMA table_info(lead_sales)", (err, cols) => {
+    if (!err && cols && cols.length && !cols.find(c => c.name === 'proof')) {
+      db.run("ALTER TABLE lead_sales ADD COLUMN proof TEXT DEFAULT NULL", (alterErr) => {
+        if (alterErr) console.error("Failed to add proof column to lead_sales:", alterErr);
+      });
+    }
+  });
 
   // 5b-2. Rascunhos de e-mail (pedido do Henry, 2026-07-08): compositor fechado com conteúdo
   // salva aqui; a aba 📝 Rascunhos lista e reabre para continuar/enviar.

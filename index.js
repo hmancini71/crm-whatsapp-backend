@@ -84,6 +84,13 @@ app.use(compression());
 // prazo) e invalida explicitamente em qualquer rota que escreva em 'leads' — assim o board nunca
 // mostra dado velho após um card ser criado/movido/editado/arquivado.
 const LEADS_CACHE_TTL_MS = 4000;
+// CORTE DE TERMINAIS NO BOARD (perf 2026-08-06): o board PRE-VENDA estava lento porque o
+// GET /api/leads devolvia TODOS os 2225 leads (2,91MB) a cada carregamento, incluindo os
+// 759 'declinado' e 383 'convertida' parados ha meses. Esses dois estagios sao TERMINAIS
+// (o card nao volta a ser trabalhado no dia a dia) — entao, se nao houver atividade ha mais
+// de BOARD_TERMINAL_DAYS dias, o card some do payload do board (nada e apagado/arquivado no
+// banco; ?all=1 continua trazendo tudo, e leads com pos_stage/bridge nunca sao cortados).
+const BOARD_TERMINAL_DAYS = 30;
 let _leadsCache = new Map();
 function bustLeadsCache() { _leadsCache.clear(); }
 
@@ -670,7 +677,7 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
     // uma única vez e reaproveitado tanto na chave do cache quanto no filtro abaixo.
     const _isAllParam = String(req.query.all || '') === '1';
     const isPos = await userIsPos(req);
-    const _cacheKey = _isAllParam ? 'all' : (isPos ? 'pos' : 'pre');
+    const _cacheKey = _isAllParam ? 'all' : (isPos ? 'pos_t30' : 'pre_t30');
     const _cached = _leadsCache.get(_cacheKey);
     if (_cached && (Date.now() - _cached.t) < LEADS_CACHE_TTL_MS) {
       res.type('application/json').send(_cached.body);
@@ -702,6 +709,43 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       _leadsCache.set(_cacheKey, { t: Date.now(), body: _body });
       res.type('application/json').send(_body);
       return;
+    }
+    // CORTE DE TERMINAIS ANTIGOS DO BOARD (lentidao do board pre-venda: 2225 cards ~2,91MB
+    // por carregamento). Leads em 'declinado' ou 'convertida' sem nenhuma atividade nos
+    // ultimos BOARD_TERMINAL_DAYS dias saem da resposta do board — o registro continua
+    // intacto no banco (nada e apagado/arquivado aqui), so deixa de trafegar no payload
+    // 'normal' do GET /api/leads. So chega neste ponto quando _isAllParam e false (o pedido
+    // com ?all=1 ja retornou acima, sem passar por este corte). Leads com pos_stage
+    // preenchido ou bridge=1 sao cross-visiveis entre pre/pos e NUNCA sao cortados.
+    {
+      const _terminalCutoff = Date.now() - BOARD_TERMINAL_DAYS * 86400000;
+      const _lastActivityMs = (l) => {
+        const _candidates = [l.updatedAt, l.last_client_ts, l.contracted_at, l.createdAt];
+        let _max = null;
+        for (const _v of _candidates) {
+          if (_v === null || _v === undefined || _v === '') continue;
+          let _ms;
+          if (typeof _v === 'number') {
+            _ms = _v;
+          } else if (typeof _v === 'string' && /^\d+$/.test(_v.trim())) {
+            _ms = Number(_v);
+          } else {
+            _ms = Date.parse(_v);
+          }
+          if (typeof _ms === 'number' && !Number.isNaN(_ms)) {
+            if (_max === null || _ms > _max) _max = _ms;
+          }
+        }
+        return _max;
+      };
+      parsedLeads = parsedLeads.filter(l => {
+        if (l.stage !== 'declinado' && l.stage !== 'convertida') return true;
+        if (l.pos_stage) return true;
+        if (l.bridge === 1) return true;
+        const _last = _lastActivityMs(l);
+        if (_last === null) return true; // sem dado valido de atividade: nao corta (regra do plano)
+        return _last >= _terminalCutoff;
+      });
     }
     // Filtra por LOGIN (sem mascarar, sempre o número real):
     //  - PÓS (Alexandre): só leads do 2030 OU vendas convertidas; 'stage' é remapeado p/ pos_stage
@@ -1245,7 +1289,7 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     const revenueRow = await getRow("SELECT SUM(value) as total FROM leads WHERE stage = 'convertida' AND archived = 0");
     // Vendas adicionais (upsell, 2026-07-30): somam na receita total, sem mexer no nº de clientes
     // fechados (closedLeads continua contando CARDS, não vendas).
-    const extraRevRow = await getRow("SELECT SUM(s.value) AS total FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0");
+    const extraRevRow = await getRow("SELECT SUM(s.value) AS total FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.archived = 0");
     const totalRevenue = (revenueRow.total || 0) + (Number(extraRevRow && extraRevRow.total) || 0);
 
     // Taxa de conversão real = vendas convertidas / total de leads (não arquivados)
@@ -1815,6 +1859,22 @@ async function resolveOwnerLine(convo) {
     if (!/@lid$/i.test(jid)) return { locked: false };
     const owner = convo.jid_account;
     if (!owner) return { locked: false };
+    // v525 — A LINHA QUE APARECE NA TELA MANDA.
+    // A trava do v504 existia porque o endereco @lid so era resolvivel pela conta
+    // que o viu. Desde o v524 isso deixou de valer: sendableJid() NUNCA usa o @lid,
+    // ele cai sempre no telefone puro (55DDNNNNNNNNN@s.whatsapp.net), endereco que
+    // qualquer linha conectada alcanca. O que sobrou da trava era so o efeito ruim:
+    // applyOwnerLine trocava a linha SO EM MEMORIA, entao conversations.account
+    // (o que a tela mostra) dizia uma coisa e o envio saia por outra.
+    // Caso Levi, 30/07/2026 — conversa c_qrtldgale: account=wa1 (2030, pos-venda) na
+    // tela, jid_account=wa7 (1554, pre-venda) no envio. Cliente ja convertido sendo
+    // respondido pelo numero do pre-venda, e 61 conversas no mesmo estado.
+    // Regra agora: se a linha da conversa esta conectada, e ela que envia. A trava
+    // so entra quando essa linha esta fora do ar (comportamento antigo, abaixo).
+    const atual = convo && convo.account;
+    if (atual && sessions[atual] && sessions[atual].ws && sessions[atual].ws.isOpen) {
+      return { locked: false };
+    }
     if (sessions[owner] && sessions[owner].ws && sessions[owner].ws.isOpen) {
       return { locked: true, account: owner };
     }
@@ -1983,7 +2043,13 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       // v504: dono do endereço @lid manda. Se está travado na linha dona, o
       // roteamento por ambiente abaixo NÃO pode desviar — desviar era exatamente
       // o que produzia "enviado" que nunca chegava ao cliente.
-      if (_ownLock) { /* linha já definida pelo dono do endereço */ }
+      // v526 — CONECTOU, MANDOU. A linha que aparece no card é a que envia, ponto.
+      // Os dois ramos abaixo desviavam a mensagem para outra linha MESMO com a linha da
+      // conversa conectada, só porque ela era do "outro ambiente" (pré x pós) — e ainda
+      // gravavam a troca no banco. Era o mesmo defeito do v525 por outra porta: a tela
+      // dizia 2030 e o envio saía pelo 1554. Agora o desvio só existe para o que ele
+      // realmente resolve: linha da conversa FORA DO AR.
+      if (_ownLock || lineOpen) { /* linha da conversa conectada — ela envia */ }
       else if (posSet.size && isPos) {
         if (!convPos || !lineOpen) {
           const posConn = [...posSet].find(isOpenLine);
@@ -2244,7 +2310,8 @@ app.post('/api/conversations/:id/audio', authenticateToken, uploadSingle('file')
     try {
       const { posSet } = await getSaleLineFilter();
       const isOpenLine = (a) => !!(sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
-      if (_ownLockA) { /* v504: linha travada no dono do endereço — não desvia */ }
+      // v526: linha da conversa conectada manda. Desvio só com a linha fora do ar.
+      if (_ownLockA || isOpenLine(accountId)) { /* linha da conversa conectada — ela envia */ }
       else if (posSet.size) {
         const isPos = await userIsPos(req);
         const ok = (a) => isOpenLine(a) && (isPos ? posSet.has(a) : !posSet.has(a));
@@ -2315,7 +2382,8 @@ app.post('/api/conversations/:id/media', authenticateToken, uploadSingle('file')
     try {
       const { posSet } = await getSaleLineFilter();
       const isOpenLine = (a) => !!(sessions[a] && sessions[a].ws && sessions[a].ws.isOpen);
-      if (_ownLockM) { /* v504: linha travada no dono do endereço — não desvia */ }
+      // v526: linha da conversa conectada manda. Desvio só com a linha fora do ar.
+      if (_ownLockM || isOpenLine(accountId)) { /* linha da conversa conectada — ela envia */ }
       else if (posSet.size) {
         const isPos = await userIsPos(req);
         const ok = (a) => isOpenLine(a) && (isPos ? posSet.has(a) : !posSet.has(a));
@@ -2888,7 +2956,7 @@ function _saleId() { return 's_' + Date.now().toString(36) + Math.random().toStr
 app.get('/api/leads/:id/sales', authenticateToken, async (req, res) => {
   try {
     const rows = await allRows(
-      "SELECT id, value, sale_date, service, note, created_by, created_at FROM lead_sales WHERE lead_id = ? ORDER BY sale_date ASC, created_at ASC",
+      "SELECT id, value, sale_date, service, note, proof, created_by, created_at FROM lead_sales WHERE lead_id = ? ORDER BY sale_date ASC, created_at ASC",
       [req.params.id]
     );
     res.json(rows);
@@ -2900,24 +2968,38 @@ app.get('/api/leads/:id/sales', authenticateToken, async (req, res) => {
 
 app.post('/api/leads/:id/sales', authenticateToken, async (req, res) => {
   try {
-    const { value, sale_date, service, note } = req.body || {};
+    const { value, sale_date, service, note, proof_filename, proof_content, proof_content_type } = req.body || {};
     const lead = await getRow("SELECT id, name, phone, stage FROM leads WHERE id = ?", [req.params.id]);
     if (!lead) return res.status(404).json({ error: 'Lead não encontrado.' });
-    // Regra de negócio: só existe venda adicional em cima de venda já convertida.
-    if (lead.stage !== 'convertida') {
-      return res.status(422).json({ error: 'Venda adicional só pode ser lançada em cliente com Venda convertida.' });
-    }
+    // v515 (pedido do Henry): lançamento LIBERADO em qualquer card — quem comanda onde a seção
+    // aparece é a guia Configuração dos Cards (linha "Compras adicionais"). A compra entra no
+    // faturamento no dia dela (as queries de lead_sales não filtram mais l.stage='convertida').
     const v = Number(value);
     if (!(v > 0)) return res.status(422).json({ error: 'Informe um valor maior que zero.' });
     const sd = String(sale_date || '').slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(sd)) return res.status(422).json({ error: 'Data da venda inválida (use AAAA-MM-DD).' });
 
     const id = _saleId();
+
+    // v519 (pedido do Henry): comprovante de pagamento é OBRIGATÓRIO em toda venda adicional.
+    // Mesmo formato do /payment-proof do lead: base64 no JSON, gravado em MEDIA_DIR.
+    if (!proof_content) return res.status(422).json({ error: 'Anexe o comprovante de pagamento desta venda adicional.' });
+    const pbuf = Buffer.from(String(proof_content).replace(/^data:[^;]+;base64,/, ''), 'base64');
+    if (!pbuf.length) return res.status(422).json({ error: 'Comprovante vazio — anexe o arquivo novamente.' });
+    if (pbuf.length > 12 * 1024 * 1024) return res.status(422).json({ error: 'Comprovante acima de 12 MB.' });
+    let pext = (String(proof_filename || '').match(/\.([a-z0-9]{2,5})$/i) || ['', ''])[1].toLowerCase();
+    if (!['jpg', 'jpeg', 'png', 'webp', 'gif', 'pdf'].includes(pext)) {
+      const ctMap = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'application/pdf': 'pdf' };
+      pext = ctMap[String(proof_content_type || '').toLowerCase()] || 'bin';
+    }
+    const pfname = 'sale_' + id + '_' + Date.now() + '.' + pext;
+    fs.writeFileSync(path.join(MEDIA_DIR, pfname), pbuf);
+
     const createdBy = (req.user && req.user.name) || null;
     const createdAt = new Date().toISOString();
     await runQuery(
-      "INSERT INTO lead_sales (id, lead_id, value, sale_date, service, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, lead.id, v, sd, service || null, note || null, createdBy, createdAt]
+      "INSERT INTO lead_sales (id, lead_id, value, sale_date, service, note, proof, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, lead.id, v, sd, service || null, note || null, pfname, createdBy, createdAt]
     );
     bustLeadsCache(); // v514: o GET /leads agrega lead_sales — o chip 🛒 do card precisa vir fresco
     await logLeadHistory({
@@ -2925,7 +3007,7 @@ app.post('/api/leads/:id/sales', authenticateToken, async (req, res) => {
       detail: 'Venda adicional: R$ ' + v.toFixed(2) + (service ? ' — ' + String(service) : ''),
       meta: { kind: 'venda_adicional', sale_id: id, value: v, sale_date: sd }
     });
-    res.status(201).json({ id, lead_id: lead.id, value: v, sale_date: sd, service: service || null, note: note || null, created_by: createdBy, created_at: createdAt });
+    res.status(201).json({ id, lead_id: lead.id, value: v, sale_date: sd, service: service || null, note: note || null, proof: pfname, created_by: createdBy, created_at: createdAt });
   } catch (e) {
     console.error('[lead_sales][POST] erro:', e && e.message);
     res.status(500).json({ error: 'Erro ao lançar venda adicional.' });
@@ -2936,6 +3018,8 @@ app.delete('/api/leads/:id/sales/:saleId', authenticateToken, async (req, res) =
   try {
     const row = await getRow("SELECT s.*, l.name AS lead_name, l.phone AS lead_phone FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE s.id = ? AND s.lead_id = ?", [req.params.saleId, req.params.id]);
     if (!row) return res.status(404).json({ error: 'Venda adicional não encontrada.' });
+    // v519: remove também o arquivo do comprovante desta venda (não deixa lixo no MEDIA_DIR).
+    if (row.proof) { try { const old = path.join(MEDIA_DIR, path.basename(row.proof)); if (fs.existsSync(old)) fs.unlinkSync(old); } catch (e) {} }
     await runQuery("DELETE FROM lead_sales WHERE id = ?", [row.id]);
     bustLeadsCache(); // v514: idem ao POST — agregado do GET /leads muda ao remover
     await logLeadHistory({
@@ -2948,6 +3032,24 @@ app.delete('/api/leads/:id/sales/:saleId', authenticateToken, async (req, res) =
     console.error('[lead_sales][DELETE] erro:', e && e.message);
     res.status(500).json({ error: 'Erro ao remover venda adicional.' });
   }
+});
+
+// v519: serve o comprovante de UMA venda adicional (token via header OU ?token= p/ <img>/nova aba).
+app.get('/api/leads/:id/sales/:saleId/proof', async (req, res) => {
+  const token = (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]) || req.query.token;
+  if (!token) return res.status(401).end();
+  try { jwt.verify(token, JWT_SECRET); } catch (e) { return res.status(403).end(); }
+  try {
+    const row = await getRow("SELECT proof FROM lead_sales WHERE id = ? AND lead_id = ?", [req.params.saleId, req.params.id]);
+    if (!row || !row.proof) return res.status(404).end();
+    const file = path.join(MEDIA_DIR, path.basename(row.proof));
+    if (!fs.existsSync(file)) return res.status(404).end();
+    const ext = (row.proof.match(/\.([a-z0-9]+)$/i) || ['', ''])[1].toLowerCase();
+    const ctMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', pdf: 'application/pdf' };
+    res.setHeader('Content-Type', ctMap[ext] || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs.createReadStream(file).pipe(res);
+  } catch (e) { res.status(500).end(); }
 });
 
 app.get('/api/whatsapp/accounts', authenticateToken, async (req, res) => {
@@ -3830,6 +3932,16 @@ app.post('/api/settings/services', authenticateToken, async (req, res) => {
 // pipeline449: Origens de lead (Configurações → Identificação): lista editável que alimenta o
 // combo "Origem do lead" do modal do card. Seed na 1ª leitura se ainda não houver nada salvo.
 const LEAD_ORIGINS_SEED = ['Google Ads', 'Meta Ads', 'Ferramenta de IA (GPT, Gemini, etc)', 'Orgânico', 'Indicação', 'Passou na Frente da Loja'];
+// v516 (pedido do Henry, 2026-07-30): TODA venda adicional (lead_sales) é atribuída à origem
+// INDICAÇÃO — nunca herda a origem/categoria do card pai. Ampliação de escopo não vem de
+// anúncio: herdar a origem via JOIN estava inflando o ROI de Google Ads/Meta com dinheiro de
+// upsell. A data continua sendo a do próprio lançamento (s.sale_date), "na data indicada".
+const EXTRA_SALE_ORIGIN_SEED = 'Indicação';
+const EXTRA_SALE_CAT = 'org'; // balde legado (ga|meta|org|semclass): indicação é orgânica
+function extraSaleOrigin(origins) {
+  const m = (origins || []).find(o => String(o).trim().toLowerCase() === 'indicação');
+  return m ? String(m).trim() : EXTRA_SALE_ORIGIN_SEED;
+}
 app.get('/api/settings/lead-origins', authenticateToken, async (req, res) => {
   try {
     let row = await getRow("SELECT value FROM app_settings WHERE key = 'lead_origins'");
@@ -4895,7 +5007,7 @@ app.get('/api/reports/conversion-analysis/:id', authenticateToken, async (req, r
 // ===== execucao1 Sprint1 (2026-07-25): RELATÓRIO DIÁRIO (ranking quente→frio, por ambiente) =====
 // Gerado às 8h SP pelo scheduler abaixo; histórico em ai_reports (daily-pre / daily-pos).
 const dailyReports = require('./daily_reports');
-dailyReports.init({ posLineInfo, POS_STAGES });
+dailyReports.init({ posLineInfo, POS_STAGES, prazoHoras: dailyPrazoHoras }); // v519: janela = prazo configurado
 
 // Disparo manual (teste / re-geração do dia) — só Administrador.
 app.post('/api/reports/daily/run', authenticateToken, async (req, res) => {
@@ -5728,9 +5840,10 @@ app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
       } catch (e) {}
     });
     // VENDAS ADICIONAIS (upsell) — 2026-07-30: cada linha de lead_sales entra no dia DELA (sale_date
-    // própria, não a do card), conta +1 venda e herda a origem/categoria do card (lead pai) via JOIN.
+    // própria, não a do card) e conta +1 venda. v516: a origem é SEMPRE Indicação (não herda mais
+    // do card pai) — ver EXTRA_SALE_ORIGIN_SEED/extraSaleOrigin.
     const extraRows = await allRows(
-      "SELECT s.value AS s_value, substr(s.sale_date,1,10) AS s_day, l.tracking, l.source, l.source_locked, l.tags FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
+      "SELECT s.value AS s_value, substr(s.sale_date,1,10) AS s_day, l.tracking, l.source, l.source_locked, l.tags FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
       [fromIso, toIso]
     );
     extraRows.forEach(row => {
@@ -5738,13 +5851,13 @@ app.get('/api/dashboard/sales-daily', authenticateToken, async (req, res) => {
       if (!day || day < fromIso || day > toIso) return;
       if (!byDay[day]) byDay[day] = { count: 0, value: 0, byCat: { ga: 0, meta: 0, org: 0, semclass: 0 }, byCatCount: { ga: 0, meta: 0, org: 0, semclass: 0 }, byOrigin: {}, byOriginCount: {} };
       const val = Number(row.s_value) || 0;
-      const cat = leadChannelCat(row);
+      const cat = EXTRA_SALE_CAT; // v516: venda adicional nunca conta como ga/meta
       byDay[day].count++;
       byDay[day].value += val;
       byDay[day].byCat[cat] = (byDay[day].byCat[cat] || 0) + val;
       byDay[day].byCatCount[cat] = (byDay[day].byCatCount[cat] || 0) + 1;
       try {
-        const lb = leadOriginLabel(row, _originsCfg);
+        const lb = extraSaleOrigin(_originsCfg); // v516: sempre Indicação
         byDay[day].byOrigin[lb] = (byDay[day].byOrigin[lb] || 0) + val;
         byDay[day].byOriginCount[lb] = (byDay[day].byOriginCount[lb] || 0) + 1;
       } catch (e) {}
@@ -5801,15 +5914,16 @@ app.get('/api/dashboard/sales-daily-leads', authenticateToken, async (req, res) 
       return { id: l.id, name: l.name || '(sem nome)', value: Number(l.value) || 0, service, cat: leadChannelCat(l), origem: origin ? leadOriginLabel(l, _originsCfg) : null };
     });
     // VENDAS ADICIONAIS (upsell) — 2026-07-30: extras do mesmo período entram na listagem ANTES dos
-    // filtros de origin/cat e do sort, herdando origem/categoria do card (lead pai) via JOIN.
+    // filtros de origin/cat e do sort. v516: origem SEMPRE Indicação (não herda mais do card pai),
+    // então a listagem do popup bate com a fatia de Indicação do gráfico.
     const extraRows = await allRows(
-      "SELECT l.id, l.name, l.tags, l.tracking, l.source, l.source_locked, s.value AS s_value, s.service AS s_service FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
+      "SELECT l.id, l.name, l.tags, l.tracking, l.source, l.source_locked, s.value AS s_value, s.service AS s_service FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
       [fromIso, toIso]
     );
     const extraLeads = extraRows.map(l => {
       let service = l.s_service || '—';
       if (!l.s_service) { try { const tg = JSON.parse(l.tags || '[]'); if (Array.isArray(tg) && tg[0]) service = String(tg[0]); } catch (e) {} }
-      return { id: l.id, name: (l.name || '(sem nome)') + ' — venda adicional', value: Number(l.s_value) || 0, service, cat: leadChannelCat(l), origem: origin ? leadOriginLabel(l, _originsCfg) : null };
+      return { id: l.id, name: (l.name || '(sem nome)') + ' — venda adicional', value: Number(l.s_value) || 0, service, cat: EXTRA_SALE_CAT, origem: origin ? extraSaleOrigin(_originsCfg) : null };
     });
     leads = leads.concat(extraLeads);
     if (origin) leads = leads.filter(l => l.origem === origin);
@@ -5876,18 +5990,16 @@ app.get('/api/dashboard/optimal-point', authenticateToken, async (req, res) => {
     });
 
     // Vendas adicionais (upsell, 2026-07-30): cada linha de lead_sales conta como CONTRATO no dia
-    // DELA — origem/categoria herdada do lead pai via JOIN, mesmos helpers de classificação.
+    // DELA. v516: origem SEMPRE Indicação — entra no ticket médio GERAL, mas NUNCA como contrato
+    // de Google Ads (herdar a origem do card pai inflava o funil/ROI pago com dinheiro de upsell).
     const extraSales = await allRows(
-      "SELECT s.value AS s_value, l.tracking, l.source, l.source_locked FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
+      "SELECT s.value AS s_value, l.tracking, l.source, l.source_locked FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
       [fromIso, toIso]
     );
     extraSales.forEach(row => {
       const val = Number(row.s_value) || 0;
       if (val > 0) ticketAllVals.push(val);
-      if (leadChannelCat(row) === 'ga') {
-        convGA++;
-        if (val > 0) ticketGaVals.push(val);
-      }
+      // v516: venda adicional é Indicação — não entra em convGA nem no ticket de Google Ads.
     });
     const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
@@ -5985,18 +6097,16 @@ app.get('/api/dashboard/optimal-point-meta', authenticateToken, async (req, res)
     });
 
     // Vendas adicionais (upsell, 2026-07-30): mesmo tratamento do bloco Google — cada linha de
-    // lead_sales conta como CONTRATO no dia DELA, categoria herdada do lead pai via JOIN.
+    // lead_sales conta como CONTRATO no dia DELA. v516: origem SEMPRE Indicação — entra no ticket
+    // médio geral, mas NUNCA como contrato de Meta Ads.
     const extraSales = await allRows(
-      "SELECT s.value AS s_value, l.tracking, l.source, l.source_locked FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.stage = 'convertida' AND l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
+      "SELECT s.value AS s_value, l.tracking, l.source, l.source_locked FROM lead_sales s JOIN leads l ON l.id = s.lead_id WHERE l.archived = 0 AND COALESCE(l.source,'') <> 'Planilha Americano' AND substr(s.sale_date,1,10) >= ? AND substr(s.sale_date,1,10) <= ?",
       [fromIso, toIso]
     );
     extraSales.forEach(row => {
       const val = Number(row.s_value) || 0;
       if (val > 0) ticketAllVals.push(val);
-      if (leadChannelCat(row) === 'meta') {
-        convGA++;
-        if (val > 0) ticketGaVals.push(val);
-      }
+      // v516: venda adicional é Indicação — não entra em convGA nem no ticket de Meta Ads.
     });
     const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
