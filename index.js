@@ -7469,3 +7469,22 @@ app.listen(PORT, async () => {
   setTimeout(() => { calendlySweep(logLeadHistory).catch((e) => console.error('[Calendly]', e.message)); }, 90 * 1000);
   setInterval(() => { calendlySweep(logLeadHistory).catch((e) => console.error('[Calendly]', e.message)); }, 5 * 60 * 1000);
 });
+
+// v527 - DIAGNOSTICO LOCAL: pergunta ao WhatsApp se um numero existe e aceita mensagem
+// daquela linha. Escuta SO em 127.0.0.1:5099 (o nginx nao alcanca) e nao envia nada ao cliente.
+try {
+  require('http').createServer(function (rq, rs) {
+    var out = function (o) { rs.writeHead(200, { 'Content-Type': 'application/json' }); rs.end(JSON.stringify(o)); };
+    try {
+      var q = require('url').parse(rq.url, true).query || {};
+      var acc = String(q.acc || '');
+      var phone = String(q.phone || '').replace(/[^0-9]/g, '');
+      var sock = sessions[acc];
+      if (!sock || !sock.ws || !sock.ws.isOpen) return out({ ok: false, error: 'linha fechada' });
+      if (!phone) return out({ ok: false, error: 'sem telefone' });
+      sock.onWhatsApp(phone + '@s.whatsapp.net')
+        .then(function (r) { out({ ok: true, acc: acc, phone: phone, result: r }); })
+        .catch(function (e) { out({ ok: false, error: String(e && e.message) }); });
+    } catch (e) { out({ ok: false, error: String(e && e.message) }); }
+  }).listen(5099, '127.0.0.1');
+} catch (e) { console.error('[diag5099]', e && e.message); }
