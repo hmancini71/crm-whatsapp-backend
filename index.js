@@ -945,6 +945,14 @@ if (!stage) {
       let _subj = 'pos';
       try { _subj = (await userIsPos(req)) ? 'pre' : 'pos'; } catch (e) {}
       await runQuery("UPDATE leads SET bridge = 1, bridge_subject = ? WHERE id = ?", [_subj, id]);
+      // [BOARDV2-R10] Card que ENTRA na ponte com ASSUNTO PRE-VENDA (quem mandou foi o pos-venda,
+      // e o assunto e para o pre tratar) ja sai carimbado com a prioridade de fila 2. Assim, quando
+      // o vendedor tirar o card da ponte, ele cai direto em "Lead respondendo" na posicao certa.
+      // NAO se mexe no 'stage' aqui, de proposito: a ponte preserva a coluna de origem do card, e
+      // gravar 'tratamento' agora tiraria de "Venda convertida" quem ja e uma venda fechada.
+      if (_subj === 'pre') {
+        await runQuery("UPDATE leads SET prioridade_fila = 2 WHERE id = ?", [id]);
+      }
       if (cur.bridge !== 1 || cur.bridge_subject !== _subj) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para a coluna-ponte (Comunicação Pré/Pós-Venda) — assunto ' + (_subj === 'pre' ? 'PRÉ' : 'PÓS') + '-venda', meta: { to: 'ponte', assunto: _subj } });
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
       return res.json({ ...l2, stage, tags: l2.tags ? JSON.parse(l2.tags) : [] });
