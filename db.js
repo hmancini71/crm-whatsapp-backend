@@ -566,6 +566,27 @@ db.serialize(() => {
     if (!has('bot_ativo')) db.run("ALTER TABLE leads ADD COLUMN bot_ativo INTEGER DEFAULT 1");
   });
 
+  // ---------------------------------------------------------------------------
+  // BOARD V2 (2026-08-08) — passo 1: campos novos das regras de movimentação.
+  // Só ADIÇÃO. Nenhum campo existente é removido, renomeado ou reescrito.
+  // Enquanto o resto do pacote não roda, estas colunas ficam nulas/zero e o
+  // código atual simplesmente as ignora — por isso o passo é inofensivo sozinho.
+  //   prioridade_fila               P1..P4 dentro de "Lead respondendo" (R3/R5/R2b/R8)
+  //   coluna_origem                 coluna de onde o card veio, para o retorno de R4
+  //   ultima_resposta_vendedor_em   marco das 24h de silêncio de R6
+  //   resgate                       1 = card exibe o selo RESGATE (R8)
+  // ---------------------------------------------------------------------------
+  db.all("PRAGMA table_info(leads)", (bvErr, bvcols) => {
+    if (bvErr || !Array.isArray(bvcols)) return;
+    const tem = (n) => bvcols.find(c => c.name === n);
+    try {
+      if (!tem('prioridade_fila')) db.run("ALTER TABLE leads ADD COLUMN prioridade_fila INTEGER DEFAULT NULL", () => {});
+      if (!tem('coluna_origem')) db.run("ALTER TABLE leads ADD COLUMN coluna_origem TEXT DEFAULT NULL", () => {});
+      if (!tem('ultima_resposta_vendedor_em')) db.run("ALTER TABLE leads ADD COLUMN ultima_resposta_vendedor_em TEXT DEFAULT NULL", () => {});
+      if (!tem('resgate')) db.run("ALTER TABLE leads ADD COLUMN resgate INTEGER DEFAULT 0", () => {});
+    } catch (e) { console.error('[boardv2] migracao passo 1:', e && e.message); }
+  });
+
   // execucao1 Sprint1 (2026-07-25): compromissos — "te ligo sábado às 11h" vira registro cobrável.
   db.run(`CREATE TABLE IF NOT EXISTS compromissos (
     id TEXT PRIMARY KEY,
