@@ -923,6 +923,34 @@ async function _r9Faltantes(cur) {
   return { faltam, chaves };
 }
 
+// [BOARDV2-SELO] Troca o selo da coluna-ponte (ASSUNTO PRE-VENDA <-> ASSUNTO POS-VENDA) quando o
+// card foi mandado com o assunto errado. So funciona em card que esta NA PONTE.
+// Coerencia com a R10: marcar como ASSUNTO PRE-VENDA e entregar o card ao pre — entao ele sai da
+// ponte e vai para "Lead respondendo", igual a quem chega la ja com esse selo. Excecao: card em
+// "Venda convertida" ou "Lead declinou/cancelado" fica na ponte (mover apagaria a venda dos
+// relatorios / mexeria numa coluna terminal); nesse caso so o selo muda.
+app.patch('/api/leads/:id/bridge-subject', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const alvo = String((req.body && req.body.subject) || '').trim().toLowerCase();
+  if (alvo !== 'pre' && alvo !== 'pos') return res.status(400).json({ error: 'Assunto inválido (use "pre" ou "pos").' });
+  try {
+    const cur = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!cur) return res.status(404).json({ error: 'Lead não encontrado' });
+    if (Number(cur.bridge) !== 1) return res.status(409).json({ error: 'Este card não está na coluna de comunicação entre ambientes.' });
+    bustLeadsCache();
+    await runQuery("UPDATE leads SET bridge_subject = ? WHERE id = ?", [alvo, id]);
+    logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Selo da comunicação corrigido para ASSUNTO ' + (alvo === 'pre' ? 'PRÉ' : 'PÓS') + '-VENDA', meta: { bridge_subject: alvo } });
+    let entregue = false;
+    if (alvo === 'pre' && cur.stage !== 'convertida' && cur.stage !== 'declinado') {
+      await runQuery("UPDATE leads SET stage = 'tratamento', pos_stage = NULL, bridge = 0, prioridade_fila = 2 WHERE id = ?", [id]);
+      logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Entregue pelo pós-venda ao pré — entrou em "Lead respondendo"', meta: { to: 'tratamento', r10: 1 } });
+      entregue = true;
+    }
+    const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+    res.json({ ...l2, tags: l2.tags ? JSON.parse(l2.tags) : [], entregue_ao_pre: entregue });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
 const { id } = req.params;
 const { stage, force } = req.body;
