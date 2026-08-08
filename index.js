@@ -1167,7 +1167,7 @@ app.post('/api/leads/:id/history', authenticateToken, async (req, res) => {
 // 4b. Leads Routes: Patch Lead Details
 app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email, responsible, source, destino_visto, tipo_visto, prazo_viagem, qtd_solicitantes, score, status_pagamento, bot_ativo, contract_id } = req.body;
+  const { name, phone, email, value, tags, comments, priority, lastClientReply, followup_date, client_dir, decline_reason, sale_date, casv_date, consulate_date, validation_date, access_email, responsible, source, destino_visto, tipo_visto, prazo_viagem, qtd_solicitantes, score, status_pagamento, bot_ativo, contract_id, followup_time } = req.body;
 
   // execucao1 Sprint1 (2026-07-25): validações dos campos de qualificação/score/pagamento.
   if (score !== undefined && score !== null && score !== '') {
@@ -1245,6 +1245,12 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
     if (lastClientReply !== undefined) {
       updates.push("lastClientReply = ?");
       params.push(lastClientReply);
+    }
+    // [BOARDV2-FUHORA] Horario combinado do follow-up (HH:MM). Campo opcional: vazio limpa.
+    if (followup_time !== undefined) {
+      const _hh = String(followup_time || '').trim();
+      updates.push("followup_time = ?");
+      params.push(/^\d{2}:\d{2}$/.test(_hh) ? _hh : null);
     }
     if (followup_date !== undefined) {
       updates.push("followup_date = ?");

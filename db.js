@@ -584,6 +584,9 @@ db.serialize(() => {
       if (!tem('coluna_origem')) db.run("ALTER TABLE leads ADD COLUMN coluna_origem TEXT DEFAULT NULL", () => {});
       if (!tem('ultima_resposta_vendedor_em')) db.run("ALTER TABLE leads ADD COLUMN ultima_resposta_vendedor_em TEXT DEFAULT NULL", () => {});
       if (!tem('resgate')) db.run("ALTER TABLE leads ADD COLUMN resgate INTEGER DEFAULT 0", () => {});
+      // [BOARDV2-FUHORA] Horario do follow-up (pedido do Henry, 2026-08-08): "muitas vezes o cliente
+      // pede para ligar em determinado horario". Guarda HH:MM; vazio = so a data, como era antes.
+      if (!tem('followup_time')) db.run("ALTER TABLE leads ADD COLUMN followup_time TEXT DEFAULT NULL", () => {});
     } catch (e) { console.error('[boardv2] migracao passo 1:', e && e.message); }
   });
 
