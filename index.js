@@ -147,8 +147,18 @@ app.get('/api/debug/db-dump', async (req, res) => {
   }
 });
 
-// Emergency: force-fix stages without auth (safe: only updates pipeline column names)
-app.post('/api/debug/fix-stages', async (req, res) => {
+// Conserto de emergencia das colunas do funil.
+// [BOARDV2-SEC] 2026-08-08: esta rota nasceu SEM autenticacao ("emergency ... without auth") e
+// executava DELETE FROM stages + tres UPDATE em massa na tabela leads para QUALQUER pessoa que
+// chamasse o endereco, sem login. O terceiro UPDATE e o perigoso: joga em "Novo Leads" todo lead
+// cujo stage nao esteja na lista fixa abaixo — hoje isso da 0 cards, mas bastaria um estagio novo
+// aparecer (coluna nova, migracao em andamento, valor gravado errado) para varrer esses leads de
+// uma vez, sem log e sem confirmacao. Ninguem chamava a rota: nem o front nativo, nem o
+// inject_modal.js, nem script algum do projeto. Agora exige login de Administrador e registra quem
+// chamou. Se um dia for preciso usa-la com o login fora do ar, roda-se o mesmo conserto no servidor.
+app.post('/api/debug/fix-stages', authenticateToken, async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  console.log('[fix-stages] executado por: ' + ((req.user && (req.user.name || req.user.email)) || '?') + ' em ' + new Date().toISOString());
   try {
     const correctStages = [
       { id: "novo",       title: "Novo Leads",              color: "#71717a" },
