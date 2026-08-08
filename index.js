@@ -796,8 +796,15 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
     // era chamado dentro do try do filtro (repetindo a consulta a cada request); agora é calculado
     // uma única vez e reaproveitado tanto na chave do cache quanto no filtro abaixo.
     const _isAllParam = String(req.query.all || '') === '1';
+    // [PONTE-FIX 2026-08-08] ?terminais=1 = "ver todos" DO BOARD: traz de volta os cards terminais
+    // antigos que o corte de 30 dias esconde, MAS continua passando pelo filtro pre/pos e pelo
+    // remapeamento da coluna-ponte. Antes o botao "ver todos" usava ?all=1, que retorna cru (antes
+    // do filtro): os cards da ponte apareciam na coluna de ORIGEM (Tratamento inicial) e a
+    // coluna-ponte ficava vazia — parecia que o card tinha "voltado sozinho". ?all=1 segue existindo
+    // sem filtro nenhum porque a guia WhatsApp precisa cruzar os DOIS ambientes (caso JD Crawford).
+    const _isTerminaisParam = String(req.query.terminais || '') === '1';
     const isPos = await userIsPos(req);
-    const _cacheKey = _isAllParam ? 'all' : (isPos ? 'pos_t30' : 'pre_t30');
+    const _cacheKey = _isAllParam ? 'all' : ((isPos ? 'pos' : 'pre') + (_isTerminaisParam ? '_full' : '_t30'));
     const _cached = _leadsCache.get(_cacheKey);
     if (_cached && (Date.now() - _cached.t) < LEADS_CACHE_TTL_MS) {
       res.type('application/json').send(_cached.body);
@@ -838,7 +845,7 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
     // com ?all=1 ja retornou acima, sem passar por este corte). Leads com pos_stage
     // preenchido ou bridge=1 sao cross-visiveis entre pre/pos e NUNCA sao cortados.
     {
-      const _terminalCutoff = Date.now() - BOARD_TERMINAL_DAYS * 86400000;
+      const _terminalCutoff = _isTerminaisParam ? -Infinity : (Date.now() - BOARD_TERMINAL_DAYS * 86400000);
       const _lastActivityMs = (l) => {
         const _candidates = [l.updatedAt, l.last_client_ts, l.contracted_at, l.createdAt];
         let _max = null;
