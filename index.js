@@ -882,13 +882,44 @@ app.patch('/api/leads/:id/restore', authenticateToken, async (req, res) => {
 });
 
 // 4. Leads Routes: Patch Stage
-app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
-  const { id } = req.params;
-  const { stage, force } = req.body;
-
-  if (!stage) {
-    return res.status(400).json({ error: "Estágio é obrigatório" });
+// [BOARDV2-R9] Campos obrigatorios para ENTRAR em "Venda convertida" (regra R9).
+// Usada pelo PATCH /stage e pelo POST /leads — por isso vive no escopo do modulo.
+// Vale so na ENTRADA: cards que JA estao em convertida nunca sao revalidados nem alterados.
+// Quais campos bloqueiam e governavel por app_settings.r9_required (JSON) — assim da p/ afrouxar
+// sem novo deploy. Ausente = todos ligados. Ex.: {"contrato":false} deixa o contrato so como aviso.
+async function _r9Faltantes(cur) {
+  let liga = { servico: true, valor: true, comprovante: true, nome: true, contato: true, origem: true, diretorio: true, contrato: true };
+  try {
+    const row = await getRow("SELECT value FROM app_settings WHERE key = 'r9_required'", []);
+    if (row && row.value) Object.assign(liga, JSON.parse(row.value) || {});
+  } catch (e) {}
+  const cheio = (v) => String(v == null ? '' : v).trim() !== '';
+  let tags = []; try { tags = cur.tags ? JSON.parse(cur.tags) : []; } catch (e) { tags = []; }
+  const testes = [
+    ['servico', Array.isArray(tags) && tags.length > 0 && String(tags[0] || '').trim() !== '', 'o tipo de serviço (classificação)'],
+    ['valor', Number(cur.value) > 0, 'o valor contratado'],
+    ['comprovante', cheio(cur.payment_proof), 'o comprovante de pagamento (anexe o arquivo no card)'],
+    ['nome', cheio(cur.name), 'o nome do cliente'],
+    ['contato', cheio(cur.phone) || cheio(cur.email), 'o telefone ou o e-mail do lead'],
+    ['origem', cheio(cur.source), 'a origem do lead'],
+    ['diretorio', cheio(cur.client_dir), 'o diretório do cliente (link da pasta)'],
+    ['contrato', cheio(cur.contract_id) || Number(cur.contract_signed) === 1, 'o contrato vinculado']
+  ];
+  const faltam = [], chaves = {};
+  for (const [chave, ok, rotulo] of testes) {
+    if (liga[chave] === false) continue;
+    if (!ok) { faltam.push(rotulo); chaves[chave] = true; }
   }
+  return { faltam, chaves };
+}
+
+app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
+const { id } = req.params;
+const { stage, force } = req.body;
+
+if (!stage) {
+  return res.status(400).json({ error: "Estágio é obrigatório" });
+}
 
   try {
     bustLeadsCache(); // escreve em leads → derruba o micro-cache do GET /api/leads
@@ -930,20 +961,15 @@ app.patch('/api/leads/:id/stage', authenticateToken, async (req, res) => {
     }
     // REGRAS das colunas TERMINAIS — valida ANTES de transferir (vale p/ arrasto E combo):
     // "Venda convertida" exige tipo de serviço (tag) + valor contratado.
+    // [BOARDV2-R9] Entrada em "Venda convertida": exige os campos obrigatorios (regra R9).
+    // So na ENTRADA — quem ja esta em convertida NAO e revalidado, movido nem alterado.
     if (stage === 'convertida' && cur.stage !== 'convertida') {
-      let tags = []; try { tags = cur.tags ? JSON.parse(cur.tags) : []; } catch (e) { tags = []; }
-      const hasServ = Array.isArray(tags) && tags.length > 0 && String(tags[0] || '').trim() !== '';
-      const hasValue = Number(cur.value) > 0;
-      // v498 (pedido do Henry): o COMPROVANTE DE PAGAMENTO passa a ser obrigatorio para entrar
-      // em "Venda convertida". Vale para TODOS os caminhos (arrasto no board, combo do modal e
-      // qualquer automacao), porque esta validacao roda antes de gravar e ignora o force=true.
-      const hasProof = String(cur.payment_proof || '').trim() !== '';
-      if (!hasServ || !hasValue || !hasProof) {
-        const faltam = [];
-        if (!hasServ) faltam.push('o tipo de serviço (classificação)');
-        if (!hasValue) faltam.push('o valor contratado');
-        if (!hasProof) faltam.push('o comprovante de pagamento (anexe o arquivo no card)');
-        return res.status(422).json({ error: 'Não foi transferido para "Venda convertida": falta definir ' + faltam.join(' e ') + '.', _missing: { servico: !hasServ, valor: !hasValue, comprovante: !hasProof } });
+      const { faltam, chaves } = await _r9Faltantes(cur);
+      if (faltam.length) {
+        return res.status(422).json({
+          error: 'Não foi transferido para "Venda convertida": falta preencher ' + faltam.join(', ') + '.',
+          _missing: Object.assign({ servico: false, valor: false, comprovante: false }, chaves)
+        });
       }
     }
     // "Lead declinou/cancelado" exige o motivo do cancelamento preenchido.
@@ -4636,6 +4662,21 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
         }
       } catch (e) {}
     };
+    // [BOARDV2-R9] Criar lead JA em "Venda convertida" pelo pre tambem passa pela regra R9 — era um
+    // caminho que entrava sem nenhuma validacao. Colunas do POS e a coluna-ponte seguem liberadas:
+    // ali o card e um cliente sendo cadastrado no pos-venda, nao uma venda nova do funil.
+    if (stage === 'convertida' && !_isBridge) {
+      const { faltam, chaves } = await _r9Faltantes({
+        tags: JSON.stringify(safeTags), value: value, payment_proof: null, name: name,
+        phone: phone, email: email, source: source, client_dir: null, contract_id: null, contract_signed: 0
+      });
+      if (faltam.length) {
+        return res.status(422).json({
+          error: 'Não foi criado em "Venda convertida": falta preencher ' + faltam.join(', ') + '. Crie o lead numa etapa anterior e mova depois.',
+          _missing: chaves
+        });
+      }
+    }
     if (_isBridge) {
       // Criado direto na COLUNA-PONTE: marca bridge=1; o stage de origem fica como 'convertida' (home
       // não-sentinela). Se veio do board pós, carimba como 2030.
