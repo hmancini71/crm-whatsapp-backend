@@ -226,6 +226,42 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: "Credenciais inválidas" });
     }
 
+    // [TRAVA-MAQUINA] O CRM só abre em computador AUTORIZADO (pedido do Henry, 2026-08-08:
+    // "o objetivo é não se abrir o CRM em máquinas não autorizadas"). Login e senha corretos NÃO
+    // bastam: o navegador precisa apresentar o SELO do dispositivo. Quem não tem informa a senha
+    // de autorização UMA VEZ e o computador passa a ser reconhecido dali em diante.
+    // O selo é sha256(segredo do servidor + hash bcrypt da senha) — não é a senha, não dá para
+    // voltar dele à senha, e trocar a senha de autorização derruba TODOS os computadores de uma vez.
+    // Interruptor de emergência: app_settings.device_lock = 'off' desliga a exigência (para o caso
+    // de alguém ficar de fora sem conseguir entrar).
+    try {
+      const _lockRow = await getRow("SELECT value FROM app_settings WHERE key = 'device_lock'", []);
+      const _ligado = !_lockRow || String(_lockRow.value || 'on').toLowerCase() !== 'off';
+      if (_ligado) {
+        const _mRow = await getRow("SELECT value FROM app_settings WHERE key = 'master_pass_hash'", []);
+        const _mHash = _mRow && _mRow.value;
+        if (_mHash) {
+          const _selo = crypto.createHash('sha256').update(String(JWT_SECRET) + '|' + _mHash).digest('hex');
+          const _dev = String((req.body && req.body.device) || '');
+          const _autoriza = String((req.body && req.body.device_pass) || '');
+          const _jaAutorizado = _dev && _dev === _selo;
+          const _autorizandoAgora = _autoriza && bcrypt.compareSync(_autoriza, _mHash);
+          if (!_jaAutorizado && !_autorizandoAgora) {
+            console.log('[TRAVA-MAQUINA] acesso barrado: ' + mail + ' de ' + (req.ip || '?') + ' — computador não autorizado.');
+            return res.status(403).json({
+              error: 'Este computador não está autorizado a abrir o CRM. Informe a senha de autorização.',
+              _precisaAutorizarMaquina: true
+            });
+          }
+          if (_autorizandoAgora && !_jaAutorizado) {
+            console.log('[TRAVA-MAQUINA] novo computador autorizado por ' + mail + ' de ' + (req.ip || '?') + '.');
+          }
+          res.locals = res.locals || {};
+          res.locals._deviceSelo = _selo; // devolvido junto com o token, para o navegador guardar
+        }
+      }
+    } catch (e) { console.error('[TRAVA-MAQUINA]', e && e.message); }
+
     // AMBIENTE escolhido no login (pedido do Henry, 09/07/2026): combo Pré-venda/Pós-venda na
     // tela de login. Valida contra o wa_type do usuário ('ambos' pode os dois; 'pre' só pré;
     // 'pos' só pós). Se não permitido → 403 com aviso claro. Sem env no body (app antigo/API):
@@ -257,6 +293,9 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({
       access_token: token,
       token_type: "bearer",
+      // [TRAVA-MAQUINA] selo para o navegador guardar: nas proximas vezes ele entra sem a senha
+      // de autorizacao. Nao e a senha e nao permite chegar ate ela.
+      device: (res.locals && res.locals._deviceSelo) || undefined,
       user: {
         id: user.id,
         name: user.name,
