@@ -2023,6 +2023,42 @@ app.patch('/api/conversations/:id', authenticateToken, async (req, res) => {
 });
 
 // 8. Conversations Routes: Get Details (Messages list)
+// [NOTA-INTERNA] Comentario interno do consultor, presos a uma conversa. Grava em lead_history
+// (type='nota'), NUNCA em `messages`: assim a nota nao existe na tabela de onde saem os envios e
+// nao ha como ela chegar ao cliente por reenvio, citacao ou contexto da IA.
+app.post('/api/conversations/:id/note', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const texto = String((req.body && req.body.text) || '').trim();
+  if (!texto) return res.status(400).json({ error: 'A nota está vazia.' });
+  try {
+    const convo = await getRow("SELECT id, name, phone, whatsapp_jid FROM conversations WHERE id = ?", [id]);
+    if (!convo) return res.status(404).json({ error: 'Conversa não encontrada' });
+    // Acha o lead da conversa (por jid ou pelos 8 ultimos digitos do telefone).
+    let lead = null;
+    if (convo.whatsapp_jid) lead = await getRow("SELECT id, name, phone FROM leads WHERE whatsapp_jid = ?", [convo.whatsapp_jid]);
+    if (!lead) {
+      const dig = String(convo.phone || '').replace(/\D/g, '');
+      if (dig.length >= 8) {
+        lead = await getRow(
+          "SELECT id, name, phone FROM leads WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1",
+          ['%' + dig.slice(-8) + '%']
+        );
+      }
+    }
+    const autor = (req.user && (req.user.name || req.user.email)) || 'consultor';
+    logLeadHistory({
+      leadId: lead ? lead.id : null,
+      phone: (lead && lead.phone) || convo.phone || '',
+      name: (lead && lead.name) || convo.name || '',
+      type: 'nota',
+      detail: texto,
+      meta: { convoId: id, interna: 1, autor: autor }
+    });
+    console.log('[NOTA-INTERNA] ' + autor + ' registrou uma nota na conversa ' + id + ' (' + texto.length + ' caracteres).');
+    res.json({ ok: true, autor: autor });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
@@ -2036,13 +2072,44 @@ app.get('/api/conversations/:id', authenticateToken, async (req, res) => {
       [id]
     );
 
+    // [NOTA-INTERNA] As notas dos consultores NAO vivem na tabela `messages` — elas ficam em
+    // lead_history (type='nota'). Isso e proposital: tudo que esta em `messages` pode, por algum
+    // caminho, acabar no aparelho do cliente (reenvio do painel de entregas, reenvio em lote
+    // automatico, citacao/quoted, contexto da IA). Aqui elas sao apenas MESCLADAS na linha do
+    // tempo, so para exibicao, com from='note'.
+    let _comNotas = messages;
+    try {
+      const _notas = await allRows(
+        "SELECT id, detail, meta, created_at FROM lead_history WHERE type = 'nota' AND meta LIKE ? ORDER BY created_at ASC",
+        ['%"convoId":"' + id + '"%']
+      );
+      if (_notas && _notas.length) {
+        const _itens = _notas.map(n => {
+          let autor = '';
+          try { const mt = JSON.parse(n.meta || '{}'); autor = mt.autor || ''; } catch (e) {}
+          const ts = Date.parse(n.created_at) || Date.now();
+          return {
+            id: 'nota_' + n.id,
+            from: 'note',
+            text: n.detail || '',
+            time: new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }),
+            type: 'note',
+            timestamp: ts,
+            autor: autor,
+            status: 0
+          };
+        });
+        _comNotas = messages.concat(_itens).sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
+      }
+    } catch (e) { console.error('[NOTA-INTERNA] merge:', e && e.message); }
+
     // Reset unread count
     await runQuery("UPDATE conversations SET unread = 0 WHERE id = ?", [id]);
 
     res.json({
       ...convo,
       online: Boolean(convo.online),
-      messages
+      messages: _comNotas
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
