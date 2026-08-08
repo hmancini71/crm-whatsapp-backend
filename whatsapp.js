@@ -885,6 +885,31 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
         // na 1ª mensagem, não só a partir da segunda. Também grava last_client_ts (persistente,
         // NÃO é zerado quando respondemos) usado para ordenar as colunas por antiguidade da msg do cliente.
         await runQuery("UPDATE leads SET lastClientReply = ?, last_client_ts = ? WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND phone LIKE ?)", [new Date().toISOString(), Date.now(), fromJid, `%${searchNumber}%`]);
+        // [BOARDV2-R34] R3 — mensagem do cliente traz o card para "Lead respondendo".
+        // O vendedor trabalha UMA subcoluna; o que precisa de resposta converge para la.
+        //   - grava coluna_origem (de onde veio) para o card poder VOLTAR pela R4;
+        //   - prioridade_fila = 1 (P1, topo da fila);
+        //   - so vale para PROPOSTA e FOLLOW-UP PAGAMENTO. Ficam de fora, de proposito:
+        //       'convertida' e qualquer card do pos (a propria regra R3 exclui Venda convertida);
+        //       'declinado', que ja tem reabertura propria acima (volta p/ Novo Leads) e que,
+        //         se entrasse aqui, traria ~103 cards de uma vez e ~11/dia — decisao do Henry, nao minha;
+        //       'novo', que tem as regras R1/R2 so dele;
+        //       cards em ponte (bridge=1), estado transitorio.
+        //   - card JA em 'tratamento' nao muda de coluna: so sobe para P1.
+        try {
+          if (lead && lead.id && Number(lead.bridge) !== 1 && !lead.pos_stage) {
+            if (lead.stage === 'proposta' || lead.stage === 'followup') {
+              await runQuery(
+                "UPDATE leads SET coluna_origem = COALESCE(NULLIF(coluna_origem,''), ?), stage = 'tratamento', prioridade_fila = 1 WHERE id = ?",
+                [lead.stage, lead.id]
+              );
+              console.log(`[BOARDV2-R3] "${lead.name}" veio de '${lead.stage}' para o Tratamento (cliente respondeu).`);
+              try { await logHistory(lead.id, lead.phone, lead.name, 'movimentacao', 'Cliente respondeu — card trazido para "Lead respondendo"', { from: lead.stage, to: 'tratamento', r3: 1 }); } catch (e) {}
+            } else if (lead.stage === 'tratamento') {
+              await runQuery("UPDATE leads SET prioridade_fila = 1 WHERE id = ?", [lead.id]);
+            }
+          }
+        } catch (e) { console.error('[BOARDV2-R3]', e && e.message); }
         // Carimba o número recebido se o lead ainda não tiver (vale para criar,
         // restaurar e existentes — backfill automático no próximo contato).
         if (ourNumber) {

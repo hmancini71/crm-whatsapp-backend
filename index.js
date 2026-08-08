@@ -992,6 +992,10 @@ if (!stage) {
     // o pos_stage é o que faz o card REALMENTE voltar ao pré (senão hasPosStage continuaria true e ele
     // ficaria preso no pós). Move pré ⇄ pós agora é simétrico e confiável.
     await runQuery("UPDATE leads SET stage = ?, pos_stage = NULL, bridge = 0 WHERE id = ?", [stage, id]);
+    // [BOARDV2-R34] Movimentacao MANUAL manda na origem: se o vendedor tirou o card do Tratamento
+    // por conta propria, a "coluna de origem" guardada pela R3 perdeu o sentido e e apagada — senao
+    // um "nao e demanda" futuro devolveria o card para um lugar que ja nao faz sentido.
+    if (stage !== 'tratamento') await runQuery("UPDATE leads SET coluna_origem = NULL, prioridade_fila = NULL WHERE id = ?", [id]);
     if (cur.stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '"', meta: { to: stage } });
     // Pós-transferência das colunas TERMINAIS:
     if (stage === 'convertida' && cur.stage !== 'convertida') {
@@ -4900,7 +4904,7 @@ setTimeout(() => { sweepPosUnclassified().catch(() => {}); }, 20 * 1000); // 1ª
 app.post('/api/leads/:id/not-demand', authenticateToken, async (req, res) => {
   const id = String(req.params.id || '').trim();
   try {
-    const lead = await getRow("SELECT id, whatsapp_jid, phone FROM leads WHERE id = ?", [id]);
+    const lead = await getRow("SELECT id, name, phone, whatsapp_jid, stage, coluna_origem FROM leads WHERE id = ?", [id]);
     if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
     let ts = Date.now();
     const convo = await findConvoForLead(lead);
@@ -4909,7 +4913,20 @@ app.post('/api/leads/:id/not-demand', authenticateToken, async (req, res) => {
       if (last && Number(last.timestamp)) ts = Number(last.timestamp);
     }
     await runQuery("UPDATE leads SET not_demand_ts = ?, lastClientReply = NULL WHERE id = ?", [ts, id]);
-    res.json({ success: true, not_demand_ts: ts });
+    // [BOARDV2-R34] R4 — o card volta para a coluna de onde a R3 o tirou.
+    // Sem coluna_origem (veio de 'Novos leads' por R1/R2/R2b, ou foi movido a mao), ele FICA onde
+    // esta, so sem a bolinha — exatamente o comportamento que existia antes deste pacote.
+    let devolvido = null;
+    if (lead.coluna_origem && lead.stage === 'tratamento') {
+      devolvido = lead.coluna_origem;
+      await runQuery("UPDATE leads SET stage = ?, coluna_origem = NULL, prioridade_fila = NULL WHERE id = ?", [devolvido, id]);
+      try { logLeadHistory({ leadId: id, phone: lead.phone, name: lead.name, type: 'movimentacao', detail: 'Marcado como "não é demanda" — devolvido para "' + stageLabel(devolvido) + '"', meta: { to: devolvido, r4: 1 } }); } catch (e) {}
+    } else if (lead.coluna_origem) {
+      // saiu do Tratamento por outro caminho: a origem perdeu o sentido, so limpa.
+      await runQuery("UPDATE leads SET coluna_origem = NULL WHERE id = ?", [id]);
+    }
+    bustLeadsCache(); // escreveu em leads → derruba o micro-cache do GET /api/leads
+    res.json({ success: true, not_demand_ts: ts, devolvido_para: devolvido });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
