@@ -72,6 +72,7 @@ console.warn = (...args) => {
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const crypto = require('crypto'); // [SENHA-MESTRA] selo de destravamento por navegador
 const JWT_SECRET = 'leadsdpi_secret_key_123!';
 
 app.use(cors());
@@ -357,6 +358,7 @@ app.patch('/api/users/:id', authenticateToken, async (req, res) => {
     const u = await getRow("SELECT * FROM users WHERE id = ?", [id]);
     if (!u) return res.status(404).json({ detail: "Usuário não encontrado" });
     const updates = [], params = [];
+    const _respExtra = {}; // [SENHA-MESTRA] campos extras devolvidos ao front (ex.: selo de destravamento)
     if (name !== undefined && String(name).trim()) {
       updates.push("name = ?"); params.push(String(name).trim());
       updates.push("avatar = ?"); params.push(String(name).trim().slice(0, 2).toUpperCase());
@@ -375,9 +377,35 @@ app.patch('/api/users/:id', authenticateToken, async (req, res) => {
       const nv = Array.isArray(nav_tabs) ? nav_tabs.map(s => String(s)).filter(Boolean).slice(0, 12) : [];
       updates.push("nav_tabs = ?"); params.push(nv.length ? JSON.stringify(nv) : '');
     }
-    if (password) { updates.push("password_hash = ?"); params.push(bcrypt.hashSync(String(password), 10)); }
+    // [SENHA-MESTRA] Trocar a senha de um usuario exige a SENHA DE ADMINISTRACAO (pedido do Henry,
+    // 2026-08-08). Ela nao vive no codigo nem no repositorio: o que fica guardado e um hash bcrypt
+    // em app_settings.master_pass_hash — mesmo quem ler o banco nao consegue deduzir a senha.
+    // A senha ATUAL do usuario nunca e mostrada em lugar nenhum (o GET /api/users nem devolve o
+    // hash); esta rota so GRAVA uma senha nova.
+    if (password) {
+      const _row = await getRow("SELECT value FROM app_settings WHERE key = 'master_pass_hash'", []);
+      const _hash = _row && _row.value;
+      if (!_hash) return res.status(500).json({ detail: 'A senha de administração ainda não foi configurada no servidor.' });
+      // [SENHA-MESTRA] Duas formas de autorizar: a senha em si, ou o SELO deste navegador.
+      // O selo e derivado (sha256 do segredo do servidor + o hash bcrypt da senha) — NAO e a senha
+      // e nao ha como voltar dele para a senha. Fica no navegador que ja acertou uma vez; em
+      // qualquer outra maquina a senha e pedida de novo. Trocar a senha-mestra muda o hash, o selo
+      // muda junto e TODOS os navegadores voltam a pedir.
+      const _selo = crypto.createHash('sha256').update(String(JWT_SECRET) + '|' + _hash).digest('hex');
+      const _master = String((req.body && req.body.master) || '');
+      const _token = String((req.body && req.body.master_token) || '');
+      const _okSenha = _master && bcrypt.compareSync(_master, _hash);
+      const _okSelo = _token && _token === _selo;
+      if (!_okSenha && !_okSelo) {
+        console.log('[SENHA-MESTRA] recusado — ' + ((req.user && (req.user.name || req.user.email)) || '?') + ' tentou trocar a senha do usuário ' + id);
+        return res.status(403).json({ detail: 'Senha de administração incorreta.', _pedirSenha: true });
+      }
+      updates.push("password_hash = ?"); params.push(bcrypt.hashSync(String(password), 10));
+      _respExtra.unlock = _selo; // devolvido só quando a autorização passou
+      console.log('[SENHA-MESTRA] senha do usuário ' + id + ' alterada por ' + ((req.user && (req.user.name || req.user.email)) || '?') + (_okSelo ? ' (navegador já destravado)' : ' (senha digitada)'));
+    }
     if (updates.length) { params.push(id); await runQuery("UPDATE users SET " + updates.join(", ") + " WHERE id = ?", params); }
-    res.json({ ok: true });
+    res.json(Object.assign({ ok: true }, _respExtra));
   } catch (e) { res.status(500).json({ detail: String(e) }); }
 });
 
