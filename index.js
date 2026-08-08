@@ -1298,6 +1298,38 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
       await runQuery(`UPDATE leads SET ${updates.join(", ")} WHERE id = ?`, params);
     }
 
+    // [BOARDV2-FUMANUAL] Marcar "Fazer follow-up" COM data manda o card para a subcoluna
+    // "Follow-up manual" do Tratamento inicial (pedido do Henry, 2026-08-08). Antes o card so ia
+    // para la se JA estivesse no Tratamento e sem bolinha acesa — quem agendava um retorno para um
+    // cliente que acabou de escrever via o card continuar na 1a subcoluna.
+    // Agendar um retorno E um atendimento: o vendedor tratou a mensagem e combinou a volta. Por isso
+    // a bolinha e apagada de forma PERSISTENTE (mesmo marcador do "nao e uma demanda"), senao a
+    // reconciliacao de 5 em 5 minutos a reacenderia e o card voltaria para a 1a subcoluna.
+    // Nao mexe em card do POS-VENDA, na ponte, nem nas colunas terminais.
+    if (String(priority || '') === 'followup') {
+      const _pos = await getRow("SELECT id, name, phone, stage, pos_stage, bridge, followup_date, whatsapp_jid FROM leads WHERE id = ?", [id]);
+      const _temData = _pos && String(_pos.followup_date || '').trim() !== '';
+      const _elegivel = _pos && _temData && !_pos.pos_stage && Number(_pos.bridge) !== 1
+        && _pos.stage !== 'convertida' && _pos.stage !== 'declinado';
+      if (_elegivel) {
+        bustLeadsCache();
+        if (_pos.stage !== 'tratamento') {
+          await runQuery("UPDATE leads SET stage = 'tratamento' WHERE id = ?", [id]);
+          logLeadHistory({ leadId: id, phone: _pos.phone, name: _pos.name, type: 'movimentacao', detail: 'Follow-up agendado — card movido para "Follow-up manual"', meta: { from: _pos.stage, to: 'tratamento', fu_manual: 1 } });
+        }
+        // Apaga a bolinha de forma persistente: o vendedor atendeu e combinou o retorno.
+        let _ts = Date.now();
+        try {
+          const _convo = await findConvoForLead(_pos);
+          if (_convo) {
+            const _ult = await getRow("SELECT timestamp FROM messages WHERE conversationId = ? AND `from` = 'them' ORDER BY timestamp DESC LIMIT 1", [_convo.id]);
+            if (_ult && Number(_ult.timestamp)) _ts = Number(_ult.timestamp);
+          }
+        } catch (e) {}
+        await runQuery("UPDATE leads SET lastClientReply = NULL, not_demand_ts = ?, prioridade_fila = NULL WHERE id = ?", [_ts, id]);
+      }
+    }
+
     const updatedLead = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
     sendWebhook('lead.updated', { ...updatedLead, tags: updatedLead.tags ? JSON.parse(updatedLead.tags) : [] });
     res.json({
