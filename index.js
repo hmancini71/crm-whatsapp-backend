@@ -161,7 +161,7 @@ app.post('/api/debug/fix-stages', authenticateToken, async (req, res) => {
   console.log('[fix-stages] executado por: ' + ((req.user && (req.user.name || req.user.email)) || '?') + ' em ' + new Date().toISOString());
   try {
     const correctStages = [
-      { id: "novo",       title: "Novo Leads",              color: "#71717a" },
+      { id: "novo",       title: "Novos Leads",              color: "#71717a" },
       { id: "tratamento", title: "Tratamento inicial",      color: "#0ea5e9" },
       { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
       { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
@@ -991,12 +991,28 @@ if (!stage) {
     // PRÉ-VENDA: coluna pré (não-ponte) → grava stage, SAI da ponte (bridge=0) e LIMPA pos_stage. Limpar
     // o pos_stage é o que faz o card REALMENTE voltar ao pré (senão hasPosStage continuaria true e ele
     // ficaria preso no pós). Move pré ⇄ pós agora é simétrico e confiável.
-    await runQuery("UPDATE leads SET stage = ?, pos_stage = NULL, bridge = 0 WHERE id = ?", [stage, id]);
+    // [BOARDV2-R10] Card que VOLTA DO AMBIENTE POS-VENDA entra em "Lead respondendo".
+    // Quem estava no pos (pos_stage preenchido) ou na coluna-ponte e retorna ao pre nao vai mais
+    // parar numa coluna qualquer: cai no Tratamento inicial, na subcoluna onde o vendedor trabalha,
+    // com prioridade de fila 2 (logo abaixo de quem tem mensagem do cliente esperando).
+    // Excecao: se o destino escolhido JA for uma coluna terminal (convertida/declinado), respeita —
+    // ali a intencao e explicita e as regras proprias dessas colunas ja validaram a entrada.
+    const _voltouDoPos = (!!cur.pos_stage || Number(cur.bridge) === 1);
+    let _stageFinal = stage;
+    if (_voltouDoPos && stage !== 'convertida' && stage !== 'declinado' && stage !== 'tratamento') {
+      _stageFinal = 'tratamento';
+      console.log(`[BOARDV2-R10] "${cur.name}" voltou do pos-venda → Lead respondendo (destino pedido era '${stage}').`);
+    }
+    await runQuery("UPDATE leads SET stage = ?, pos_stage = NULL, bridge = 0 WHERE id = ?", [_stageFinal, id]);
+    if (_voltouDoPos && _stageFinal === 'tratamento') {
+      await runQuery("UPDATE leads SET prioridade_fila = 2 WHERE id = ?", [id]);
+      try { logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Voltou do ambiente pós-venda — entrou em "Lead respondendo"', meta: { to: 'tratamento', r10: 1 } }); } catch (e) {}
+    }
     // [BOARDV2-R34] Movimentacao MANUAL manda na origem: se o vendedor tirou o card do Tratamento
     // por conta propria, a "coluna de origem" guardada pela R3 perdeu o sentido e e apagada — senao
     // um "nao e demanda" futuro devolveria o card para um lugar que ja nao faz sentido.
-    if (stage !== 'tratamento') await runQuery("UPDATE leads SET coluna_origem = NULL, prioridade_fila = NULL WHERE id = ?", [id]);
-    if (cur.stage !== stage) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(stage) + '"', meta: { to: stage } });
+    if (_stageFinal !== 'tratamento') await runQuery("UPDATE leads SET coluna_origem = NULL, prioridade_fila = NULL WHERE id = ?", [id]);
+    if (cur.stage !== _stageFinal) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para "' + stageLabel(_stageFinal) + '"', meta: { to: _stageFinal } });
     // Pós-transferência das colunas TERMINAIS:
     if (stage === 'convertida' && cur.stage !== 'convertida') {
       // DATA DA VENDA: padrão = dia da transferência (editável depois no card). Só preenche se vazio.
@@ -1154,6 +1170,19 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
       params.push(comments);
     }
     if (priority !== undefined) {
+      // [BOARDV2-R5] Follow-up manual EXIGE data (pedido do Henry, 2026-08-08). Sem data o card
+      // ficava parado em "Follow-up manual" para sempre, porque nunca vencia — eram 338 cards assim.
+      // Aceita a data que veio no proprio corpo da requisicao ou a que ja esta gravada no lead.
+      if (String(priority) === 'followup') {
+        const _atual = await getRow("SELECT followup_date FROM leads WHERE id = ?", [id]);
+        const _dataFinal = (followup_date !== undefined ? followup_date : (_atual && _atual.followup_date));
+        if (!String(_dataFinal || '').trim()) {
+          return res.status(422).json({
+            error: 'Para marcar o card como "Follow-up manual" é preciso informar a data do follow-up.',
+            _missing: { followup_date: true }
+          });
+        }
+      }
       updates.push("priority = ?");
       params.push(priority);
     }
@@ -1226,7 +1255,7 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
 
 // 5. Stages Routes: Get All (self-healing: if old stages found, fix them)
 const CORRECT_STAGES = [
-  { id: "novo",       title: "Novo Leads",              color: "#71717a" },
+  { id: "novo",       title: "Novos Leads",              color: "#71717a" },
   { id: "tratamento", title: "Tratamento inicial",      color: "#0ea5e9" },
   { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
   { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
@@ -2966,7 +2995,7 @@ function posStageFor(lead) {
 // ===== HISTÓRICO do lead (linha do tempo) — ver tabela lead_history (db.js) =====
 function _histId() { return 'h_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 const PRE_STAGE_LABELS = {
-  novo: 'Novo Leads', tratamento: 'Tratamento inicial', proposta: 'Proposta enviada',
+  novo: 'Novos Leads', tratamento: 'Tratamento inicial', proposta: 'Proposta enviada',
   followup: 'Follow-up pagamento', convertida: 'Venda convertida', declinado: 'Declinou/cancelou',
   clientes_antigos: 'Comunicação com ambiente Pós-Venda'
 };
@@ -5670,7 +5699,13 @@ async function novoCadenceSweep() {
       const h = parseInt(p.find(x => x.type === 'hour').value, 10);
       open = (['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(wd) && h >= 9 && h < 18) || (wd === 'Sat' && h >= 9 && h < 13);
     } catch (e) {}
-    const NUDGE1_MS = 20 * 60 * 1000, NUDGE2_MS = 2 * 3600 * 1000, MOVE_MS = 60 * 60 * 1000;
+    // [BOARDV2-R2b] Cadencia de "Novos Leads" (pedido do Henry, 2026-08-08): pelo menos QUATRO
+    // tentativas antes de o card sair da coluna. As duas primeiras seguem rapidas (confirmar que a
+    // mensagem chegou); a 3a e a 4a respeitam a janela de 24h de silencio. So depois da 4a, e com
+    // mais 24h sem resposta, o card vai para o Tratamento inicial. Era: 2 nudges e saida 1h depois.
+    const NOVO_NUDGE_MAX = 4;
+    const NUDGE_ESPERA_MS = [20 * 60 * 1000, 2 * 3600 * 1000, 24 * 3600 * 1000, 24 * 3600 * 1000];
+    const MOVE_MS = 24 * 60 * 60 * 1000;
     const CAP = 15; // anti-spam por rodada (rodada a cada 5 min)
     let sent = 0;
     const firstName = (l) => {
@@ -5691,20 +5726,21 @@ async function novoCadenceSweep() {
         const elapsed = Date.now() - (Number(last.timestamp) || 0);
         // "Se não responder em 1 hora [após a cobrança do follow-up], move para Tratamento
         // inicial / Cliente sem interesse" — mover card não é mensagem: roda a qualquer hora.
-        if ((l.ai_fu_count || 0) >= 1) {
+        // [BOARDV2-R2b] So sai de "Novos Leads" depois das 4 tentativas E de mais 24h em silencio.
+        if ((Number(l.novo_nudge_count) || 0) >= NOVO_NUDGE_MAX) {
           if (elapsed >= MOVE_MS) {
-            await runQuery("UPDATE leads SET stage = 'tratamento' WHERE id = ? AND stage = 'novo'", [l.id]);
-            const note = '📥 [Automático] Movido para "Tratamento inicial" (Cliente com pouco interesse): sem resposta 1h após a cobrança do follow-up (PASSO 4 das instruções da 1ª interação).';
+            await runQuery("UPDATE leads SET stage = 'tratamento', prioridade_fila = 3, coluna_origem = 'novo' WHERE id = ? AND stage = 'novo'", [l.id]);
+            const note = '📥 [Automático] Movido para "Tratamento inicial": foram feitas ' + NOVO_NUDGE_MAX + ' tentativas de contato em "Novos Leads" e o cliente ficou mais 24h sem responder.';
             await runQuery("UPDATE leads SET comments = TRIM(COALESCE(comments,'') || char(10) || ?) WHERE id = ?", [note, l.id]);
-            try { await logLeadHistory({ leadId: l.id, phone: l.phone, name: l.name, type: 'movimentacao', detail: 'Movido para "Tratamento inicial" (sem resposta 1h após o follow-up — PASSO 4)', meta: { to: 'tratamento' } }); } catch (e) {}
+            try { await logLeadHistory({ leadId: l.id, phone: l.phone, name: l.name, type: 'movimentacao', detail: 'Movido para "Tratamento inicial" — ' + NOVO_NUDGE_MAX + ' tentativas em "Novos Leads" sem resposta', meta: { to: 'tratamento', r2b: 1 } }); } catch (e) {}
             try { const full = await getRow("SELECT * FROM leads WHERE id = ?", [l.id]); if (full) sendWebhook('lead.stage_changed', { ...full, tags: full.tags ? JSON.parse(full.tags) : [] }); } catch (e) {}
-            console.log('[cadência novo] "' + l.name + '": movido p/ Tratamento (col 4) — sem resposta 1h após o follow-up.');
+            console.log('[cadência novo] "' + l.name + '": movido p/ Tratamento — ' + NOVO_NUDGE_MAX + ' tentativas sem resposta.');
           }
           continue;
         }
         const count = Number(l.novo_nudge_count) || 0;
-        if (count >= 2) continue; // daqui em diante quem age é o aiFollowUpSweep (24h)
-        const need = count === 0 ? NUDGE1_MS : NUDGE2_MS;
+        if (count >= NOVO_NUDGE_MAX) continue; // ja fez as 4 — agora e so esperar as 24h p/ mover
+        const need = NUDGE_ESPERA_MS[Math.min(count, NUDGE_ESPERA_MS.length - 1)];
         if (elapsed < need) continue;
         if (!open) continue; // fora da janela: espera abrir (as condições de tempo continuam valendo)
         if (sent >= CAP) { console.log('[cadência novo] limite da rodada (' + CAP + ') atingido; o restante segue na próxima.'); break; }
@@ -5712,9 +5748,13 @@ async function novoCadenceSweep() {
         const freshNow = await getRow("SELECT stage, archived, bot_ativo, lastClientReply FROM leads WHERE id = ?", [l.id]);
         if (!freshNow || freshNow.archived || freshNow.stage !== 'novo' || freshNow.lastClientReply || freshNow.bot_ativo === 0) continue;
         const nome = firstName(l);
-        const texto = count === 0
-          ? ('Olá' + (nome ? ' ' + nome : '') + ', gostaria de confirmar se recebeu a mensagem acima.')
-          : ('Olá' + (nome ? ' ' + nome : '') + ', tudo bem? Sigo à disposição para dar sequência ao seu atendimento. Posso te ajudar com as informações sobre o seu processo?');
+        const _textos = [
+          'Olá' + (nome ? ' ' + nome : '') + ', gostaria de confirmar se recebeu a mensagem acima.',
+          'Olá' + (nome ? ' ' + nome : '') + ', tudo bem? Sigo à disposição para dar sequência ao seu atendimento. Posso te ajudar com as informações sobre o seu processo?',
+          'Olá' + (nome ? ' ' + nome : '') + ', passando para saber se ainda tem interesse em seguir com o processo. Se preferir, me diga um horário bom para um consultor te ligar.',
+          'Olá' + (nome ? ' ' + nome : '') + ', última tentativa por aqui: seu atendimento segue aberto, é só me chamar quando puder. Posso te ajudar em alguma coisa?'
+        ];
+        const texto = _textos[Math.min(count, _textos.length - 1)];
         const _gate = await antiban.canSendProactive(conv.account); // cap diário/horário + warm-up
         if (!_gate.ok) { console.log('[cadência novo] número ' + conv.account + ': ' + _gate.reason + ' — pausando a rodada.'); break; }
         await antiban.pace(conv.account); // intervalo + jitter anti-rajada

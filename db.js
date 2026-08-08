@@ -627,7 +627,7 @@ db.serialize(() => {
   db.get("SELECT COUNT(*) as count FROM stages", (err, row) => {
     if (row && row.count === 0) {
       const initialStages = [
-        ["novo",           "Novo Leads",               "#71717a"],
+        ["novo",           "Novos Leads",               "#71717a"],
         ["tratamento",     "Tratamento inicial",       "#0ea5e9"],
         ["proposta",       "Proposta enviada",         "#f59e0b"],
         ["followup",       "Follow-up pagamento",      "#ec4899"],
@@ -915,7 +915,7 @@ db.serialize(() => {
 
   // Safe migration: 'service_closed' = atendimento ENCERRADO pelo botão 🔚 (2026-07-05). O card
   // fica VISÍVEL em "Lead declinou/cancelado"; se o cliente mandar nova mensagem, o whatsapp.js
-  // reabre o card em "Novo Leads" (pré) e zera a flag. Histórico de mensagens nunca é apagado.
+  // reabre o card em "Novos Leads" (pré) e zera a flag. Histórico de mensagens nunca é apagado.
   db.all("PRAGMA table_info(leads)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'service_closed')) {
       db.run("ALTER TABLE leads ADD COLUMN service_closed INTEGER DEFAULT 0", (alterErr) => {
@@ -1128,7 +1128,7 @@ db.serialize(() => {
     console.log("Migration: sync stages to new 5-column pipeline...");
     db.run("DELETE FROM stages");
     const newStages = [
-      ["novo",           "Novo Leads",               "#71717a"],
+      ["novo",           "Novos Leads",               "#71717a"],
       ["tratamento",     "Tratamento inicial",       "#0ea5e9"],
       ["proposta",       "Proposta enviada",         "#f59e0b"],
       ["followup",       "Follow-up pagamento",      "#ec4899"],
