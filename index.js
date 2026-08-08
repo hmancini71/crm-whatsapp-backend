@@ -425,23 +425,18 @@ app.patch('/api/users/:id', authenticateToken, async (req, res) => {
       const _row = await getRow("SELECT value FROM app_settings WHERE key = 'master_pass_hash'", []);
       const _hash = _row && _row.value;
       if (!_hash) return res.status(500).json({ detail: 'A senha de administração ainda não foi configurada no servidor.' });
-      // [SENHA-MESTRA] Duas formas de autorizar: a senha em si, ou o SELO deste navegador.
-      // O selo e derivado (sha256 do segredo do servidor + o hash bcrypt da senha) — NAO e a senha
-      // e nao ha como voltar dele para a senha. Fica no navegador que ja acertou uma vez; em
-      // qualquer outra maquina a senha e pedida de novo. Trocar a senha-mestra muda o hash, o selo
-      // muda junto e TODOS os navegadores voltam a pedir.
-      const _selo = crypto.createHash('sha256').update(String(JWT_SECRET) + '|' + _hash).digest('hex');
+      // [SENHA-MESTRA] A senha de administracao e pedida SEMPRE (decisao do Henry, 2026-08-08:
+      // "eu quero que ele informe a senha de administrador sempre"). Nao ha atalho, selo nem
+      // memoria de navegador nesta operacao — trocar a senha de alguem exige digitar a senha na
+      // hora, toda vez. (O selo de dispositivo continua existindo, mas so para a trava de ACESSO
+      // ao CRM no login: sao coisas diferentes.)
       const _master = String((req.body && req.body.master) || '');
-      const _token = String((req.body && req.body.master_token) || '');
-      const _okSenha = _master && bcrypt.compareSync(_master, _hash);
-      const _okSelo = _token && _token === _selo;
-      if (!_okSenha && !_okSelo) {
+      if (!_master || !bcrypt.compareSync(_master, _hash)) {
         console.log('[SENHA-MESTRA] recusado — ' + ((req.user && (req.user.name || req.user.email)) || '?') + ' tentou trocar a senha do usuário ' + id);
-        return res.status(403).json({ detail: 'Senha de administração incorreta.', _pedirSenha: true });
+        return res.status(403).json({ detail: 'Senha de administração incorreta.' });
       }
       updates.push("password_hash = ?"); params.push(bcrypt.hashSync(String(password), 10));
-      _respExtra.unlock = _selo; // devolvido só quando a autorização passou
-      console.log('[SENHA-MESTRA] senha do usuário ' + id + ' alterada por ' + ((req.user && (req.user.name || req.user.email)) || '?') + (_okSelo ? ' (navegador já destravado)' : ' (senha digitada)'));
+      console.log('[SENHA-MESTRA] senha do usuário ' + id + ' alterada por ' + ((req.user && (req.user.name || req.user.email)) || '?'));
     }
     if (updates.length) { params.push(id); await runQuery("UPDATE users SET " + updates.join(", ") + " WHERE id = ?", params); }
     res.json(Object.assign({ ok: true }, _respExtra));
