@@ -4883,12 +4883,20 @@ async function reconcileReplyDots() {
         }
       } catch (e) {}
 
-      const lastTs = Number(last.timestamp) || 0;
+      // [BOARDV2-BOLINHA] (pedido do Henry, 2026-08-08) So RESPOSTA HUMANA apaga a bolinha.
+      // Antes bastava a ultima mensagem ser nossa — e a IA respondendo ja apagava o sinal, deixando
+      // o cliente esperando sem ninguem ver. Agora a conta e outra: a bolinha fica acesa enquanto a
+      // ultima mensagem do CLIENTE for mais nova que a ultima resposta de GENTE (from='me' e ai=0)
+      // e mais nova que o marcador "nao e demanda". Mensagens da IA e a auto-resposta de fora do
+      // horario (ambas gravadas com ai=1) sao ignoradas nesta conta.
       const ndTs = Number(l.not_demand_ts) || 0;
-      const awaiting = (last.from === 'them') && (lastTs > ndTs);
+      const _ultCliente = await getRow("SELECT MAX(timestamp) AS ts FROM messages WHERE conversationId = ? AND `from` = 'them'", [convoId]);
+      const _ultHumano = await getRow("SELECT MAX(timestamp) AS ts FROM messages WHERE conversationId = ? AND `from` = 'me' AND COALESCE(ai,0) = 0", [convoId]);
+      const tsCliente = Number(_ultCliente && _ultCliente.ts) || 0;
+      const tsHumano = Number(_ultHumano && _ultHumano.ts) || 0;
+      const awaiting = tsCliente > 0 && tsCliente > ndTs && tsCliente > tsHumano;
       if (awaiting) {
-        const iso = lastTs ? new Date(lastTs).toISOString() : new Date().toISOString();
-        await runQuery("UPDATE leads SET lastClientReply = ? WHERE id = ?", [iso, l.id]);
+        await runQuery("UPDATE leads SET lastClientReply = ? WHERE id = ?", [new Date(tsCliente).toISOString(), l.id]);
       } else {
         await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [l.id]);
       }

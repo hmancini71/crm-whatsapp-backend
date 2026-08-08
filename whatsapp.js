@@ -281,7 +281,9 @@ async function maybeAutoReply(sock, fromJid, convoId) {
     await sock.sendMessage(fromJid, { text: texto });
     const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
     const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
-    await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, our_number) VALUES (?, ?, ?, ?, ?, ?, ?)", [msgId, convoId, 'me', texto, timeStr, Date.now(), sockNumber(sock)]);
+    // [BOARDV2-BOLINHA] ai = 1: a auto-resposta de fora do horario e AUTOMATICA. Sem esta marca
+    // ela era contada como resposta humana e apagava a bolinha de tempo do cliente.
+    await runQuery("INSERT INTO messages (id, conversationId, `from`, text, time, timestamp, ai, our_number) VALUES (?, ?, ?, ?, ?, ?, 1, ?)", [msgId, convoId, 'me', texto, timeStr, Date.now(), sockNumber(sock)]);
     await runQuery("UPDATE conversations SET lastTime = ?, last_autoreply = ? WHERE id = ?", [timeStr, Date.now(), convoId]);
     bustConversationsCache(); // auto-resposta gravada — derruba o micro-cache do GET /api/conversations
     console.log(`[autoReply] mensagem ${feriado ? 'de FERIADO' : 'fora do horário'} ENVIADA para ${fromJid}`);
@@ -988,8 +990,9 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
                 [aiMsgId, convoId, 'me', replyText, tAi, Date.now(), sockNumber(sock)]
               );
               await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convoId]);
-              // IA respondeu → zera o controle de tempo (fomos os últimos a falar)
-              await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [aiLead.id]);
+              // [BOARDV2-BOLINHA] A IA respondeu, mas isso NAO zera o controle de tempo: so
+              // resposta de GENTE apaga a bolinha (pedido do Henry, 2026-08-08). Enquanto um humano
+              // nao atender, o card segue sinalizando que o cliente esta esperando.
               if (ai.dados_coletados && ai.visa_tag) {
                 // SÓ transfere após identificar o serviço E ter perguntado o horário do contato telefônico:
                 // grava a TAG do serviço, marca "Novo lead" e move p/ o Tratamento inicial (1ª coluna).
@@ -1009,11 +1012,9 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
           }
         } catch (aiErr) { console.error('[IA novo-lead]', aiErr && aiErr.message); }
         } else {
-          // NÓS respondemos (mensagem de saída): zera o lastClientReply para o
-          // "controle de tempo" sumir — ele só vale enquanto o CLIENTE foi o último.
+          // NÓS respondemos (mensagem de saída).
           const sn = fromJid.split('@')[0];
           const snTail = sn.replace(/\D/g, '').slice(-8);
-          await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?)", [fromJid, `%${snTail}%`]);
           // A auto-resposta de fora do horário NÃO conta como atendimento:
           // não pode mover o lead de "Novo Leads" para "Tratamento inicial".
           let isAutoReply = false;
@@ -1022,7 +1023,13 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
             const bh = bhRow && bhRow.value ? JSON.parse(bhRow.value) : null;
             if (bh && bh.message && text && String(text).trim() === String(bh.message).trim()) isAutoReply = true;
           } catch (e) {}
-          if (!isAutoReply && !_aiSentIds.has(msg.key.id)) {
+          const _humano = (!isAutoReply && !_aiSentIds.has(msg.key.id));
+          // [BOARDV2-BOLINHA] So resposta de GENTE apaga a bolinha. Auto-resposta de fora do
+          // horario e mensagem da IA nao contam como atendimento — o cliente continua esperando.
+          if (_humano) {
+            await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?)", [fromJid, `%${snTail}%`]);
+          }
+          if (_humano) {
             // Mensagem de um HUMANO (não auto-resposta, não IA).
             // Casa por jid E por telefone normalizado (8 últimos dígitos), robusto a formatação.
             const tail = sn.replace(/\D/g, '').slice(-8);
@@ -1420,7 +1427,7 @@ async function processNovoBacklog(limit) {
         [aiMsgId, convo.id, replyText, tAi, Date.now(), sockNumber(sock)]
       );
       await runQuery("UPDATE conversations SET lastTime = ? WHERE id = ?", [tAi, convo.id]);
-      await runQuery("UPDATE leads SET lastClientReply = NULL WHERE id = ?", [lead.id]);
+      // [BOARDV2-BOLINHA] backlog da IA tambem NAO zera a bolinha — so resposta humana zera.
       sent++; done++;
       if (ai.dados_coletados && ai.visa_tag) {
         await runQuery("UPDATE leads SET stage = 'tratamento', priority = 'novolead', tags = ? WHERE id = ? AND stage = 'novo'", [JSON.stringify([ai.visa_tag]), lead.id]);
