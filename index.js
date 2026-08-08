@@ -191,6 +191,27 @@ app.use((req, res, next) => {
   next();
 });
 
+// [TRAVA-MAQUINA] Selo da autorizacao vigente, em cache curto. Toda sessao carrega a marca do
+// selo com que foi criada; se a senha de autorizacao mudar, o selo muda e as sessoes antigas
+// deixam de valer NA HORA — nao adianta ter o CRM ja aberto nem uma versao antiga da tela.
+let _seloCache = { ts: 0, valor: null };
+async function seloAtual() {
+  const agora = Date.now();
+  if (_seloCache.valor !== null && (agora - _seloCache.ts) < 15000) return _seloCache.valor;
+  let v = '';
+  try {
+    const lock = await getRow("SELECT value FROM app_settings WHERE key = 'device_lock'", []);
+    const ligado = !lock || String(lock.value || 'on').toLowerCase() !== 'off';
+    if (ligado) {
+      const m = await getRow("SELECT value FROM app_settings WHERE key = 'master_pass_hash'", []);
+      if (m && m.value) v = crypto.createHash('sha256').update(String(JWT_SECRET) + '|' + m.value).digest('hex').slice(0, 16);
+    }
+  } catch (e) {}
+  _seloCache = { ts: agora, valor: v };
+  return v;
+}
+function bustSeloCache() { _seloCache = { ts: 0, valor: null }; }
+
 // Authentication middleware
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -200,10 +221,19 @@ function authenticateToken(req, res, next) {
     return res.status(401).json({ detail: "Não autenticado" });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, JWT_SECRET, async (err, user) => {
     if (err) {
       return res.status(403).json({ detail: "Token inválido ou expirado" });
     }
+    // [TRAVA-MAQUINA] A sessao so vale enquanto a autorizacao vigente for a mesma com que ela
+    // nasceu. Trocou a senha de autorizacao? Todas as sessoes caem na hora — inclusive as que ja
+    // estavam abertas em computadores que voce quer tirar do ar.
+    try {
+      const _sv = await seloAtual();
+      if (_sv && String(user && user.dv || '') !== _sv) {
+        return res.status(401).json({ detail: 'Sessão encerrada: a autorização deste computador foi revogada. Entre novamente.', _precisaAutorizarMaquina: true });
+      }
+    } catch (e) {}
     req.user = user;
     next();
   });
@@ -285,7 +315,8 @@ app.post('/api/auth/login', async (req, res) => {
       name: user.name,
       role: user.role,
       avatar: user.avatar,
-      env: envSel
+      env: envSel,
+      dv: await seloAtual() // [TRAVA-MAQUINA] marca da autorizacao vigente
     };
 
     const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
