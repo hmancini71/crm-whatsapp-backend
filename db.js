@@ -587,6 +587,10 @@ db.serialize(() => {
       // [BOARDV2-FUHORA] Horario do follow-up (pedido do Henry, 2026-08-08): "muitas vezes o cliente
       // pede para ligar em determinado horario". Guarda HH:MM; vazio = so a data, como era antes.
       if (!tem('followup_time')) db.run("ALTER TABLE leads ADD COLUMN followup_time TEXT DEFAULT NULL", () => {});
+      // [PROPOSTA] Registro de que a proposta comercial foi enviada ao cliente (pedido do Henry,
+      // 2026-08-08). Substitui a coluna "Proposta enviada" do funil: guarda QUANDO foi enviada e
+      // alimenta a tarja PROPOSTA ENVIADA no card. Vazio = proposta ainda nao enviada.
+      if (!tem('proposta_enviada_em')) db.run("ALTER TABLE leads ADD COLUMN proposta_enviada_em TEXT DEFAULT NULL", () => {});
     } catch (e) { console.error('[boardv2] migracao passo 1:', e && e.message); }
   });
 
@@ -632,8 +636,6 @@ db.serialize(() => {
       const initialStages = [
         ["novo",           "Novos Leads",               "#71717a"],
         ["tratamento",     "Tratamento inicial",       "#0ea5e9"],
-        ["proposta",       "Proposta enviada",         "#f59e0b"],
-        ["followup",       "Follow-up pagamento",      "#ec4899"],
         ["convertida",     "Venda convertida",         "#16a34a"],
         ["declinado",      "Lead declinou/cancelado",  "#ef4444"],
         ["clientes_antigos", "Comunicação com ambiente Pós-Venda", "#6366f1"]
@@ -1130,12 +1132,15 @@ db.serialize(() => {
   db.serialize(() => {
     console.log("Migration: sync stages to new 5-column pipeline...");
     db.run("DELETE FROM stages");
+    // [PROPOSTA] Lista COMPLETA e igual ao CORRECT_STAGES do index.js. Antes faltavam aqui
+    // "Venda convertida" e a coluna-ponte: como este bloco faz DELETE FROM stages a cada boot, o
+    // board ficava sem essas duas colunas ate alguem abrir o pipeline e o self-healing recria-las.
     const newStages = [
       ["novo",           "Novos Leads",               "#71717a"],
       ["tratamento",     "Tratamento inicial",       "#0ea5e9"],
-      ["proposta",       "Proposta enviada",         "#f59e0b"],
-      ["followup",       "Follow-up pagamento",      "#ec4899"],
-      ["declinado",      "Lead declinou/cancelado",  "#ef4444"]
+      ["convertida",     "Venda convertida",         "#16a34a"],
+      ["declinado",      "Lead declinou/cancelado",  "#ef4444"],
+      ["clientes_antigos", "Comunicação com ambiente Pós-Venda", "#6366f1"]
     ];
     const stmt = db.prepare("INSERT OR REPLACE INTO stages VALUES (?, ?, ?)");
     newStages.forEach(s => stmt.run(s));
@@ -1143,7 +1148,11 @@ db.serialize(() => {
 
     // Migrate existing leads to fit the new stage IDs:
     db.run("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
-    db.run("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
+    db.run("UPDATE leads SET stage = 'tratamento' WHERE stage = 'fechado'"); // [PROPOSTA]
+    // [PROPOSTA] As colunas "Proposta enviada" e "Follow-up pagamento" foram extintas em 2026-08-08.
+    // Esta migracao roda ANTES dos cortes por lista abaixo — sem ela, os cards dessas etapas seriam
+    // jogados em 'convertida' (entrando como faturamento!) ou em 'novo'.
+    db.run("UPDATE leads SET stage = 'tratamento' WHERE stage IN ('proposta','followup')");
     // ATENÇÃO: 'convertida' e 'clientes_antigos' PRECISAM estar nesta lista. Sem elas, todo restart
     // do backend resetava esses leads para 'novo' (sumiam da coluna). BUG corrigido.
     // RESGATE (antes do reset abaixo): leads com etapa fora do conjunto pré e SEM pos_stage são
@@ -1151,10 +1160,10 @@ db.serialize(() => {
     // Viram convertida + pos_stage (a própria etapa se for coluna pós válida; senão vão para
     // "Recém Contratados" — a coluna "Mensagens novas para organizar"/para_classificar foi EXTINTA
     // em 2026-07-03 a pedido do Henry), ficando VISÍVEIS no board pós em vez de vazarem p/ o pré.
-    db.run("UPDATE leads SET pos_stage = CASE WHEN stage IN ('clientes_antigos_pos','vendas_concretizadas','amer_msgs_novas','visto_amer_semconta','visto_amer_comconta','visto_amer_agendado','visto_amer_envio_passaporte','visto_amer_concluido','visto_cana_formulario','visto_cana_oficiais','visto_cana_aprovacao','visto_cana_envio','visto_cana_biometria','visto_cana_finalizado','visto_port_formulario','visto_port_entrevista','visto_port_aprovacao','visto_port_agendamento','visto_port_finalizado','visto_aust_formulario','visto_aust_oficiais','visto_aust_pagamento','visto_aust_finalizado','visto_mex_formulario','visto_mex_entrevista','visto_mex_finalizado','visto_bra_documentacao','visto_bra_entrevista','ital_formulario','ital_aire','ital_passaporte','outros') THEN stage ELSE 'vendas_concretizadas' END, stage = 'convertida' WHERE (pos_stage IS NULL OR pos_stage = '') AND stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')", (rErr) => {
+    db.run("UPDATE leads SET pos_stage = CASE WHEN stage IN ('clientes_antigos_pos','vendas_concretizadas','amer_msgs_novas','visto_amer_semconta','visto_amer_comconta','visto_amer_agendado','visto_amer_envio_passaporte','visto_amer_concluido','visto_cana_formulario','visto_cana_oficiais','visto_cana_aprovacao','visto_cana_envio','visto_cana_biometria','visto_cana_finalizado','visto_port_formulario','visto_port_entrevista','visto_port_aprovacao','visto_port_agendamento','visto_port_finalizado','visto_aust_formulario','visto_aust_oficiais','visto_aust_pagamento','visto_aust_finalizado','visto_mex_formulario','visto_mex_entrevista','visto_mex_finalizado','visto_bra_documentacao','visto_bra_entrevista','ital_formulario','ital_aire','ital_passaporte','outros') THEN stage ELSE 'vendas_concretizadas' END, stage = 'convertida' WHERE (pos_stage IS NULL OR pos_stage = '') AND stage NOT IN ('novo', 'tratamento', 'convertida', 'declinado', 'clientes_antigos')", (rErr) => {
       if (rErr) console.error('Resgate de leads com etapa fantasma:', rErr.message);
       // Só DEPOIS do resgate o reset de segurança pode rodar (agora sem engolir cards do pós).
-      db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
+      db.run("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'convertida', 'declinado', 'clientes_antigos')");
     });
     // Coluna extinta: qualquer card que ainda esteja (ou venha a cair) em 'para_classificar' vai
     // p/ Recém Contratados — sem isso ficaria INVISÍVEL no board. Idempotente, roda a cada boot.

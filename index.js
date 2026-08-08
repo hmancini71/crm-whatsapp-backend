@@ -163,8 +163,6 @@ app.post('/api/debug/fix-stages', authenticateToken, async (req, res) => {
     const correctStages = [
       { id: "novo",       title: "Novos Leads",              color: "#71717a" },
       { id: "tratamento", title: "Tratamento inicial",      color: "#0ea5e9" },
-      { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
-      { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
       { id: "convertida", title: "Venda convertida",        color: "#16a34a" },
       { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" },
       { id: "clientes_antigos", title: "Comunicação com ambiente Pós-Venda",  color: "#6366f1" }
@@ -174,8 +172,9 @@ app.post('/api/debug/fix-stages', authenticateToken, async (req, res) => {
       await runQuery("INSERT INTO stages (id, title, color) VALUES (?, ?, ?)", [s.id, s.title, s.color]);
     }
     await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
-    await runQuery("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
-    await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
+    await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'fechado'"); // [PROPOSTA]
+    await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage IN ('proposta','followup')"); // [PROPOSTA] coluna extinta -> Tratamento (nunca 'novo')
+    await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'convertida', 'declinado', 'clientes_antigos')");
     const stages = await allRows("SELECT * FROM stages");
     res.json({ success: true, stages });
   } catch (err) {
@@ -789,7 +788,7 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       // recv_number) tenha virado pós depois. Sem isso, leads antigos da 3094 sumiam do pré e
       // inundavam "Mensagens novas para organizar" no pós (caso JD Crawford). Leads 'novo' seguem
       // a linha (chegada genuína pelo WhatsApp do pós precisa aparecer lá).
-      const WORKED_PRE = ['tratamento', 'proposta', 'followup', 'declinado'];
+      const WORKED_PRE = ['tratamento', 'declinado']; // [PROPOSTA] proposta/followup extintos
       const isPosByLine = (l) => leadIsPos(l, posSet, posDigits) && !(WORKED_PRE.includes(l.stage) && !hasPosStage(l) && l.bridge !== 1);
       if (isPos) {
         // PÓS: vê os leads do 2030, as vendas convertidas, os ATRIBUÍDOS a uma coluna pós e os da ponte.
@@ -1313,8 +1312,6 @@ app.patch('/api/leads/:id', authenticateToken, async (req, res) => {
 const CORRECT_STAGES = [
   { id: "novo",       title: "Novos Leads",              color: "#71717a" },
   { id: "tratamento", title: "Tratamento inicial",      color: "#0ea5e9" },
-  { id: "proposta",   title: "Proposta enviada",        color: "#f59e0b" },
-  { id: "followup",   title: "Follow-up pagamento",     color: "#ec4899" },
   { id: "convertida", title: "Venda convertida",        color: "#16a34a" },
   { id: "declinado",  title: "Lead declinou/cancelado", color: "#ef4444" },
   { id: "clientes_antigos", title: "Comunicação com ambiente Pós-Venda",  color: "#6366f1" }
@@ -1350,8 +1347,9 @@ app.get('/api/pipeline/stages', authenticateToken, async (req, res) => {
       }
       // Migrate leads with old stage IDs
       await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'qualificado'");
-      await runQuery("UPDATE leads SET stage = 'followup' WHERE stage = 'fechado'");
-      await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos')");
+      await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage = 'fechado'"); // [PROPOSTA]
+      await runQuery("UPDATE leads SET stage = 'tratamento' WHERE stage IN ('proposta','followup')"); // [PROPOSTA] coluna extinta -> Tratamento (nunca 'novo')
+      await runQuery("UPDATE leads SET stage = 'novo' WHERE stage NOT IN ('novo', 'tratamento', 'convertida', 'declinado', 'clientes_antigos')");
       stages = await allRows("SELECT * FROM stages");
     }
     // Grava o resultado final no cache de 60s (perf 2026-07-10) — próxima chamada nesta janela
@@ -4549,6 +4547,24 @@ app.post('/api/contracts', authenticateToken, async (req, res) => {
     const cj = await cr.json().catch(() => null);
     if (!cr.ok || !cj || !cj.success) return res.status(502).json({ error: (cj && cj.error) || 'Falha ao criar contrato.' });
     _contractsCache = { ts: 0, data: null }; // invalida cache para a lista atualizar
+    // [PROPOSTA] Contrato criado A PARTIR DE UM CARD: registra no lead que a proposta foi enviada.
+    // Este e o unico registro do fato — antes dele, "proposta enviada" so existia como a coluna do
+    // funil, movida a mao, sem data nem vinculo. Nao sobrescreve valores ja gravados.
+    try {
+      const _leadId = String(b.leadId || '').trim();
+      if (_leadId) {
+        const _l = await getRow("SELECT id, name, phone, proposta_enviada_em FROM leads WHERE id = ?", [_leadId]);
+        if (_l) {
+          const _agora = new Date().toISOString();
+          await runQuery("UPDATE leads SET proposta_enviada_em = COALESCE(NULLIF(proposta_enviada_em,''), ?) WHERE id = ?", [_agora, _leadId]);
+          if (cj.id) await runQuery("UPDATE leads SET contract_id = ? WHERE id = ? AND (contract_id IS NULL OR TRIM(contract_id) = '')", [String(cj.id), _leadId]);
+          bustLeadsCache();
+          if (!_l.proposta_enviada_em) {
+            logLeadHistory({ leadId: _leadId, phone: _l.phone, name: _l.name, type: 'movimentacao', detail: 'Proposta comercial enviada ao cliente', meta: { proposta: 1, contrato: cj.id || null } });
+          }
+        }
+      }
+    } catch (e) { console.error('[PROPOSTA] registro no lead:', e && e.message); }
     res.json(cj); // { success, id }
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
@@ -4745,7 +4761,8 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
     const _isBridge = (stage === 'clientes_antigos' || stage === 'clientes_antigos_pos');
     // VALIDAÇÃO: etapa desconhecida NUNCA entra no banco (gravava no 'stage' do pré e o card sumia
     // dos dois boards — bug do visto_amer_busca, opção fantasma no dropdown do frontend, 2026-07-02).
-    const _PRE_OK = ['novo', 'tratamento', 'proposta', 'followup', 'convertida', 'declinado', 'clientes_antigos'];
+    // [PROPOSTA] 'proposta' e 'followup' sairam do funil (2026-08-08) — viraram a tarja PROPOSTA ENVIADA.
+    const _PRE_OK = ['novo', 'tratamento', 'convertida', 'declinado', 'clientes_antigos'];
     if (stage && !_isBridge && !_PRE_OK.includes(stage) && !POS_STAGES.includes(stage)) {
       return res.status(400).json({ error: 'Etapa inválida ("' + stage + '") — atualize a página (Ctrl+F5) e escolha uma etapa da lista.' });
     }
@@ -4980,7 +4997,7 @@ async function sweepPosUnclassified() {
       }
       if (lead.bridge === 1) continue;
       if (lead.pos_stage && POS_STAGES.includes(lead.pos_stage)) continue;
-      if (['tratamento', 'proposta', 'followup'].includes(lead.stage)) continue;
+      if (['tratamento'].includes(lead.stage)) continue; // [PROPOSTA] proposta/followup extintos
       await runQuery("UPDATE leads SET pos_stage = 'amer_msgs_novas' WHERE id = ?", [lead.id]);
       // pipeline443: entrou em coluna do pós → grava contracted_at (só se vazio).
       await runQuery("UPDATE leads SET contracted_at = ? WHERE id = ? AND (contracted_at IS NULL OR TRIM(contracted_at) = '')", [new Date().toISOString(), lead.id]);
@@ -6906,7 +6923,7 @@ async function reconcileDuplicatesByPhoneOnce() {
     const norm = (p) => String(p || '').replace(/\D/g, '');
     const groups = {};
     leads.forEach(l => { const d = norm(l.phone); if (d.length >= 8) { const k = d.slice(-8); (groups[k] = groups[k] || []).push(l); } });
-    const RANK = { convertida: 6, clientes_antigos: 5, followup: 4, proposta: 3, tratamento: 2, novo: 1, declinado: 0 };
+    const RANK = { convertida: 6, clientes_antigos: 5, tratamento: 2, novo: 1, declinado: 0 }; // [PROPOSTA]
     let archived = 0, gruposCorrigidos = 0;
     for (const k of Object.keys(groups)) {
       const arr = groups[k];
@@ -6974,7 +6991,7 @@ async function unifyDuplicateWhatsappCards() {
     };
     const groups = {};
     leads.forEach(l => { const k = waKey(l); if (k) (groups[k] = groups[k] || []).push(l); });
-    const RANK = { convertida: 6, clientes_antigos: 5, followup: 4, proposta: 3, tratamento: 2, novo: 1, declinado: 0 };
+    const RANK = { convertida: 6, clientes_antigos: 5, tratamento: 2, novo: 1, declinado: 0 }; // [PROPOSTA]
     const rk = (s) => (RANK[s] != null ? RANK[s] : 1);
     const completeness = (l) => (l.email ? 1 : 0) + (l.tracking ? 1 : 0) + (l.pos_stage ? 1 : 0) + (Number(l.value) > 0 ? 1 : 0) + (Number(l.contract_signed) === 1 ? 1 : 0);
     const isPlaceholderName = (n) => { const s = String(n || '').trim(); return !s || /^(usu[aá]rio whatsapp|instagram( lead)?|lead)$/i.test(s); };
