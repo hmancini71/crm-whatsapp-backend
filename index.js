@@ -945,13 +945,27 @@ if (!stage) {
       let _subj = 'pos';
       try { _subj = (await userIsPos(req)) ? 'pre' : 'pos'; } catch (e) {}
       await runQuery("UPDATE leads SET bridge = 1, bridge_subject = ? WHERE id = ?", [_subj, id]);
-      // [BOARDV2-R10] Card que ENTRA na ponte com ASSUNTO PRE-VENDA (quem mandou foi o pos-venda,
-      // e o assunto e para o pre tratar) ja sai carimbado com a prioridade de fila 2. Assim, quando
-      // o vendedor tirar o card da ponte, ele cai direto em "Lead respondendo" na posicao certa.
-      // NAO se mexe no 'stage' aqui, de proposito: a ponte preserva a coluna de origem do card, e
-      // gravar 'tratamento' agora tiraria de "Venda convertida" quem ja e uma venda fechada.
+      // [BOARDV2-R10] ASSUNTO PRE-VENDA = o pos-venda esta ENTREGANDO o card para o pre tratar.
+      // Nesse caso o card NAO fica na ponte: ele sai de la e vai direto para "Lead respondendo"
+      // (posicao 2 da fila), exatamente como se tivesse sido arrastado a mao — sem ficar duplicado
+      // nos dois ambientes. Sair da ponte = bridge 0 + pos_stage limpo + stage 'tratamento'.
+      //
+      // EXCECAO, de proposito: card em "Venda convertida" NAO e movido automaticamente. Faturamento,
+      // contagem de vendas e todos os relatorios de receita filtram por stage='convertida' — tirar
+      // o card de la apagaria a venda dos numeros. Esse fica na ponte, carimbado, para alguem
+      // decidir a mao. Mesma coisa para 'declinado', que tem regras proprias de entrada/saida.
+      const _entregaAoPre = (_subj === 'pre' && cur.stage !== 'convertida' && cur.stage !== 'declinado');
+      if (_entregaAoPre) {
+        await runQuery("UPDATE leads SET stage = 'tratamento', pos_stage = NULL, bridge = 0, prioridade_fila = 2 WHERE id = ?", [id]);
+        logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Entregue pelo pós-venda ao pré — entrou em "Lead respondendo"', meta: { to: 'tratamento', r10: 1 } });
+        console.log(`[BOARDV2-R10] "${cur.name}" entregue pelo pós-venda → Lead respondendo (saiu da ponte).`);
+        const l3 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
+        return res.json({ ...l3, tags: l3.tags ? JSON.parse(l3.tags) : [] });
+      }
       if (_subj === 'pre') {
+        // Venda convertida (ou declinado) indo para o pré: fica na ponte, só carimbado.
         await runQuery("UPDATE leads SET prioridade_fila = 2 WHERE id = ?", [id]);
+        console.log(`[BOARDV2-R10] "${cur.name}" está em '${cur.stage}' — mantido na ponte para não sumir dos relatórios de venda.`);
       }
       if (cur.bridge !== 1 || cur.bridge_subject !== _subj) logLeadHistory({ leadId: id, phone: cur.phone, name: cur.name, type: 'movimentacao', detail: 'Movido para a coluna-ponte (Comunicação Pré/Pós-Venda) — assunto ' + (_subj === 'pre' ? 'PRÉ' : 'PÓS') + '-venda', meta: { to: 'ponte', assunto: _subj } });
       const l2 = await getRow("SELECT * FROM leads WHERE id = ?", [id]);
