@@ -242,7 +242,23 @@ function authenticateToken(req, res, next) {
 // 1. Auth Route: Login
 app.post('/api/auth/login', async (req, res) => {
   const { email, password, env } = req.body;
-  if (!email || !password) {
+  // [MAQUINA-CONFIAVEL] Em computador JA AUTORIZADO a senha do usuario nao e pedida (decisao do
+  // Henry, 2026-08-08: "nao tem problema qualquer um acessar no ambiente que eu autorizar; o que
+  // quero evitar e abrir em ambiente fora do meu controle"). Quem manda ali e a autorizacao da
+  // MAQUINA. Em computador nao autorizado, nada muda: senha do usuario + senha de autorizacao.
+  let _semSenha = false;
+  try {
+    const _lock = await getRow("SELECT value FROM app_settings WHERE key = 'device_lock'", []);
+    const _ligado = !_lock || String(_lock.value || 'on').toLowerCase() !== 'off';
+    if (_ligado) {
+      const _m = await getRow("SELECT value FROM app_settings WHERE key = 'master_pass_hash'", []);
+      if (_m && _m.value) {
+        const _sl = crypto.createHash('sha256').update(String(JWT_SECRET) + '|' + _m.value).digest('hex');
+        if (String((req.body && req.body.device) || '') === _sl) _semSenha = true;
+      }
+    }
+  } catch (e) {}
+  if (!email || (!password && !_semSenha)) {
     return res.status(400).json({ error: "Email e senha são obrigatórios" });
   }
 
@@ -252,9 +268,11 @@ app.post('/api/auth/login', async (req, res) => {
     const mail = String(email).trim().toLowerCase();
     let user = await getRow("SELECT * FROM users WHERE email = ?", [mail]);
     if (!user) user = await getRow("SELECT * FROM users WHERE LOWER(email) = ?", [mail]); // pega cadastros antigos sem normalização
-    if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    // [MAQUINA-CONFIAVEL] Em maquina autorizada, basta o e-mail existir. Fora dela, a senha vale.
+    if (!user || (!_semSenha && !bcrypt.compareSync(String(password || ''), user.password_hash))) {
       return res.status(400).json({ error: "Credenciais inválidas" });
     }
+    if (_semSenha) console.log('[MAQUINA-CONFIAVEL] ' + mail + ' entrou sem senha (computador autorizado, ' + (req.ip || '?') + ').');
 
     // [TRAVA-MAQUINA] O CRM só abre em computador AUTORIZADO (pedido do Henry, 2026-08-08:
     // "o objetivo é não se abrir o CRM em máquinas não autorizadas"). Login e senha corretos NÃO
