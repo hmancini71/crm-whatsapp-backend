@@ -5933,7 +5933,7 @@ app.post('/api/ai/process-novo-backlog', authenticateToken, async (req, res) => 
 // mensagem (texto fixo). Mantém o lead em 'novo' — a IA assume quando o cliente responder. MANUAL
 // (disparado pelo Henry), em horário comercial, linha conectada, idempotente e com teto. ?dryRun=1 só conta.
 const WELCOME_LINE_DIGITS = '5512982483094'; // (12) 98248-3094
-const WELCOME_TEXT = 'Olá! Aqui é da Vale Visto — recebemos seu contato e queremos analisar o seu caso. Pode nos contar sua situação?';
+const WELCOME_TEXT = 'Bem-vindo à Vale Visto! Sou o Thiago, como posso ajudar?';
 function _digits(s) { return String(s || '').replace(/\D/g, ''); }
 async function resolveWelcomeAccount() {
   const accs = await allRows("SELECT id, number FROM whatsapp_accounts");
@@ -6012,59 +6012,6 @@ app.post('/api/ai/welcome-form-leads', authenticateToken, async (req, res) => {
     res.json({ ok: true, sent, eligibleTotal: eligible.length, remaining: Math.max(0, eligible.length - sent), errors });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
-// BOAS-VINDAS AUTOMÁTICAS (Henry, 2026-08-12 — "iniciar a conversa quando o cliente NÃO manda mensagem,
-// SEMPRE"): mesma lógica da rota manual acima, mas disparada SOZINHA (no boot + a cada 10 min). Continua
-// respeitando as travas de segurança do WhatsApp (horário comercial, linha conectada, antiban:
-// pacing/caps/warm-up) — "sempre" = todo lead elegível recebe a 1ª mensagem, dentro do que é seguro para
-// não queimar o número. Idempotente (só pega lead em 'novo', sem linha, sem conversa) e com teto por rodada.
-let _welcomeAutoRunning = false;
-async function welcomeAutoSweep() {
-  if (_welcomeAutoRunning) return;
-  _welcomeAutoRunning = true;
-  try {
-    if (!_inBusinessHours()) return;                       // Seg–Sex 9–18h, Sáb 9–13h
-    const accountId = await resolveWelcomeAccount();
-    if (!accountId) { console.log('[welcome auto] linha padrão (12) 98248-3094 não está entre as contas — nada enviado.'); return; }
-    const isOpen = !!(sessions[accountId] && sessions[accountId].ws && sessions[accountId].ws.isOpen);
-    if (!isOpen) { console.log('[welcome auto] linha (12) 98248-3094 desconectada — aguardando religar.'); return; }
-    const eligible = await _eligibleWelcomeLeads();
-    if (!eligible.length) return;
-    const cap = 25;                                        // teto por rodada (a cada 10 min)
-    const num = '+' + WELCOME_LINE_DIGITS;
-    let sent = 0;
-    for (const l of eligible) {
-      if (sent >= cap) break;
-      if (!antiban.isBusinessHours()) break;
-      const _g = await antiban.canSendProactive(accountId);
-      if (!_g.ok) { console.log('[welcome auto] número protegido: ' + _g.reason + ' — pausado nesta rodada.'); break; }
-      try {
-        const digits = _digits(l.phone); const tail = digits.slice(-8); const jidLead = l.whatsapp_jid || '';
-        let convo = null;
-        if (jidLead) convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [jidLead]);
-        if (!convo) convo = await getRow("SELECT * FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
-        if (!convo) {
-          const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
-          const nm = l.name || digits; const av = String(nm).slice(0, 2).toUpperCase();
-          const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
-          await runQuery("INSERT INTO conversations (id, account, name, phone, avatar, lastTime, unread, online, whatsapp_jid, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [convoId, accountId, nm, String(l.phone || ''), av, timeStr, 0, 0, jidLead || null, 0]);
-          convo = await getRow("SELECT * FROM conversations WHERE id = ?", [convoId]);
-        } else {
-          await runQuery("UPDATE conversations SET account = ? WHERE id = ?", [accountId, convo.id]);
-        }
-        await antiban.pace(accountId);                                   // espaça com jitter (20–60s)
-        await sendWhatsAppMessage(accountId, convo.id, antiban.varyText(WELCOME_TEXT)); // texto variado
-        await antiban.recordSend(accountId);                             // contabiliza no cap/warm-up
-        await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE id = ?", [accountId, num, l.id]);
-        logLeadHistory({ leadId: l.id, phone: l.phone, name: l.name, type: 'nota', detail: 'Boas-vindas automáticas enviadas pela linha (12) 98248-3094.' });
-        sent++;
-      } catch (e) { console.error('[welcome auto]', (l.name || l.id) + ':', e && e.message); }
-    }
-    if (sent) console.log(`[welcome auto] ${sent} lead(s) sem conversa receberam a 1ª mensagem automaticamente.`);
-  } catch (e) { console.error('[welcome auto sweep]', e && e.message); }
-  finally { _welcomeAutoRunning = false; }
-}
 
 // AUDITORIA: por linha CONECTADA (exceto pós/2030), conversas cuja ÚLTIMA mensagem é do cliente — ou
 // seja, cliente aguardando nossa resposta (possíveis mensagens "perdidas" que precisam de atenção).
@@ -8200,11 +8147,6 @@ app.listen(PORT, async () => {
   // IA: follow-up das colunas 2-3 do Tratamento inicial (a cada 30 min; 1ª passada após 2 min)
   setTimeout(() => { aiFollowUpSweep().catch(() => {}); }, 2 * 60 * 1000);
   setInterval(() => { aiFollowUpSweep().catch(() => {}); }, 30 * 60 * 1000);
-  // BOAS-VINDAS AUTOMÁTICAS: 1ª mensagem para leads sem conversa (formulário/orgânico que nunca
-  // escreveram, ex.: Kauan). Antes era só manual — agora dispara sozinho (1ª passada ~4 min após o
-  // boot, depois a cada 10 min), respeitando horário comercial + linha conectada + antiban.
-  setTimeout(() => { welcomeAutoSweep().catch(() => {}); }, 4 * 60 * 1000);
-  setInterval(() => { welcomeAutoSweep().catch(() => {}); }, 10 * 60 * 1000);
   // Regra 1.3b: auto-declínio dos que não responderam após os follow-ups (boot + a cada 30 min).
   setTimeout(() => { autoDeclineExhaustedFollowups().catch(() => {}); }, 3 * 60 * 1000);
   setInterval(() => { autoDeclineExhaustedFollowups().catch(() => {}); }, 30 * 60 * 1000);

@@ -12,6 +12,13 @@ const db = new sqlite3.Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA synchronous = NORMAL");
 db.run("PRAGMA busy_timeout = 5000");
+// [PERF-SQLITE] O que faltava: o cache de páginas estava no padrão (2 MB) para um banco de 24 MB
+// com 51 mil mensagens — quase toda consulta ia ao disco. 64 MB cabe o banco inteiro em memória.
+// mmap deixa o SQLite ler pelo mapeamento de memória do sistema em vez de copiar buffer a buffer,
+// e temp_store=MEMORY evita arquivo temporário em ORDER BY/GROUP BY (o board ordena 2.480 leads).
+db.run("PRAGMA cache_size = -65536");
+db.run("PRAGMA mmap_size = 268435456");
+db.run("PRAGMA temp_store = MEMORY");
 
 // ── Regra de origem "Google Ads" ────────────────────────────────────────────
 // A mensagem inicial pré-preenchida pelo clique vindo do site (campanhas do

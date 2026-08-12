@@ -165,17 +165,10 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
     linhas.push('🚨 **' + errados + ' lead(s) possivelmente no AMBIENTE ERRADO** — veja as linhas "⚠️ Ambiente" nos cards abaixo.');
     linhas.push('');
   }
-  // execucao10 (pedido do Henry, 2026-07-26): o DIAGNÓSTICO GERAL (padrões vs melhores práticas)
-  // vem ANTES dos casos específicos — seção 1 = visão de conjunto; seção 2 = caso a caso.
-  if (sugestoes && String(sugestoes).trim()) {
-    linhas.push('## 1️⃣ Diagnóstico geral do atendimento (padrões × melhores práticas)');
-    linhas.push('');
-    linhas.push(String(sugestoes).trim());
-    linhas.push('');
-    linhas.push('---');
-    linhas.push('');
-  }
-  linhas.push('## 2️⃣ Casos específicos — ranking do mais quente ao menos quente');
+  // [RELATORIO-ORDEM] (pedido do Henry, 2026-08-09): os CASOS ESPECÍFICOS vêm primeiro — é a
+  // parte acionável, que diz quem ligar agora. O diagnóstico geral, que é leitura de conjunto,
+  // desceu para o fim. Só a ordem das seções mudou; nenhum número ou texto foi reescrito.
+  linhas.push('## 1️⃣ Casos específicos — ranking do mais quente ao menos quente');
   linhas.push('');
   for (const i of itens) {
     const t = Number(i.temperatura_0_100) || 0;
@@ -193,7 +186,15 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
     linhas.push('');
   }
   if (!itens.length) linhas.push('_Nenhum lead com atividade nas últimas ' + janelaH() + 'h neste ambiente._');
-  // execucao10: a seção de diagnóstico/propostas foi MOVIDA para o TOPO (seção 1️⃣, acima).
+  // [RELATORIO-ORDEM] Diagnóstico geral agora FECHA o relatório, depois dos casos específicos.
+  if (sugestoes && String(sugestoes).trim()) {
+    linhas.push('---');
+    linhas.push('');
+    linhas.push('## 2️⃣ Diagnóstico geral do atendimento (padrões × melhores práticas)');
+    linhas.push('');
+    linhas.push(String(sugestoes).trim());
+    linhas.push('');
+  }
   return linhas.join('\n');
 }
 

@@ -1025,9 +1025,11 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
             if (bh && bh.message && text && String(text).trim() === String(bh.message).trim()) isAutoReply = true;
           } catch (e) {}
           const _humano = (!isAutoReply && !_aiSentIds.has(msg.key.id));
-          // [BOARDV2-BOLINHA] So resposta de GENTE apaga a bolinha. Auto-resposta de fora do
-          // horario e mensagem da IA nao contam como atendimento — o cliente continua esperando.
-          if (_humano) {
+          // [BOLINHA-QUALQUER-RESPOSTA] (Henry, 2026-08-10 — substitui a regra de 08/08) Qualquer
+          // resposta nossa apaga a bolinha: humano OU IA. So a auto-resposta de fora do horario
+          // continua sem apagar — ela avisa que estamos fechados, nao atende o cliente.
+          // (A METRICA de tempo medio de atendimento continua contando so resposta humana.)
+          if (!isAutoReply) {
             await runQuery("UPDATE leads SET lastClientReply = NULL WHERE whatsapp_jid = ? OR (phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ?)", [fromJid, `%${snTail}%`]);
           }
           if (_humano) {
