@@ -3064,6 +3064,66 @@ app.post('/api/conversations/:id/archive', authenticateToken, async (req, res) =
   }
 });
 
+// ===== [BANDEIRA v615] Marca vermelha numa conversa (pedido do Henry, 14/08) =====
+// A marca fica na CONVERSA, nao no usuario: a caixa e compartilhada e a bandeira serve
+// justamente para um avisar o outro. Sobrevive ao F5 porque mora no banco.
+app.post('/api/conversations/:id/flag', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const c = await getRow("SELECT id, flag FROM conversations WHERE id = ?", [id]);
+    if (!c) return res.status(404).json({ error: 'Conversa nao encontrada' });
+    const novo = (req.body && typeof req.body.flag !== 'undefined')
+      ? (Number(req.body.flag) ? 1 : 0)          // valor explicito
+      : (Number(c.flag) ? 0 : 1);                 // sem valor = alterna
+    await runQuery("UPDATE conversations SET flag = ? WHERE id = ?", [novo, id]);
+    try { bustConversationsCache(); } catch (e) {}
+    res.json({ id: id, flag: novo });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ===== [CANAL-CERTO v615] Janela da Meta fechada -> card sai da fila viva =====
+// Regra do Henry (14/08): lead de Instagram cuja janela de resposta da Meta expirou nao
+// tem mais como ser alcancado — nem pelo Direct (a Meta bloqueia depois de 7 dias sem
+// mensagem da pessoa) nem por WhatsApp (o lead do Direct nao tem telefone; a Meta nao
+// fornece esse dado por API). Deixar o card numa coluna de trabalho so gera fila morta.
+// O card vai para "Lead declinou/cancelado" com o motivo registrado no historico.
+// NUNCA mexe em venda convertida nem em card do pos-venda — restricao permanente do Henry.
+const JANELA_META_MS = 7 * 24 * 60 * 60 * 1000;
+async function moveIgForaDaJanela() {
+  try {
+    const linhas = await allRows(
+      "SELECT l.id, l.name, l.phone, l.stage, c.id AS convo_id, " +
+      "  (SELECT MAX(m.timestamp) FROM messages m WHERE m.conversationId = c.id AND m.[from] <> 'me') AS ult " +
+      " FROM leads l JOIN conversations c ON c.whatsapp_jid = l.whatsapp_jid " +
+      " WHERE l.whatsapp_jid LIKE 'ig:%' AND l.stage NOT IN ('convertida', 'declinado')"
+    );
+    const agora = Date.now();
+    let n = 0;
+    for (const l of (linhas || [])) {
+      const ult = Number(l.ult) || 0;
+      if (ult && (agora - ult) < JANELA_META_MS) continue;   // ainda da tempo de responder
+      await runQuery("UPDATE leads SET stage = 'declinado' WHERE id = ? AND stage NOT IN ('convertida','declinado')", [l.id]);
+      await logLeadHistory({
+        leadId: l.id, phone: l.phone, name: l.name, type: 'movimentacao',
+        detail: 'Instagram: janela de resposta da Meta expirou (7 dias sem mensagem da pessoa). ' +
+                'Sem caminho para contato — movido para Lead declinou/cancelado.',
+        meta: { de: l.stage, para: 'declinado', motivo: 'janela-meta-expirada' }
+      });
+      n++;
+    }
+    if (n) console.log('[canal-certo] ' + n + ' card(s) de Instagram fora da janela da Meta movidos para declinado.');
+    return n;
+  } catch (e) {
+    console.error('[canal-certo] falha ao mover cards fora da janela:', e && e.message);
+    return 0;
+  }
+}
+// Uma vez por hora basta: a janela e de 7 dias, nao de minutos.
+setTimeout(() => { moveIgForaDaJanela().catch(() => {}); }, 90 * 1000);
+setInterval(() => { moveIgForaDaJanela().catch(() => {}); }, 60 * 60 * 1000);
+
 // Migra a conversa para outra linha de WhatsApp (as próximas mensagens saem por ela).
 app.patch('/api/conversations/:id/account', authenticateToken, async (req, res) => {
   const { id } = req.params;

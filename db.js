@@ -1325,6 +1325,18 @@ db.serialize(() => {
     first_send_at TEXT
   )`);
 
+  // [BANDEIRA v615] marca manual da equipe numa conversa (pedido do Henry, 14/08).
+  // Fica na CONVERSA, nao no usuario: a caixa de entrada e compartilhada e a marca
+  // serve justamente para um avisar o outro ("olha esta aqui").
+  db.all("PRAGMA table_info(conversations)", (err, cols) => {
+    if (!err && cols && !cols.find(c => c.name === 'flag')) {
+      db.run("ALTER TABLE conversations ADD COLUMN flag INTEGER DEFAULT 0", (e) => {
+        if (e) console.error('Falha ao criar a coluna flag em conversations:', e.message);
+        else console.log("Migracao v615: coluna 'flag' criada em conversations.");
+      });
+    }
+  });
+
   // Safe migration: add 'archived' column to conversations if it doesn't exist yet
   db.all("PRAGMA table_info(conversations)", (err, cols) => {
     if (!err && cols && !cols.find(c => c.name === 'archived')) {
