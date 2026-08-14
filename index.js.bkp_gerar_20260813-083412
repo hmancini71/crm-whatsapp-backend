@@ -909,38 +909,6 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
         if (_last === null) return true; // sem dado valido de atividade: nao corta (regra do plano)
         return _last >= _terminalCutoff;
       });
-
-      // =====================================================================
-      // v605 [COLUNA-ARQUIVO] — teto de quantidade em "Lead declinou/cancelado".
-      //
-      // O Henry trabalha nas TRES primeiras colunas (Novos Leads, Tratamento
-      // inicial, Venda convertida). Essas passam inteiras por aqui. A de
-      // declinados tinha 876 cards de 2.559 do board — um terco do peso da tela
-      // para um arquivo que ninguem abre no dia a dia.
-      //
-      // O corte por TEMPO logo acima nao resolvia: ele desliga junto com o
-      // "Ver todos", e o board e usado com o "Ver todos" ligado. Por quantidade
-      // e previsivel — sempre os 150 mais recentes, independente de o pedido ser
-      // normal ou completo.
-      //
-      // Nada some do banco: quem precisa do historico inteiro tem o "Ver todos",
-      // a guia Leads e a busca, que continuam enxergando tudo.
-      // =====================================================================
-      if (!_isAllParam) {
-        const TETO_DECLINADO = 150;
-        const _declinados = parsedLeads.filter(l => l.stage === 'declinado' && !l.pos_stage && l.bridge !== 1);
-        if (_declinados.length > TETO_DECLINADO) {
-          _declinados.sort((a, b) => (_lastActivityMs(b) || 0) - (_lastActivityMs(a) || 0));
-          const _mantidos = new Set(_declinados.slice(0, TETO_DECLINADO).map(l => l.id));
-          const _antes = parsedLeads.length;
-          parsedLeads = parsedLeads.filter(l => {
-            if (l.stage !== 'declinado' || l.pos_stage || l.bridge === 1) return true;
-            return _mantidos.has(l.id);
-          });
-          console.log('[board] declinados: ' + _declinados.length + ' -> ' + TETO_DECLINADO
-            + ' (board de ' + _antes + ' para ' + parsedLeads.length + ' cards)');
-        }
-      }
     }
     // Filtra por LOGIN (sem mascarar, sempre o número real):
     //  - PÓS (Alexandre): só leads do 2030 OU vendas convertidas; 'stage' é remapeado p/ pos_stage
@@ -2082,26 +2050,10 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
 
     // Attach last message for each conversation (1 query agregada em vez de N — elimina o N+1)
     const lastMsgMap = await getLastMessagesMap();
-    // v607 [LISTA-ENXUTA]: a ultima mensagem vai RESUMIDA.
-    //
-    // Medido: lastMessage era 337 KB dos 682 KB da resposta — metade do peso — e a
-    // guia pede esta rota nove vezes num carregamento. A lista mostra uma linha
-    // cortada com reticencias, mas vinha o objeto inteiro: texto completo (um audio
-    // transcrito passa de mil caracteres), caminho de midia, status, tipo.
-    //
-    // Os quatro campos abaixo sao os que a tela usa. Quem ABRE a conversa recebe tudo
-    // pela rota das mensagens — isto aqui e so o resumo da lista.
-    const _RESUMO_MSG = 140;
-    const _resumeMsg = (m) => {
-      if (!m) return null;
-      let t = m.text == null ? '' : String(m.text);
-      if (t.length > _RESUMO_MSG) t = t.slice(0, _RESUMO_MSG) + '…';
-      return { id: m.id, from: m.from, text: t, timestamp: m.timestamp, type: m.type };
-    };
     const detailedConvs = convs.map(c => ({
       ...c,
       online: Boolean(c.online),
-      lastMessage: _resumeMsg(lastMsgMap.get(c.id))
+      lastMessage: lastMsgMap.get(c.id) || null
     }));
 
     // pipeline461: ordenação em JS (mensagem mais recente no topo), substituindo a antiga ORDER BY
@@ -2571,10 +2523,6 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       const isPos = posSet.size ? await userIsPos(req) : false;
       let convPos = posSet.has(convo.account);
       const lineOpen = isOpenLine(convo.account);
-      // [CANAL-CERTO v611] conversa do Instagram nao entra no roteamento por linha de
-      // WhatsApp. Era aqui que o account virava wa3/wa7 e o desvio do Direct (logo abaixo)
-      // deixava de ser acionado — a resposta saia por WhatsApp para um endereco inexistente.
-      const _ehIg = String((convo && convo.whatsapp_jid) || '').indexOf('ig:') === 0 || convo.account === 'ig';
       // v504: dono do endereço @lid manda. Se está travado na linha dona, o
       // roteamento por ambiente abaixo NÃO pode desviar — desviar era exatamente
       // o que produzia "enviado" que nunca chegava ao cliente.
@@ -2584,7 +2532,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       // gravavam a troca no banco. Era o mesmo defeito do v525 por outra porta: a tela
       // dizia 2030 e o envio saía pelo 1554. Agora o desvio só existe para o que ele
       // realmente resolve: linha da conversa FORA DO AR.
-      if (_ehIg || _ownLock || lineOpen) { /* Instagram, ou linha da conversa conectada — ela envia */ }
+      if (_ownLock || lineOpen) { /* linha da conversa conectada — ela envia */ }
       else if (posSet.size && isPos) {
         if (!convPos || !lineOpen) {
           const posConn = [...posSet].find(isOpenLine);
@@ -2657,9 +2605,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     };
 
     // Instagram: envia pelo Direct e grava a mensagem
-    if (convo.account === 'ig' || String(convo.whatsapp_jid || '').indexOf('ig:') === 0) {
-      // [CANAL-CERTO v611] chave = endereco (ig:...), nao a conta. whatsapp_jid nunca muda;
-      // account ja foi trocado por rotina automatica e foi assim que o Direct saiu do ar.
+    if (convo.account === 'ig') {
       const recipientId = (convo.whatsapp_jid || '').replace(/^ig:/, '');
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
@@ -5762,36 +5708,10 @@ const dailyReports = require('./daily_reports');
 dailyReports.init({ posLineInfo, POS_STAGES, prazoHoras: dailyPrazoHoras }); // v519: janela = prazo configurado
 
 // Disparo manual (teste / re-geração do dia) — só Administrador.
-// v589 [GERAR-AGORA] — o botao "Gerar" do chip do relatorio.
-//
-// Antes so existia a geracao das 8h e um disparo manual que rodava os DOIS ambientes,
-// sem dizer quando terminava. Agora o pedido leva o ambiente escolhido no proprio chip
-// (Pre, Pos ou Ambos) e a tela consulta /status para saber a hora de reler o relatorio.
-let _relGerando = { rodando: false, env: '', iniciadoEm: 0, terminadoEm: 0, erro: '' };
-
 app.post('/api/reports/daily/run', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
-  if (_relGerando.rodando) return res.status(409).json({ error: 'Já existe um relatório sendo gerado.', ..._relGerando });
-  // 'pre', 'pos' ou vazio (= os dois). Qualquer outra coisa vira "os dois".
-  const env = (req.body && ['pre', 'pos'].indexOf(String(req.body.env || '')) !== -1) ? String(req.body.env) : '';
-  _relGerando = { rodando: true, env, iniciadoEm: Date.now(), terminadoEm: 0, erro: '' };
-  setImmediate(async () => {
-    try {
-      const dia = dailyReports.hojeSPiso();
-      if (env === 'pre' || env === 'pos') await dailyReports.runOne(env, dia);
-      else await dailyReports.runDailyReports(dia);
-      _relGerando.terminadoEm = Date.now();
-      console.log('[daily-report] geração manual concluída (' + (env || 'pré e pós') + ').');
-    } catch (e) {
-      _relGerando.erro = String(e && e.message || e);
-      console.error('[daily-report] run manual:', _relGerando.erro);
-    } finally { _relGerando.rodando = false; }
-  });
-  res.status(202).json({ queued: true, ..._relGerando });
-});
-
-app.get('/api/reports/daily/run/status', authenticateToken, async (req, res) => {
-  res.json(_relGerando);
+  setImmediate(() => { dailyReports.runDailyReports().catch((e) => console.error('[daily-report] run manual:', e && e.message)); });
+  res.status(202).json({ queued: true });
 });
 // execucao2 (2026-07-25): prazo de análise do relatório (horas) — app_settings, default 48.
 async function dailyPrazoHoras() {
@@ -6226,14 +6146,6 @@ app.post('/api/ai/welcome-form-leads', authenticateToken, async (req, res) => {
         let convo = null;
         if (jidLead) convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [jidLead]);
         if (!convo) convo = await getRow("SELECT * FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
-        // [CANAL-CERTO v611] Quem chega pelo Instagram e atendido PELO INSTAGRAM.
-        // Medido em 14/08/2026: 43 conversas ig:, 71 mensagens enviadas por linha de
-        // WhatsApp desde 04/07 e ZERO entregues. O lead do Instagram nao tem telefone
-        // (25 leads, nenhum com numero) e a Meta nao fornece esse dado por API.
-        if (String(jidLead).indexOf('ig:') === 0 || String((convo && convo.whatsapp_jid) || '').indexOf('ig:') === 0) {
-          console.log('[canal-certo] "' + (l.name || l.id) + '": lead do Instagram — nao entra na fila de WhatsApp.');
-          continue;
-        }
         if (!convo) {
           const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
           const nm = l.name || digits; const av = String(nm).slice(0, 2).toUpperCase();
@@ -6286,14 +6198,6 @@ async function welcomeAutoSweep() {
         let convo = null;
         if (jidLead) convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [jidLead]);
         if (!convo) convo = await getRow("SELECT * FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
-        // [CANAL-CERTO v611] Quem chega pelo Instagram e atendido PELO INSTAGRAM.
-        // Medido em 14/08/2026: 43 conversas ig:, 71 mensagens enviadas por linha de
-        // WhatsApp desde 04/07 e ZERO entregues. O lead do Instagram nao tem telefone
-        // (25 leads, nenhum com numero) e a Meta nao fornece esse dado por API.
-        if (String(jidLead).indexOf('ig:') === 0 || String((convo && convo.whatsapp_jid) || '').indexOf('ig:') === 0) {
-          console.log('[canal-certo] "' + (l.name || l.id) + '": lead do Instagram — nao entra na fila de WhatsApp.');
-          continue;
-        }
         if (!convo) {
           const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
           const nm = l.name || digits; const av = String(nm).slice(0, 2).toUpperCase();
@@ -6497,14 +6401,6 @@ async function aiFollowUpSweep() {
         if (!freshNow || freshNow.archived || (freshNow.stage !== 'tratamento' && freshNow.stage !== 'novo')) { console.log(`[IA follow-up] "${l.name}": pulado (estágio agora = ${freshNow && freshNow.stage}).`); continue; }
         // execucao1 Sprint1 (2026-07-25): re-checa o kill-switch na hora do envio.
         if (freshNow.bot_ativo === 0) { console.log(`[IA follow-up] "${l.name}": pulado (bot desativado no lead).`); continue; }
-        // [CANAL-CERTO v611] Quem chega pelo Instagram e atendido PELO INSTAGRAM.
-        // Medido em 14/08/2026: 43 conversas ig:, 71 mensagens enviadas por linha de
-        // WhatsApp desde 04/07 e ZERO entregues. O lead do Instagram nao tem telefone
-        // (25 leads, nenhum com numero) e a Meta nao fornece esse dado por API.
-        if (String((conv && conv.whatsapp_jid) || '').indexOf('ig:') === 0) {
-          console.log('[canal-certo] "' + l.name + '": lead do Instagram — follow-up segue pelo Direct.');
-          continue;
-        }
         const tentativa = (l.ai_fu_count || 0) + 1;
         const texto = await getFollowUpReply(conv.id, l.name, tentativa);
         if (!texto) continue;
@@ -6714,14 +6610,6 @@ async function novoCadenceSweep() {
             if (_accRow && _accRow.number) await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE id = ?", [conv.account, _accRow.number, l.id]);
           } catch (e) {}
           console.log('[cadência novo] "' + l.name + '": conversa criada na linha ' + conv.account + ' — primeiro contato da IA.');
-        }
-        // [CANAL-CERTO v611] Quem chega pelo Instagram e atendido PELO INSTAGRAM.
-        // Medido em 14/08/2026: 43 conversas ig:, 71 mensagens enviadas por linha de
-        // WhatsApp desde 04/07 e ZERO entregues. O lead do Instagram nao tem telefone
-        // (25 leads, nenhum com numero) e a Meta nao fornece esse dado por API.
-        if (String((conv && conv.whatsapp_jid) || '').indexOf('ig:') === 0) {
-          console.log('[canal-certo] "' + l.name + '": lead do Instagram — cadencia nao usa WhatsApp.');
-          continue;
         }
         await sendWhatsAppMessage(conv.account, conv.id, antiban.varyText(texto));
         await antiban.recordSend(conv.account);

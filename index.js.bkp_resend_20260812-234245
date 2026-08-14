@@ -12,42 +12,6 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
-
-// ===========================================================================
-// v584 [IMAP-NAO-VAZA] — rede de seguranca para as conexoes de e-mail.
-//
-// O CRM abre IMAP em sete lugares (painel de contratos assinados, leitura da
-// caixa, anexos, zip de anexos...). Em seis deles o logout ficava fora do
-// finally: bastava a varredura estourar no meio para a conexao ficar pendurada
-// no servidor. O cPanel limita conexoes simultaneas por usuario, entao o login
-// seguinte era recusado e o log mostrava 'authenticationFailed' — com a senha
-// perfeitamente correta.
-//
-// Em vez de confiar em sete blocos lembrarem de fechar, o proprio connect()
-// arma o fechamento. Nenhuma leitura nossa passa de quatro minutos; o que
-// passar disso e conexao esquecida, e ela cai sozinha.
-// ===========================================================================
-try {
-  const _ImapFlowCls = require('imapflow').ImapFlow;
-  if (_ImapFlowCls && !_ImapFlowCls.prototype.__v584Guardiao) {
-    const _connectOriginal = _ImapFlowCls.prototype.connect;
-    _ImapFlowCls.prototype.connect = async function () {
-      const r = await _connectOriginal.apply(this, arguments);
-      const _corta = setTimeout(() => {
-        try { console.warn('[IMAP-NAO-VAZA] conexao aberta ha 4 min sem fechar — encerrando.'); } catch (e) {}
-        try { this.close(); } catch (e) {}
-      }, 4 * 60 * 1000);
-      if (_corta.unref) _corta.unref();     // um relogio pendente nao segura o processo
-      const _desarma = () => { try { clearTimeout(_corta); } catch (e) {} };
-      try { this.once('close', _desarma); this.once('error', _desarma); } catch (e) {}
-      const _logoutOriginal = this.logout.bind(this);
-      this.logout = async function () { _desarma(); return await _logoutOriginal(); };
-      return r;
-    };
-    _ImapFlowCls.prototype.__v584Guardiao = true;
-  }
-} catch (e) { /* sem imapflow instalado: nada a proteger */ }
-
 const multer = require('multer');
 const { runQuery, getRow, allRows, isGoogleAdsUtm, extractAdParams, getOriginMsgRules, setOriginMsgRules, reclassifyLeadsByFirstMsg, getConversationsCache, setConversationsCache, bustConversationsCache } = require('./db');
 const { getIntegrationSettings, saveIntegrationSettings, newApiKey, sendWebhook } = require('./webhook');
@@ -909,38 +873,6 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
         if (_last === null) return true; // sem dado valido de atividade: nao corta (regra do plano)
         return _last >= _terminalCutoff;
       });
-
-      // =====================================================================
-      // v605 [COLUNA-ARQUIVO] — teto de quantidade em "Lead declinou/cancelado".
-      //
-      // O Henry trabalha nas TRES primeiras colunas (Novos Leads, Tratamento
-      // inicial, Venda convertida). Essas passam inteiras por aqui. A de
-      // declinados tinha 876 cards de 2.559 do board — um terco do peso da tela
-      // para um arquivo que ninguem abre no dia a dia.
-      //
-      // O corte por TEMPO logo acima nao resolvia: ele desliga junto com o
-      // "Ver todos", e o board e usado com o "Ver todos" ligado. Por quantidade
-      // e previsivel — sempre os 150 mais recentes, independente de o pedido ser
-      // normal ou completo.
-      //
-      // Nada some do banco: quem precisa do historico inteiro tem o "Ver todos",
-      // a guia Leads e a busca, que continuam enxergando tudo.
-      // =====================================================================
-      if (!_isAllParam) {
-        const TETO_DECLINADO = 150;
-        const _declinados = parsedLeads.filter(l => l.stage === 'declinado' && !l.pos_stage && l.bridge !== 1);
-        if (_declinados.length > TETO_DECLINADO) {
-          _declinados.sort((a, b) => (_lastActivityMs(b) || 0) - (_lastActivityMs(a) || 0));
-          const _mantidos = new Set(_declinados.slice(0, TETO_DECLINADO).map(l => l.id));
-          const _antes = parsedLeads.length;
-          parsedLeads = parsedLeads.filter(l => {
-            if (l.stage !== 'declinado' || l.pos_stage || l.bridge === 1) return true;
-            return _mantidos.has(l.id);
-          });
-          console.log('[board] declinados: ' + _declinados.length + ' -> ' + TETO_DECLINADO
-            + ' (board de ' + _antes + ' para ' + parsedLeads.length + ' cards)');
-        }
-      }
     }
     // Filtra por LOGIN (sem mascarar, sempre o número real):
     //  - PÓS (Alexandre): só leads do 2030 OU vendas convertidas; 'stage' é remapeado p/ pos_stage
@@ -1743,8 +1675,6 @@ async function refreshSignedContracts(from, to) {
           auth: { user: acc.email, pass: acc.password }, logger: false, tls: { rejectUnauthorized: false }
         });
         await client.connect();
-        // v584: daqui para baixo, fecha a conexao aconteca o que acontecer.
-        try {
         const lock = await client.getMailboxLock('INBOX');
         try {
           // Início do 1º dia do período (em UTC, com folga de 1 dia para o filtro IMAP SINCE).
@@ -1776,9 +1706,7 @@ async function refreshSignedContracts(from, to) {
             if (slot) slot.value++;
           }
         } finally { lock.release(); }
-        } finally {
-          try { await client.logout(); } catch (e) { try { client.close(); } catch (e2) {} }
-        }
+        try { await client.logout(); } catch (e) {}
       }
     } catch (err) {
       console.error('signed-contracts error:', err && err.message);
@@ -1834,8 +1762,6 @@ async function scanSignedEmails(debug) {
         auth: { user: acc.email, pass: acc.password }, logger: false, tls: { rejectUnauthorized: false }
       });
       await client.connect();
-      // v584: daqui para baixo, fecha a conexao aconteca o que acontecer.
-      try {
       const lock = await client.getMailboxLock('INBOX');
       try {
         const since = new Date(); since.setDate(since.getDate() - 90); since.setHours(0, 0, 0, 0);
@@ -1893,10 +1819,8 @@ async function scanSignedEmails(debug) {
           if (debug) dbg.push({ subject: rawSubj, name: nm, emails: foundHere, date: dt });
         }
       } finally { lock.release(); }
+      try { await client.logout(); } catch (e) {}
       scanOk = true; // chegou aqui = varredura completou
-      } finally {
-        try { await client.logout(); } catch (e) { try { client.close(); } catch (e2) {} }
-      }
     } else if (debug) {
       dbg.push({ note: 'Sem conta de e-mail conectada ou imapflow ausente', hasAcc: !!acc });
     }
@@ -2082,26 +2006,10 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
 
     // Attach last message for each conversation (1 query agregada em vez de N — elimina o N+1)
     const lastMsgMap = await getLastMessagesMap();
-    // v607 [LISTA-ENXUTA]: a ultima mensagem vai RESUMIDA.
-    //
-    // Medido: lastMessage era 337 KB dos 682 KB da resposta — metade do peso — e a
-    // guia pede esta rota nove vezes num carregamento. A lista mostra uma linha
-    // cortada com reticencias, mas vinha o objeto inteiro: texto completo (um audio
-    // transcrito passa de mil caracteres), caminho de midia, status, tipo.
-    //
-    // Os quatro campos abaixo sao os que a tela usa. Quem ABRE a conversa recebe tudo
-    // pela rota das mensagens — isto aqui e so o resumo da lista.
-    const _RESUMO_MSG = 140;
-    const _resumeMsg = (m) => {
-      if (!m) return null;
-      let t = m.text == null ? '' : String(m.text);
-      if (t.length > _RESUMO_MSG) t = t.slice(0, _RESUMO_MSG) + '…';
-      return { id: m.id, from: m.from, text: t, timestamp: m.timestamp, type: m.type };
-    };
     const detailedConvs = convs.map(c => ({
       ...c,
       online: Boolean(c.online),
-      lastMessage: _resumeMsg(lastMsgMap.get(c.id))
+      lastMessage: lastMsgMap.get(c.id) || null
     }));
 
     // pipeline461: ordenação em JS (mensagem mais recente no topo), substituindo a antiga ORDER BY
@@ -2373,173 +2281,66 @@ app.post('/api/delivery-alerts/dismiss-all', authenticateToken, async (req, res)
 // resolvível dentro da sessão da linha que o aprendeu, e mandar por outra o WhatsApp aceita
 // (1 tique) e nunca entrega. Reenviar o que JÁ chegou é o único erro inaceitável aqui, então
 // status >= 3 recusa e dá baixa no alerta.
-// v585: a logica de reenvio virou funcao para ter UM dono so. O botao do menu, o
-// botao do painel e o "Reenviar todos" passam todos por aqui — assim nenhuma regra
-// (a trava de uma tentativa, a linha dona, o antiban) fica valendo em um caminho e
-// esquecida no outro. Devolve { erro } em vez de responder: quem chama e que decide
-// se isso vira HTTP 409 ou uma linha no relatorio do lote.
-async function _reenviarUma(msgId, opcoes) {
-  const _op = opcoes || {};
-  const m = await getRow("SELECT id, conversationId, text, type, mediaPath, status, deleted, our_number FROM messages WHERE id = ?", [msgId]);
-  if (!m || Number(m.deleted || 0) === 1 || Number(m.status || 0) >= 3) {
-    try { await deliveryWatch.dismiss(msgId, 'entregue'); } catch (e) {}
-    return { erro: 'Mensagem ja confirmada ou inexistente', jaEntregue: true };
-  }
-  const convo = await getRow("SELECT id, account, jid_account, whatsapp_jid FROM conversations WHERE id = ?", [m.conversationId]);
-  if (!convo) return { erro: 'Conversa nao existe mais' };
-
-  // v584 [REENVIO-UMA-VEZ]: uma tentativa por mensagem, venha o pedido de onde vier.
-  // Caso Roberto Ferri (12/08): quatro copias da mesma frase, porque cada reenvio
-  // gerava uma mensagem nova que tambem ficava sem recibo e voltava para a fila de
-  // reenvio 3h depois.
-  const _trava = await deliveryWatch.motivoParaNaoReenviar(msgId);
-  if (_trava) return { erro: _trava, travado: true };
-
-  // Linha dona: jid_account primeiro; se nao houver, mapeia messages.our_number para a conta.
-  let linha = convo.jid_account || null;
-  if (!linha && m.our_number) {
-    try {
-      const w = await getRow("SELECT id FROM whatsapp_accounts WHERE number = ?", [m.our_number]);
-      if (w && w.id) linha = w.id;
-    } catch (e) {}
-  }
-  if (!linha) linha = convo.account;
-  if (!linha) return { erro: 'Nao ha linha dona para esta conversa' };
-
-  // No lote, o governador anti-banimento manda: cap por hora e por dia do numero,
-  // e intervalo com jitter entre um envio e o proximo DA MESMA LINHA. No clique
-  // avulso nao entra — uma mensagem so nao e rajada, e travar o operador seria pior.
-  if (_op.antiban) {
-    const pode = await antiban.canSendProactive(linha);
-    if (!pode.ok) return { erro: pode.reason, capAtingido: true, linha };
-    await antiban.pace(linha);
-  }
-
-  const tipo = String(m.type || 'text');
-  let buffer = null, mimetype = null, fileName = null;
-  if (tipo !== 'text') {
-    let mp = m.mediaPath ? String(m.mediaPath) : '';
-    if (mp && !fs.existsSync(mp)) mp = path.join(MEDIA_DIR, path.basename(mp));
-    if (!mp || !fs.existsSync(mp)) return { erro: 'Arquivo de midia nao esta mais no servidor' };
-    buffer = fs.readFileSync(mp);
-    fileName = path.basename(mp);
-    const ext = String(fileName.split('.').pop() || '').toLowerCase();
-    const MIMES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
-      mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', ogg: 'audio/ogg', oga: 'audio/ogg',
-      mp3: 'audio/mpeg', m4a: 'audio/mp4', pdf: 'application/pdf', doc: 'application/msword',
-      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      xls: 'application/vnd.ms-excel',
-      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
-    mimetype = tipo === 'audio' ? 'audio/ogg' : (MIMES[ext] || 'application/octet-stream');
-  }
-
-  // Linha fora do ar nao recusa (regra v508): entra na fila e sai sozinha quando ela voltar.
-  const aberta = !!(sessions[linha] && sessions[linha].ws && sessions[linha].ws.isOpen);
-  let novo;
-  if (!aberta) {
-    novo = await outbox.enqueue({ convoId: m.conversationId, account: linha,
-      kind: (tipo === 'text' ? 'text' : (tipo === 'audio' ? 'audio' : 'media')),
-      text: m.text || '', buffer, mimetype, fileName });
-  } else if (tipo === 'text') {
-    novo = await sendWhatsAppMessage(linha, m.conversationId, m.text || '');
-  } else if (tipo === 'audio') {
-    novo = await sendWhatsAppAudio(linha, m.conversationId, buffer);
-  } else {
-    novo = await sendWhatsAppMedia(linha, m.conversationId, buffer, mimetype, fileName);
-  }
-  if (_op.antiban) { try { await antiban.recordSend(linha); } catch (e) {} }
-  // A mensagem nova entra pelo caminho normal de envio, portanto o vigia ja a arma sozinho.
-  await deliveryWatch.dismiss(msgId, 'reenvio');
-  // v584: guarda o elo origem -> copia. E o que impede a copia da copia.
-  try { await deliveryWatch.registraReenvio(msgId, (novo && novo.id) || null, m.conversationId); } catch (e) {}
-  bustConversationsCache();
-  console.log('[resend] ' + msgId + ' (' + tipo + ') reenviado pela linha ' + linha + (aberta ? '' : ' (na fila)'));
-  return { ok: true, novoId: (novo && novo.id) || null, linha, fila: !aberta };
-}
-
 app.post('/api/delivery-alerts/:msgId/resend', authenticateToken, async (req, res) => {
+  const msgId = req.params.msgId;
   try {
-    const r = await _reenviarUma(req.params.msgId, { antiban: false });
-    const count = await deliveryWatch.countOpen();
-    if (r.erro) return res.status(409).json({ error: r.erro, travado: !!r.travado, count });
-    res.json({ ok: true, novoId: r.novoId, linha: r.linha, fila: r.fila, count });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ===========================================================================
-// v585 [REENVIAR-TODOS] — o lote que o Henry dispara, nao o que rodava sozinho.
-//
-// Existia antes um processo no pm2 reenviando sozinho, e era ele que fazia o
-// cliente receber a mesma frase quatro vezes. Aquilo foi desligado. Este aqui e
-// o oposto: so anda quando alguem clica, manda uma por vez com intervalo de
-// 20-60s por linha, respeita o cap do numero e para no meio se for pedido.
-//
-// O progresso vive em memoria de proposito: se o pm2 reiniciar no meio, o lote
-// morre junto — e melhor parar do que retomar sozinho um envio que ninguem esta
-// mais olhando.
-// ===========================================================================
-let _loteReenvio = { rodando: false, total: 0, feitos: 0, enviados: 0, pulados: 0, erros: 0,
-                     parar: false, iniciadoEm: 0, atual: '', linhas: [] };
-
-function _loteResumo() {
-  const r = _loteReenvio;
-  const faltam = Math.max(0, r.total - r.feitos);
-  return { rodando: r.rodando, total: r.total, feitos: r.feitos, enviados: r.enviados,
-           pulados: r.pulados, erros: r.erros, atual: r.atual, faltam,
-           // 40s e a media do intervalo (20-60s) — serve para a tela dizer quanto falta.
-           segundosRestantes: faltam * 40, iniciadoEm: r.iniciadoEm,
-           linhas: r.linhas.slice(-40) };
-}
-
-async function _rodaLoteReenvio(lista) {
-  const r = _loteReenvio;
-  try {
-    for (const item of lista) {
-      if (r.parar) { r.linhas.push('— interrompido por voce —'); break; }
-      r.atual = item.nome || item.msg_id;
-      let res;
-      try { res = await _reenviarUma(item.msg_id, { antiban: true }); }
-      catch (e) { res = { erro: String(e && e.message || e) }; }
-      r.feitos++;
-      if (res && res.ok) {
-        r.enviados++;
-        r.linhas.push('✓ ' + r.atual + (res.fila ? ' (na fila: a linha esta fora do ar)' : ''));
-      } else if (res && (res.travado || res.jaEntregue || res.capAtingido)) {
-        r.pulados++;
-        r.linhas.push('• ' + r.atual + ' — ' + res.erro);
-      } else {
-        r.erros++;
-        r.linhas.push('✗ ' + r.atual + ' — ' + ((res && res.erro) || 'falha'));
-      }
+    const m = await getRow("SELECT id, conversationId, text, type, mediaPath, status, deleted, our_number FROM messages WHERE id = ?", [msgId]);
+    if (!m || Number(m.deleted || 0) === 1 || Number(m.status || 0) >= 3) {
+      try { await deliveryWatch.dismiss(msgId, 'entregue'); } catch (e) {}
+      return res.status(409).json({ error: 'Mensagem ja confirmada ou inexistente', count: await deliveryWatch.countOpen() });
     }
-  } finally {
-    r.rodando = false; r.atual = '';
-    console.log('[resend-lote] fim: ' + r.enviados + ' enviada(s), ' + r.pulados + ' pulada(s), ' + r.erros + ' com erro.');
-  }
-}
+    const convo = await getRow("SELECT id, account, jid_account, whatsapp_jid FROM conversations WHERE id = ?", [m.conversationId]);
+    if (!convo) return res.status(409).json({ error: 'Conversa nao existe mais' });
 
-app.post('/api/delivery-alerts/resend-all', authenticateToken, async (req, res) => {
-  try {
-    if (_loteReenvio.rodando) return res.status(409).json({ error: 'Ja existe um reenvio em andamento.', ..._loteResumo() });
-    const abertos = await deliveryWatch.listOpen(500);
-    const lista = (abertos || []).map(a => ({ msg_id: a.msg_id, nome: a.conv_name || a.conv_phone || a.msg_id }));
-    if (!lista.length) return res.status(409).json({ error: 'Nao ha nada para reenviar.' });
-    _loteReenvio = { rodando: true, total: lista.length, feitos: 0, enviados: 0, pulados: 0, erros: 0,
-                     parar: false, iniciadoEm: Date.now(), atual: '', linhas: [] };
-    _rodaLoteReenvio(lista).catch(e => console.error('[resend-lote]', e && e.message));
-    console.log('[resend-lote] inicio: ' + lista.length + ' mensagem(ns) na fila.');
-    res.json({ ok: true, ..._loteResumo(), foraDoHorario: !antiban.isBusinessHours() });
+    // Linha dona: jid_account primeiro; se não houver, mapeia messages.our_number para a conta.
+    let linha = convo.jid_account || null;
+    if (!linha && m.our_number) {
+      try {
+        const w = await getRow("SELECT id FROM whatsapp_accounts WHERE number = ?", [m.our_number]);
+        if (w && w.id) linha = w.id;
+      } catch (e) {}
+    }
+    if (!linha) linha = convo.account;
+    if (!linha) return res.status(409).json({ error: 'Nao ha linha dona para esta conversa' });
+
+    const tipo = String(m.type || 'text');
+    let buffer = null, mimetype = null, fileName = null;
+    if (tipo !== 'text') {
+      let mp = m.mediaPath ? String(m.mediaPath) : '';
+      if (mp && !fs.existsSync(mp)) mp = path.join(MEDIA_DIR, path.basename(mp));
+      if (!mp || !fs.existsSync(mp)) return res.status(409).json({ error: 'Arquivo de midia nao esta mais no servidor' });
+      buffer = fs.readFileSync(mp);
+      fileName = path.basename(mp);
+      const ext = String(fileName.split('.').pop() || '').toLowerCase();
+      const MIMES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+        mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', ogg: 'audio/ogg', oga: 'audio/ogg',
+        mp3: 'audio/mpeg', m4a: 'audio/mp4', pdf: 'application/pdf', doc: 'application/msword',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xls: 'application/vnd.ms-excel',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+      mimetype = tipo === 'audio' ? 'audio/ogg' : (MIMES[ext] || 'application/octet-stream');
+    }
+
+    // Linha fora do ar não recusa (regra v508): entra na fila e sai sozinha quando ela voltar.
+    const aberta = !!(sessions[linha] && sessions[linha].ws && sessions[linha].ws.isOpen);
+    let novo;
+    if (!aberta) {
+      novo = await outbox.enqueue({ convoId: m.conversationId, account: linha,
+        kind: (tipo === 'text' ? 'text' : (tipo === 'audio' ? 'audio' : 'media')),
+        text: m.text || '', buffer, mimetype, fileName });
+    } else if (tipo === 'text') {
+      novo = await sendWhatsAppMessage(linha, m.conversationId, m.text || '');
+    } else if (tipo === 'audio') {
+      novo = await sendWhatsAppAudio(linha, m.conversationId, buffer);
+    } else {
+      novo = await sendWhatsAppMedia(linha, m.conversationId, buffer, mimetype, fileName);
+    }
+    // A mensagem nova entra pelo caminho normal de envio, portanto o vigia já a arma sozinho.
+    await deliveryWatch.dismiss(msgId, 'reenvio');
+    bustConversationsCache();
+    console.log('[resend] ' + msgId + ' (' + tipo + ') reenviado pela linha ' + linha + (aberta ? '' : ' (na fila)'));
+    res.json({ ok: true, novoId: (novo && novo.id) || null, linha, fila: !aberta, count: await deliveryWatch.countOpen() });
   } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/delivery-alerts/resend-all/status', authenticateToken, async (req, res) => {
-  try { res.json({ ..._loteResumo(), count: await deliveryWatch.countOpen() }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/delivery-alerts/resend-all/stop', authenticateToken, async (req, res) => {
-  _loteReenvio.parar = true;
-  res.json({ ok: true, ..._loteResumo() });
 });
 
 // 9. Conversations Routes: Send Message
@@ -2571,10 +2372,6 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       const isPos = posSet.size ? await userIsPos(req) : false;
       let convPos = posSet.has(convo.account);
       const lineOpen = isOpenLine(convo.account);
-      // [CANAL-CERTO v611] conversa do Instagram nao entra no roteamento por linha de
-      // WhatsApp. Era aqui que o account virava wa3/wa7 e o desvio do Direct (logo abaixo)
-      // deixava de ser acionado — a resposta saia por WhatsApp para um endereco inexistente.
-      const _ehIg = String((convo && convo.whatsapp_jid) || '').indexOf('ig:') === 0 || convo.account === 'ig';
       // v504: dono do endereço @lid manda. Se está travado na linha dona, o
       // roteamento por ambiente abaixo NÃO pode desviar — desviar era exatamente
       // o que produzia "enviado" que nunca chegava ao cliente.
@@ -2584,7 +2381,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
       // gravavam a troca no banco. Era o mesmo defeito do v525 por outra porta: a tela
       // dizia 2030 e o envio saía pelo 1554. Agora o desvio só existe para o que ele
       // realmente resolve: linha da conversa FORA DO AR.
-      if (_ehIg || _ownLock || lineOpen) { /* Instagram, ou linha da conversa conectada — ela envia */ }
+      if (_ownLock || lineOpen) { /* linha da conversa conectada — ela envia */ }
       else if (posSet.size && isPos) {
         if (!convPos || !lineOpen) {
           const posConn = [...posSet].find(isOpenLine);
@@ -2657,9 +2454,7 @@ app.post('/api/conversations/:id/messages', authenticateToken, async (req, res) 
     };
 
     // Instagram: envia pelo Direct e grava a mensagem
-    if (convo.account === 'ig' || String(convo.whatsapp_jid || '').indexOf('ig:') === 0) {
-      // [CANAL-CERTO v611] chave = endereco (ig:...), nao a conta. whatsapp_jid nunca muda;
-      // account ja foi trocado por rotina automatica e foi assim que o Direct saiu do ar.
+    if (convo.account === 'ig') {
       const recipientId = (convo.whatsapp_jid || '').replace(/^ig:/, '');
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       const msgId = 'm_' + Math.random().toString(36).substr(2, 9);
@@ -5762,36 +5557,10 @@ const dailyReports = require('./daily_reports');
 dailyReports.init({ posLineInfo, POS_STAGES, prazoHoras: dailyPrazoHoras }); // v519: janela = prazo configurado
 
 // Disparo manual (teste / re-geração do dia) — só Administrador.
-// v589 [GERAR-AGORA] — o botao "Gerar" do chip do relatorio.
-//
-// Antes so existia a geracao das 8h e um disparo manual que rodava os DOIS ambientes,
-// sem dizer quando terminava. Agora o pedido leva o ambiente escolhido no proprio chip
-// (Pre, Pos ou Ambos) e a tela consulta /status para saber a hora de reler o relatorio.
-let _relGerando = { rodando: false, env: '', iniciadoEm: 0, terminadoEm: 0, erro: '' };
-
 app.post('/api/reports/daily/run', authenticateToken, async (req, res) => {
   if (req.user && req.user.role === 'Vendedor') return res.status(403).json({ detail: 'Sem permissão' });
-  if (_relGerando.rodando) return res.status(409).json({ error: 'Já existe um relatório sendo gerado.', ..._relGerando });
-  // 'pre', 'pos' ou vazio (= os dois). Qualquer outra coisa vira "os dois".
-  const env = (req.body && ['pre', 'pos'].indexOf(String(req.body.env || '')) !== -1) ? String(req.body.env) : '';
-  _relGerando = { rodando: true, env, iniciadoEm: Date.now(), terminadoEm: 0, erro: '' };
-  setImmediate(async () => {
-    try {
-      const dia = dailyReports.hojeSPiso();
-      if (env === 'pre' || env === 'pos') await dailyReports.runOne(env, dia);
-      else await dailyReports.runDailyReports(dia);
-      _relGerando.terminadoEm = Date.now();
-      console.log('[daily-report] geração manual concluída (' + (env || 'pré e pós') + ').');
-    } catch (e) {
-      _relGerando.erro = String(e && e.message || e);
-      console.error('[daily-report] run manual:', _relGerando.erro);
-    } finally { _relGerando.rodando = false; }
-  });
-  res.status(202).json({ queued: true, ..._relGerando });
-});
-
-app.get('/api/reports/daily/run/status', authenticateToken, async (req, res) => {
-  res.json(_relGerando);
+  setImmediate(() => { dailyReports.runDailyReports().catch((e) => console.error('[daily-report] run manual:', e && e.message)); });
+  res.status(202).json({ queued: true });
 });
 // execucao2 (2026-07-25): prazo de análise do relatório (horas) — app_settings, default 48.
 async function dailyPrazoHoras() {
@@ -6226,14 +5995,6 @@ app.post('/api/ai/welcome-form-leads', authenticateToken, async (req, res) => {
         let convo = null;
         if (jidLead) convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [jidLead]);
         if (!convo) convo = await getRow("SELECT * FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
-        // [CANAL-CERTO v611] Quem chega pelo Instagram e atendido PELO INSTAGRAM.
-        // Medido em 14/08/2026: 43 conversas ig:, 71 mensagens enviadas por linha de
-        // WhatsApp desde 04/07 e ZERO entregues. O lead do Instagram nao tem telefone
-        // (25 leads, nenhum com numero) e a Meta nao fornece esse dado por API.
-        if (String(jidLead).indexOf('ig:') === 0 || String((convo && convo.whatsapp_jid) || '').indexOf('ig:') === 0) {
-          console.log('[canal-certo] "' + (l.name || l.id) + '": lead do Instagram — nao entra na fila de WhatsApp.');
-          continue;
-        }
         if (!convo) {
           const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
           const nm = l.name || digits; const av = String(nm).slice(0, 2).toUpperCase();
@@ -6286,14 +6047,6 @@ async function welcomeAutoSweep() {
         let convo = null;
         if (jidLead) convo = await getRow("SELECT * FROM conversations WHERE whatsapp_jid = ? LIMIT 1", [jidLead]);
         if (!convo) convo = await getRow("SELECT * FROM conversations WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(','') LIKE ? LIMIT 1", ['%' + tail]);
-        // [CANAL-CERTO v611] Quem chega pelo Instagram e atendido PELO INSTAGRAM.
-        // Medido em 14/08/2026: 43 conversas ig:, 71 mensagens enviadas por linha de
-        // WhatsApp desde 04/07 e ZERO entregues. O lead do Instagram nao tem telefone
-        // (25 leads, nenhum com numero) e a Meta nao fornece esse dado por API.
-        if (String(jidLead).indexOf('ig:') === 0 || String((convo && convo.whatsapp_jid) || '').indexOf('ig:') === 0) {
-          console.log('[canal-certo] "' + (l.name || l.id) + '": lead do Instagram — nao entra na fila de WhatsApp.');
-          continue;
-        }
         if (!convo) {
           const convoId = 'c_' + Math.random().toString(36).substr(2, 9);
           const nm = l.name || digits; const av = String(nm).slice(0, 2).toUpperCase();
@@ -6401,92 +6154,30 @@ async function aiFollowUpSweep() {
     const { posSet: _posLines } = await getSaleLineFilter(); // IA não atua nas linhas pós (2030)
     const convs = await allRows("SELECT id, account, phone, whatsapp_jid FROM conversations WHERE (archived IS NULL OR archived = 0)");
     const norm = (p) => String(p || '').replace(/\D/g, '');
-
-    // =======================================================================
-    // v588 [FILA-JUSTA] — quem espera ha mais tempo vai primeiro.
-    //
-    // Antes a consulta nao tinha ORDER BY: o banco devolvia os leads na ordem em
-    // que foram GRAVADOS, entao quem entrou primeiro no CRM saia primeiro. Um card
-    // de 07/08 tinha 197 leads na frente e so seria alcancado seis dias depois.
-    // Agora a fila e ordenada pela ultima mensagem da conversa: o mais esquecido
-    // vai na frente, e quem acabou de receber follow-up cai para o fim sozinho.
-    //
-    // De quebra, a ultima mensagem de cada conversa passa a ser lida de UMA vez
-    // (uma agregacao) em vez de uma consulta por lead dentro do laco.
-    // =======================================================================
-    const ultimaPorConversa = new Map();
-    try {
-      const _u = await allRows(
-        "SELECT m.conversationId AS cid, m.`from` AS de, m.timestamp AS ts FROM messages m " +
-        "JOIN (SELECT conversationId, MAX(timestamp) AS mx FROM messages GROUP BY conversationId) x " +
-        "  ON x.conversationId = m.conversationId AND x.mx = m.timestamp"
-      );
-      for (const r of (_u || [])) if (!ultimaPorConversa.has(r.cid)) ultimaPorConversa.set(r.cid, r);
-    } catch (e) { console.error('[IA follow-up] mapa da ultima mensagem:', e && e.message); }
-
-    // Monta a lista de quem esta REALMENTE pronto, com a espera ja calculada.
-    const prontos = [];
-    for (const l of leads) {
-      // O gate de coluna so vale para o Tratamento; lead em 'novo' entra sempre.
-      if (l.stage !== 'novo') {
-        const _q = (Number(l.conv_msg_count) || 0) >= minMessages && (!requireClientMsg || (Number(l.conv_client_msg_count) || 0) >= 1);
-        const _col = _q ? 3 : 4;
-        if ((_col === 3 && !fuCol3) || (_col === 4 && !fuCol4)) continue;
-      }
-      const lt = norm(l.phone).slice(-8);
-      const conv = convs.find(c =>
-        (l.whatsapp_jid && c.whatsapp_jid && c.whatsapp_jid === l.whatsapp_jid) ||
-        (lt.length === 8 && norm(c.phone).slice(-8) === lt)
-      );
-      if (!conv || !conv.account) continue;
-      if (_posLines.has(conv.account)) continue;              // pos-venda (2030): sem follow-up da IA
-      const last = ultimaPorConversa.get(conv.id);
-      if (!last || last.de !== 'me') continue;                // so quando NOS falamos por ultimo
-      if (Date.now() - (last.ts || 0) < horasMs) continue;    // respeita o intervalo minimo
-      prontos.push({ l, conv, esperaDesde: Number(last.ts) || 0 });
-    }
-    prontos.sort((a, b) => a.esperaDesde - b.esperaDesde);    // mais esquecido primeiro
-
-    // -----------------------------------------------------------------------
-    // RITMO: espalhado pelo dia, nao em rajada.
-    // A cota da rodada e o que falta dividido pelas rodadas que ainda cabem ate o
-    // fim da janela. Com a fila grande, sai mais por rodada; com a fila curta, sai
-    // pouco e devagar. O teto existe para nunca virar disparo em massa.
-    // -----------------------------------------------------------------------
-    const TETO_RODADA = 30;
-    let porRodada = TETO_RODADA;
-    try {
-      const _ag = new Date();
-      const minutosAteOFim = Math.max(30, (17 - _ag.getHours()) * 60 - _ag.getMinutes());
-      const rodadasQueFaltam = Math.max(1, Math.floor(minutosAteOFim / 30));
-      porRodada = Math.max(1, Math.min(TETO_RODADA, Math.ceil(prontos.length / rodadasQueFaltam)));
-    } catch (e) {}
-
-    // Alterna entre as linhas: sem isto, uma linha com 229 leads na fila consumia a
-    // rodada inteira e as outras quatro ficavam paradas. Com o rodizio, todas andam.
-    const porLinha = new Map();
-    for (const p of prontos) {
-      if (!porLinha.has(p.conv.account)) porLinha.set(p.conv.account, []);
-      porLinha.get(p.conv.account).push(p);
-    }
-    const fila = [];
-    { const baldes = [...porLinha.values()];
-      for (let i = 0; fila.length < prontos.length; i++) {
-        let mexeu = false;
-        for (const b of baldes) if (b[i]) { fila.push(b[i]); mexeu = true; }
-        if (!mexeu) break;
-      } }
-
-    const linhasNoTeto = new Set();   // linha que bateu o cap: sai da rodada, sem derrubar as outras
+    // ANTI-SPAM: no máximo PER_RUN_CAP follow-ups por rodada (a cada 30 min) e com intervalo
+    // aleatório entre envios. Evita disparar 100+ mensagens de uma vez (risco de ban do WhatsApp).
+    const PER_RUN_CAP = 12;
     let processed = 0;
-    console.log(`[IA follow-up] fila: ${prontos.length} esperando; cota desta rodada: ${porRodada}.`);
-    for (const _item of fila) {
-      const l = _item.l, conv = _item.conv;
-      if (processed >= porRodada) { console.log(`[IA follow-up] cota da rodada (${porRodada}) cumprida; o restante segue na proxima.`); break; }
-      if (linhasNoTeto.has(conv.account)) continue;
+    for (const l of leads) {
+      if (processed >= PER_RUN_CAP) { console.log(`[IA follow-up] limite da rodada (${PER_RUN_CAP}) atingido; o restante segue na próxima.`); break; }
       try {
-        // v588: coluna, conversa, ultima mensagem e intervalo ja foram conferidos ao
-        // montar a fila la em cima — aqui so sobra o que precisa ser relido na hora do envio.
+        // pipeline431: ticks de coluna do follow-up (Henry) — col3 = regra do Resgate; col4 = demais
+        // fix-followup-novo: o gate de coluna só vale para o Tratamento; lead em 'novo' entra sempre.
+        if (l.stage !== 'novo') {
+          const _q = (Number(l.conv_msg_count) || 0) >= minMessages && (!requireClientMsg || (Number(l.conv_client_msg_count) || 0) >= 1);
+          const _col = _q ? 3 : 4;
+          if ((_col === 3 && !fuCol3) || (_col === 4 && !fuCol4)) continue;
+        }
+        const lt = norm(l.phone).slice(-8);
+        const conv = convs.find(c =>
+          (l.whatsapp_jid && c.whatsapp_jid && c.whatsapp_jid === l.whatsapp_jid) ||
+          (lt.length === 8 && norm(c.phone).slice(-8) === lt)
+        );
+        if (!conv || !conv.account) continue;
+        if (_posLines.has(conv.account)) continue; // pós-venda (2030): sem follow-up da IA
+        const last = await getRow("SELECT `from`, timestamp FROM messages WHERE conversationId = ? ORDER BY timestamp DESC LIMIT 1", [conv.id]);
+        if (!last || last.from !== 'me') continue;              // só quando NÓS falamos por último (cliente não respondeu)
+        if (Date.now() - (last.timestamp || 0) < horasMs) continue; // espaça os envios: ≥ fu_hours desde a última msg
         // (removido o guard ai_fu_last > last.timestamp: como o próprio follow-up vira a última msg,
         //  ele bloqueava permanentemente o 2º envio. A cadência já é controlada pela janela acima
         //  + last.from==='me' + ai_fu_count < fu_max.)
@@ -6497,21 +6188,11 @@ async function aiFollowUpSweep() {
         if (!freshNow || freshNow.archived || (freshNow.stage !== 'tratamento' && freshNow.stage !== 'novo')) { console.log(`[IA follow-up] "${l.name}": pulado (estágio agora = ${freshNow && freshNow.stage}).`); continue; }
         // execucao1 Sprint1 (2026-07-25): re-checa o kill-switch na hora do envio.
         if (freshNow.bot_ativo === 0) { console.log(`[IA follow-up] "${l.name}": pulado (bot desativado no lead).`); continue; }
-        // [CANAL-CERTO v611] Quem chega pelo Instagram e atendido PELO INSTAGRAM.
-        // Medido em 14/08/2026: 43 conversas ig:, 71 mensagens enviadas por linha de
-        // WhatsApp desde 04/07 e ZERO entregues. O lead do Instagram nao tem telefone
-        // (25 leads, nenhum com numero) e a Meta nao fornece esse dado por API.
-        if (String((conv && conv.whatsapp_jid) || '').indexOf('ig:') === 0) {
-          console.log('[canal-certo] "' + l.name + '": lead do Instagram — follow-up segue pelo Direct.');
-          continue;
-        }
         const tentativa = (l.ai_fu_count || 0) + 1;
         const texto = await getFollowUpReply(conv.id, l.name, tentativa);
         if (!texto) continue;
         const _gate = await antiban.canSendProactive(conv.account); // cap diário/horário + warm-up do número
-        // v588: cap de UMA linha tira so aquela linha da rodada. Antes era um break e
-        // as outras quatro linhas paravam junto, mesmo com folga de sobra.
-        if (!_gate.ok) { console.log(`[IA follow-up] linha ${conv.account}: ${_gate.reason} — segue com as outras linhas.`); linhasNoTeto.add(conv.account); continue; }
+        if (!_gate.ok) { console.log(`[IA follow-up] número ${conv.account}: ${_gate.reason} — pausando a rodada.`); break; }
         await antiban.pace(conv.account);                           // intervalo + jitter (20–60s) anti-rajada
         await sendWhatsAppMessage(conv.account, conv.id, antiban.varyText(texto)); // texto variado
         await antiban.recordSend(conv.account);
@@ -6519,8 +6200,7 @@ async function aiFollowUpSweep() {
         await runQuery("UPDATE leads SET ai_fu_count = ?, ai_fu_last = ? WHERE id = ?", [tentativa, fuTs, l.id]);
         try { await runQuery("INSERT INTO followup_log (ts, lead_id, lead_name) VALUES (?, ?, ?)", [fuTs, l.id, l.name]); } catch (e) {}
         processed++;
-        const _diasParado = Math.round((Date.now() - _item.esperaDesde) / 86400000);
-        console.log(`[IA follow-up] "${l.name}": tentativa ${tentativa} enviada (${processed}/${porRodada}) — parado ha ${_diasParado} dia(s).`);
+        console.log(`[IA follow-up] "${l.name}": tentativa ${tentativa} enviada (${processed}/${PER_RUN_CAP}).`);
       } catch (e) { console.error('[IA follow-up]', l && l.name, e && e.message); }
     }
   } catch (e) { console.error('[IA follow-up sweep]', e && e.message); }
@@ -6714,14 +6394,6 @@ async function novoCadenceSweep() {
             if (_accRow && _accRow.number) await runQuery("UPDATE leads SET account = ?, recv_number = ? WHERE id = ?", [conv.account, _accRow.number, l.id]);
           } catch (e) {}
           console.log('[cadência novo] "' + l.name + '": conversa criada na linha ' + conv.account + ' — primeiro contato da IA.');
-        }
-        // [CANAL-CERTO v611] Quem chega pelo Instagram e atendido PELO INSTAGRAM.
-        // Medido em 14/08/2026: 43 conversas ig:, 71 mensagens enviadas por linha de
-        // WhatsApp desde 04/07 e ZERO entregues. O lead do Instagram nao tem telefone
-        // (25 leads, nenhum com numero) e a Meta nao fornece esse dado por API.
-        if (String((conv && conv.whatsapp_jid) || '').indexOf('ig:') === 0) {
-          console.log('[canal-certo] "' + l.name + '": lead do Instagram — cadencia nao usa WhatsApp.');
-          continue;
         }
         await sendWhatsAppMessage(conv.account, conv.id, antiban.varyText(texto));
         await antiban.recordSend(conv.account);

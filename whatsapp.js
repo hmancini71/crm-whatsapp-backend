@@ -34,6 +34,36 @@ function fireTranscricaoAudio(msgId, mediaPath) {
 // ids de mensagens enviadas pela IA (o eco fromMe delas NÃO move o card — a IA move quando concluir)
 const _aiSentIds = new Set();
 
+// ---------------------------------------------------------------------------
+// v584 [IA-UMA-RESPOSTA] — rajada do cliente não vira rajada nossa.
+//
+// Caso Roberto Ferri (10/08 15:23): ele mandou "Olá! Gostaria de saber mais" e
+// "Como fazer" no mesmo minuto. Cada mensagem entrou pelo handler e cada uma
+// chamou o Gemini por conta própria, em paralelo. Oito segundos depois ele tinha
+// DUAS saudações diferentes, uma dizendo "Obrigado pelo contato" e a outra
+// "Agradeço o seu contato". Aconteceu em 20 conversas nos últimos 15 dias.
+//
+// Guardar no banco não resolve: quando a segunda chamada consulta, a primeira
+// ainda não gravou nada (a resposta do modelo demora alguns segundos). A reserva
+// precisa ser em memória, feita ANTES de chamar o modelo.
+//
+// A reserva expira sozinha em IA_JANELA_MS — sem 'finally' para esquecer de
+// liberar. Se a geração falhar, a próxima mensagem do cliente tenta de novo
+// depois da janela.
+const IA_JANELA_MS = 90 * 1000;
+const _iaReservas = new Map(); // conversationId -> quando expira
+function _iaReserva(convoId) {
+  if (!convoId) return true;
+  const agora = Date.now();
+  const ate = _iaReservas.get(convoId) || 0;
+  if (ate > agora) return false;                 // já tem resposta a caminho
+  _iaReservas.set(convoId, agora + IA_JANELA_MS);
+  if (_iaReservas.size > 2000) {                 // faxina barata
+    for (const [k, v] of _iaReservas) if (v <= agora) _iaReservas.delete(k);
+  }
+  return true;
+}
+
 // Mensagens-padrão dos anúncios do META (click-to-WhatsApp). Ao chegar uma delas, o lead é
 // classificado como "Meta Ads" (tracking.channel). Lista informada pelo Henry.
 const META_AD_MESSAGES = [
@@ -962,7 +992,9 @@ async function connectWhatsApp(id, isReconnect = false, pairPhone = null) {
           );
           // execucao1 Sprint1 (2026-07-25): bot_ativo=0 no lead desliga a IA para ele (kill-switch).
           if (aiLead && aiLead.bot_ativo === 0) console.log(`[IA novo-lead] "${aiLead.name}": bot desativado no lead (bot_ativo=0) — sem resposta automática.`);
-          if (aiLead && aiLead.bot_ativo !== 0 && !(await isPosLine(id))) {
+          // v584: a reserva é a ÚLTIMA condição de propósito — só reserva quem realmente
+          // ia responder, senão uma mensagem de linha pós-venda queimaria a janela do pré.
+          if (aiLead && aiLead.bot_ativo !== 0 && !(await isPosLine(id)) && _iaReserva(convoId)) {
             const ai = await getNovoLeadReply(convoId, aiLead.name);
             if (ai && ai.reply) {
               // Fora do horário? Seg–Sex 9h–18h, Sáb 9h–13h, Dom fechado (fuso de São Paulo).
@@ -1403,6 +1435,9 @@ async function processNovoBacklog(limit) {
       const sock = sessions[account];
       if (!sock) { skipped.push((lead.name || lead.id) + ' — linha desconectada'); done++; continue; }
       const jid = sendableJid(convo);
+      // v584 [IA-UMA-RESPOSTA]: mesma reserva do handler de mensagem. Sem isto, o backlog
+      // podia disparar uma resposta para uma conversa que JÁ tinha uma a caminho.
+      if (!_iaReserva(convo.id)) { skipped.push((lead.name || lead.id) + ' — já há resposta a caminho'); done++; continue; }
       const ai = await getNovoLeadReply(convo.id, lead.name);
       if (!ai || !ai.reply) { skipped.push((lead.name || lead.id) + ' — IA não retornou resposta'); done++; continue; }
       let outOfHours = false;

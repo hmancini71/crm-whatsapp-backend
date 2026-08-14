@@ -20,6 +20,37 @@ db.run("PRAGMA cache_size = -65536");
 db.run("PRAGMA mmap_size = 268435456");
 db.run("PRAGMA temp_store = MEMORY");
 
+// [API-V1] Chaves de parceiro da API de SAIDA. Uma chave por agencia, com escopos proprios e
+// revogacao independente — a X-API-Key da integracao de ENTRADA continua sendo outra coisa e nao
+// da acesso a leitura nenhuma. A chave e guardada em HASH (sha256): se o banco vazar, ninguem
+// consegue reconstruir a chave; ela e mostrada UMA vez, na criacao.
+db.run(`CREATE TABLE IF NOT EXISTS api_partner_keys (
+  id TEXT PRIMARY KEY,
+  nome TEXT NOT NULL,
+  key_hash TEXT NOT NULL,
+  key_prefixo TEXT,
+  escopos TEXT NOT NULL DEFAULT 'leads:ler,metricas:ler',
+  ativa INTEGER NOT NULL DEFAULT 1,
+  criada_em TEXT,
+  criada_por TEXT,
+  ultimo_uso_em TEXT,
+  revogada_em TEXT
+)`, () => {});
+db.run("CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_partner_keys(key_hash)", () => {});
+// Registro de acesso: sem isto nao ha como responder "o que essa agencia baixou e quando".
+db.run(`CREATE TABLE IF NOT EXISTS api_access_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  key_id TEXT,
+  parceiro TEXT,
+  rota TEXT,
+  parametros TEXT,
+  registros INTEGER,
+  status INTEGER,
+  ip TEXT
+)`, () => {});
+db.run("CREATE INDEX IF NOT EXISTS idx_api_log_ts ON api_access_log(ts)", () => {});
+
 // ── Regra de origem "Google Ads" ────────────────────────────────────────────
 // A mensagem inicial pré-preenchida pelo clique vindo do site (campanhas do
 // Google Ads) chega SEMPRE com esta frase exata. Quando a 1ª mensagem do cliente

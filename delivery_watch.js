@@ -46,6 +46,48 @@ async function ensureTable() {
     resolved_by TEXT
   )`);
   await runQuery("CREATE INDEX IF NOT EXISTS idx_delivery_alerts_open ON delivery_alerts (resolved_at, sent_at)");
+  // v584: TRAVA DE REENVIO. Caso Roberto Ferri (12/08): ele recebeu QUATRO vezes a
+  // mesma frase. A causa era o reenvio automatico em lote: reenviava, a copia nova
+  // tambem ficava sem recibo, 3h depois virava alerta de novo e era reenviada outra
+  // vez — corrente sem fim, com o cliente vendo tudo. Aqui cada elo fica registrado:
+  //   novo_msg_id = a copia que saiu   |   origem_msg_id = a mensagem reenviada
+  // Com isso o endpoint sabe responder duas perguntas antes de reenviar qualquer coisa:
+  //   1) esta mensagem JA foi reenviada alguma vez?  -> nao reenvia de novo
+  //   2) esta mensagem JA E o resultado de um reenvio? -> nao reenvia a copia da copia
+  await runQuery(`CREATE TABLE IF NOT EXISTS resend_chain (
+    novo_msg_id TEXT PRIMARY KEY,
+    origem_msg_id TEXT,
+    conversation_id TEXT,
+    criado_em INTEGER
+  )`);
+  await runQuery("CREATE INDEX IF NOT EXISTS idx_resend_chain_origem ON resend_chain (origem_msg_id)");
+}
+
+// Devolve null quando pode reenviar, ou o MOTIVO (texto para a tela) quando nao pode.
+// Chamado ANTES de qualquer envio — vale para o clique no menu, para o painel de
+// entregas e para qualquer rotina que use a mesma rota.
+async function motivoParaNaoReenviar(msgId) {
+  if (!msgId) return 'Mensagem invalida';
+  const jaFoi = await getRow("SELECT novo_msg_id, criado_em FROM resend_chain WHERE origem_msg_id = ? LIMIT 1", [msgId]);
+  if (jaFoi) {
+    // Mensagem curta de proposito: o painel de entregas mostra o motivo dentro do
+    // proprio botao, e texto longo fica cortado.
+    const q = jaFoi.criado_em
+      ? new Date(Number(jaFoi.criado_em)).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : '';
+    return 'Ja reenviada' + (q ? ' em ' + q : '') + '. Uma tentativa por mensagem.';
+  }
+  const eCopia = await getRow("SELECT origem_msg_id FROM resend_chain WHERE novo_msg_id = ? LIMIT 1", [msgId]);
+  if (eCopia) return 'Esta mensagem ja e um reenvio. Nao reenviamos copia de copia.';
+  return null;
+}
+
+async function registraReenvio(origemMsgId, novoMsgId, convoId) {
+  if (!origemMsgId || !novoMsgId) return;
+  await runQuery(
+    "INSERT OR IGNORE INTO resend_chain (novo_msg_id, origem_msg_id, conversation_id, criado_em) VALUES (?, ?, ?, ?)",
+    [novoMsgId, origemMsgId, convoId || null, Date.now()]
+  );
 }
 
 function _clear(msgId) {
@@ -184,4 +226,5 @@ async function dismissAll() {
   return (r && r.changes) || 0;
 }
 
-module.exports = { init, arm, disarm, listOpen, countOpen, dismiss, dismissAll, WATCH_MS };
+module.exports = { init, arm, disarm, listOpen, countOpen, dismiss, dismissAll, WATCH_MS,
+  motivoParaNaoReenviar, registraReenvio };

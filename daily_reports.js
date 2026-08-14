@@ -142,8 +142,66 @@ function montaContactMap(picked) {
   return map;
 }
 
-function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
+// v599 (pedido do Henry, 13/08): link para o card, ao lado do telefone.
+//
+// O relatório diz quem procurar; faltava o caminho até lá. Sem isso, quem lê precisa
+// copiar o nome, ir ao Pipeline e caçar o card entre 2.500. O link é o endereço do
+// CRM com o id do lead — funciona clicado na tela E no PDF (que costuma ser lido no
+// celular, longe do board).
+//
+// O id vem do BANCO, como o telefone e as mensagens. O modelo nunca gera identificador.
+const BASE_CRM = 'https://eccere.com.br/leads/app/pipeline';
+
+function montaLinkMap(picked) {
+  const map = {};
+  for (const item of picked) {
+    const l = item.lead || {};
+    const key = String(l.name || '').trim().toLowerCase();
+    if (!key || map[key] !== undefined) continue;
+    map[key] = l.id ? (BASE_CRM + '#lead=' + encodeURIComponent(l.id)) : null;
+  }
+  return map;
+}
+
+// v598 (pedido do Henry, 13/08): as ÚLTIMAS MENSAGENS de cada lead entram no relatório.
+//
+// Antes o card trazia só a leitura da IA — situação, pendência, próximo passo. Boa para
+// decidir, mas quem vai ligar precisava abrir o WhatsApp para lembrar o que foi dito.
+// Agora as últimas trocas vêm junto, e assim o relatório se sustenta sozinho: dá para
+// ler no celular, no PDF, sem o CRM aberto.
+//
+// O texto vem do BANCO, nunca do modelo — o mesmo cuidado do contato entre parênteses.
+// Resumo a IA pode errar; transcrição de conversa, não.
+const ULTIMAS_MSGS = 4;        // quantas trocas mostrar por lead
+const MAX_CHARS_MSG = 220;     // o suficiente para reconhecer o assunto sem virar parede de texto
+
+function montaUltimasMsgs(picked) {
+  const map = {};
+  for (const item of picked) {
+    const l = item.lead || {};
+    const key = String(l.name || '').trim().toLowerCase();
+    if (!key || map[key] !== undefined) continue;   // nome duplicado: o primeiro vence
+    const msgs = (item.msgs || []).slice(-ULTIMAS_MSGS);
+    map[key] = msgs.map(m => {
+      let t = String(m.text || '').replace(/\s+/g, ' ').trim();
+      if (!t) t = '(mídia sem texto)';
+      if (t.length > MAX_CHARS_MSG) t = t.slice(0, MAX_CHARS_MSG - 1) + '…';
+      let hora = '';
+      try {
+        hora = new Intl.DateTimeFormat('pt-BR', {
+          timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+        }).format(new Date(Number(m.timestamp) || 0)).replace(',', '');
+      } catch (e) {}
+      return { quem: m.from === 'me' ? 'Nós' : 'Cliente', texto: t, hora };
+    });
+  }
+  return map;
+}
+
+function montaMarkdown(env, dia, itens, total, contactMap, sugestoes, msgsMap, linkMap) {
   contactMap = contactMap || {};
+  msgsMap = msgsMap || {};
+  linkMap = linkMap || {};
   const label = env === 'pos' ? 'Pós-venda' : 'Pré-venda';
   itens.sort((a, b) => (b.temperatura_0_100 || 0) - (a.temperatura_0_100 || 0));
   const q = itens.filter(i => (i.temperatura_0_100 || 0) >= 70).length;
@@ -173,8 +231,14 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
   for (const i of itens) {
     const t = Number(i.temperatura_0_100) || 0;
     const ico = t >= 70 ? '🔥' : (t >= 40 ? '🌤️' : '❄️');
-    const contato = contactMap[String(i.lead || '').trim().toLowerCase()];
-    linhas.push('## ' + ico + ' ' + t + '° — ' + (i.lead || '(sem nome)') + (contato ? ' (' + contato + ')' : ''));
+    const chaveLead = String(i.lead || '').trim().toLowerCase();
+    const contato = contactMap[chaveLead];
+    // v599: o link fica logo depois do contato — na mesma linha do nome, que é onde
+    // o olho já está quando decide "vou falar com este".
+    const link = linkMap[chaveLead];
+    linhas.push('## ' + ico + ' ' + t + '° — ' + (i.lead || '(sem nome)')
+      + (contato ? ' (' + contato + ')' : '')
+      + (link ? ' [↗ abrir card](' + link + ')' : ''));
     if (i.situacao) linhas.push('- **Situação:** ' + i.situacao);
     if (i.pendencia) linhas.push('- **Pendência:** ' + i.pendencia);
     if (i.proximo_passo) linhas.push('- **Próximo passo:** ' + i.proximo_passo);
@@ -182,6 +246,15 @@ function montaMarkdown(env, dia, itens, total, contactMap, sugestoes) {
     const amb = ambDe(i);
     if (amb && amb !== env) {
       linhas.push('- **⚠️ Ambiente:** a conversa indica ' + (amb === 'pos' ? 'PÓS-VENDA' : 'PRÉ-VENDA') + ' — este lead está no ambiente ' + (env === 'pos' ? 'PÓS-venda' : 'PRÉ-venda') + ' (verificar transferência).');
+    }
+    // v598: as últimas trocas, na ordem em que aconteceram. Fecham o card: quem lê já
+    // sabe o que dizer sem precisar abrir a conversa.
+    const ult = msgsMap[String(i.lead || '').trim().toLowerCase()];
+    if (ult && ult.length) {
+      linhas.push('- **Últimas mensagens:**');
+      for (const m of ult) {
+        linhas.push('    - `' + m.hora + '` **' + m.quem + ':** ' + m.texto);
+      }
     }
     linhas.push('');
   }
@@ -261,7 +334,7 @@ async function runOne(env, dia) {
         sugestoes = await withHardDeadline(callAI(cfg, model, 2000, SUGG_SYSTEM, resumo), 'propostas e sugestões');
       } catch (e) { console.error('[daily-report] sugestões falharam (relatório sai sem a seção):', e && e.message); sugestoes = ''; }
     }
-    const md = montaMarkdown(env, dia, evid, total, montaContactMap(picked), sugestoes);
+    const md = montaMarkdown(env, dia, evid, total, montaContactMap(picked), sugestoes, montaUltimasMsgs(picked), montaLinkMap(picked));
     await setReport(id, { status: 'done', progress: 'concluído', result: md, error: null });
     console.log('[daily-report]', type, dia, 'concluído:', evid.length, 'leads.');
     return id;
@@ -298,4 +371,5 @@ function getDaily(id) {
   return getRow("SELECT * FROM ai_reports WHERE id = ? AND type IN ('daily-pre','daily-pos')", [id]);
 }
 
-module.exports = { init, runDailyReports, listDaily, latestDaily, getDaily, hojeSPiso };
+// v589: runOne exposto para o botao "Gerar" poder rodar SO o ambiente escolhido no chip.
+module.exports = { init, runDailyReports, runOne, listDaily, latestDaily, getDaily, hojeSPiso };
